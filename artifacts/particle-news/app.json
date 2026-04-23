@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "Particle News",
-    "slug": "particle-news",
+    "name": "iReader",
+    "slug": "ireader",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "particle-news",
+    "scheme": "ireader",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "splash": {
@@ -14,9 +14,12 @@
       "backgroundColor": "#0A0A0A"
     },
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "bundleIdentifier": "com.ireader.app"
     },
-    "android": {},
+    "android": {
+      "package": "com.ireader.app"
+    },
     "web": {
       "favicon": "./assets/images/icon.png",
       "backgroundColor": "#0A0A0A"

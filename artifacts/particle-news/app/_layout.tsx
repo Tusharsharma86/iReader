@@ -40,6 +40,15 @@ function RootLayoutNav() {
       }}
     >
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+      <Stack.Screen
+        name="reader"
+        options={{
+          headerShown: false,
+          presentation: "modal",
+          animation: "slide_from_bottom",
+          contentStyle: { backgroundColor: "#0A0A0A" },
+        }}
+      />
     </Stack>
   );
 }

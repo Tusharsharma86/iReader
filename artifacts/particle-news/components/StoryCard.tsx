@@ -1,7 +1,7 @@
 import { Feather } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import * as Haptics from "expo-haptics";
-import * as WebBrowser from "expo-web-browser";
+import { useRouter } from "expo-router";
 import React, { useEffect, useState } from "react";
 import {
   Platform,
@@ -49,6 +49,7 @@ export function StoryCardView({
   index: number;
 }) {
   const colors = useColors();
+  const router = useRouter();
   const { isSaved, toggle } = useSaved();
   const [mode, setMode] = useState<SummaryMode>("keyHighlights");
   const saved = isSaved(story.id);
@@ -228,8 +229,21 @@ export function StoryCardView({
           {story.sources[0]?.url ? (
             <Pressable
               onPress={() => {
-                const url = story.sources[0]?.url;
-                if (url) WebBrowser.openBrowserAsync(url).catch(() => {});
+                const src = story.sources[0];
+                if (!src?.url) return;
+                if (Platform.OS !== "web") {
+                  Haptics.selectionAsync().catch(() => {});
+                }
+                router.push({
+                  pathname: "/reader",
+                  params: {
+                    url: src.url,
+                    image: story.imageUrl ?? "",
+                    headline: story.headline,
+                    source: src.name,
+                    category: story.category ?? "",
+                  },
+                });
               }}
               style={({ pressed }) => [
                 styles.iconButton,

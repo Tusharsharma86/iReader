@@ -17,8 +17,9 @@ import Animated, {
 
 import { PerspectiveBar } from "@/components/PerspectiveBar";
 import { useColors } from "@/hooks/useColors";
+import { useImageTint } from "@/hooks/useImageTint";
 import { useSaved } from "@/contexts/SavedContext";
-import type { StoryCard as StoryCardType } from "@/lib/api";
+import { proxiedImageUrl, type StoryCard as StoryCardType } from "@/lib/api";
 
 type SummaryMode = "fiveWs" | "eli5" | "keyHighlights";
 
@@ -50,6 +51,8 @@ export function StoryCardView({
 }) {
   const colors = useColors();
   const router = useRouter();
+  const proxiedImage = proxiedImageUrl(story.imageUrl);
+  const tint = useImageTint(proxiedImage);
   const { isSaved, toggle } = useSaved();
   const [mode, setMode] = useState<SummaryMode>("keyHighlights");
   const saved = isSaved(story.id);
@@ -66,16 +69,16 @@ export function StoryCardView({
       style={[
         styles.card,
         {
-          backgroundColor: colors.card,
-          borderColor: colors.cardBorder,
+          backgroundColor: tint?.cardBg ?? colors.card,
+          borderColor: tint?.border ?? colors.cardBorder,
           borderRadius: colors.radius,
         },
       ]}
     >
-      {story.imageUrl ? (
+      {proxiedImage ? (
         <View style={styles.imageWrap}>
           <Image
-            source={{ uri: story.imageUrl }}
+            source={{ uri: proxiedImage }}
             style={styles.image}
             contentFit="cover"
             transition={300}
@@ -165,7 +168,10 @@ export function StoryCardView({
           {bullets.map((b, i) => (
             <View key={i} style={styles.bulletRow}>
               <View
-                style={[styles.bulletDot, { backgroundColor: colors.primary }]}
+                style={[
+                  styles.bulletDot,
+                  { backgroundColor: tint?.accent ?? colors.primary },
+                ]}
               />
               <Text
                 style={[styles.bulletText, { color: colors.foreground }]}

@@ -18,7 +18,7 @@ import Animated, { FadeInDown } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useColors } from "@/hooks/useColors";
-import { fetchArticle } from "@/lib/api";
+import { fetchArticle, proxiedImageUrl } from "@/lib/api";
 
 function tryHostname(url: string): string {
   try {
@@ -137,7 +137,7 @@ export default function ReaderScreen() {
         {image ? (
           <View style={styles.heroWrap}>
             <Image
-              source={{ uri: image }}
+              source={{ uri: proxiedImageUrl(image) ?? image }}
               style={styles.hero}
               contentFit="cover"
               transition={300}

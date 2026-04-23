@@ -383,4 +383,35 @@ router.get("/article", async (req, res) => {
   }
 });
 
+router.get("/image", async (req, res) => {
+  const url = String(req.query["url"] ?? "");
+  if (!url || !/^https?:\/\//i.test(url)) {
+    res.status(400).send("Invalid url");
+    return;
+  }
+  try {
+    const upstream = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+      },
+    });
+    if (!upstream.ok || !upstream.body) {
+      res.status(upstream.status || 502).send("Upstream image failed");
+      return;
+    }
+    const contentType = upstream.headers.get("content-type") ?? "image/jpeg";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    res.end(buf);
+  } catch (err) {
+    req.log.warn({ err }, "image proxy failed");
+    res.status(502).send("Image proxy failed");
+  }
+});
+
 export default router;

@@ -35,6 +35,16 @@ function getBaseUrl(): string {
   return "";
 }
 
+import { Platform } from "react-native";
+
+export function proxiedImageUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  if (Platform.OS !== "web") return url;
+  const base = getBaseUrl();
+  if (!base) return url;
+  return `${base}/api/news/image?url=${encodeURIComponent(url)}`;
+}
+
 export type ArticleResponse = {
   title?: string;
   byline?: string;

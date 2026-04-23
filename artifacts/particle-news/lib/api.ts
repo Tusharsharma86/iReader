@@ -35,6 +35,25 @@ function getBaseUrl(): string {
   return "";
 }
 
+export type ArticleResponse = {
+  title?: string;
+  byline?: string;
+  summaryBullets: string[];
+  paragraphs: string[];
+  cached?: boolean;
+};
+
+export async function fetchArticle(url: string): Promise<ArticleResponse> {
+  const u = new URL(`${getBaseUrl()}/api/news/article`);
+  u.searchParams.set("url", url);
+  const res = await fetch(u.toString());
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Reader failed (${res.status}): ${body.slice(0, 160)}`);
+  }
+  return res.json() as Promise<ArticleResponse>;
+}
+
 export async function fetchFeed(
   topic: string,
   refresh = false,

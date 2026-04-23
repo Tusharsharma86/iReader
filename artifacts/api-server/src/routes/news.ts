@@ -223,4 +223,164 @@ router.get("/feed", async (req, res) => {
   }
 });
 
+type ArticleResult = {
+  title?: string;
+  summaryBullets: string[];
+  paragraphs: string[];
+  byline?: string;
+};
+
+const articleCache = new Map<string, { at: number; data: ArticleResult }>();
+const ARTICLE_TTL_MS = 60 * 60 * 1000;
+
+function stripHtmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<header[\s\S]*?<\/header>/gi, " ")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+    .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+    .replace(/<aside[\s\S]*?<\/aside>/gi, " ")
+    .replace(/<form[\s\S]*?<\/form>/gi, " ")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<!--([\s\S]*?)-->/g, " ")
+    .replace(/<\/(p|div|li|h[1-6]|br|section|article)>/gi, "\n")
+    .replace(/<br\s*\/?>(?!\n)/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, "\n\n")
+    .trim();
+}
+
+async function fetchArticleText(url: string): Promise<string> {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      Accept: "text/html,application/xhtml+xml",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`Source ${res.status}`);
+  }
+  const html = await res.text();
+  const text = stripHtmlToText(html);
+  return text.slice(0, 12000);
+}
+
+function fallbackParagraphs(rawText: string): string[] {
+  return rawText
+    .split(/\n{2,}/)
+    .map((p) => p.replace(/\s+/g, " ").trim())
+    .filter((p) => p.length > 80 && p.split(" ").length > 12)
+    .slice(0, 40);
+}
+
+async function extractReadable(
+  url: string,
+  rawText: string,
+): Promise<ArticleResult> {
+  const prompt = `You will receive raw extracted text from a news article web page. Your job is to produce a clean READER MODE version of the article.
+
+Rules:
+- Remove navigation, cookie banners, related-stories teasers, ads, social CTAs, author bios, comments, and boilerplate.
+- Keep only the substantive article body.
+- Preserve original wording — do NOT rewrite paragraphs. Only clean and split.
+- Split the article into well-formed paragraphs (3-7 sentences each, no markdown).
+- Drop any paragraph that is repetitive, navigation, or filler.
+- Provide a "summaryBullets" field: 4-5 bullet pointers totaling about 100 words combined (90-110 words). Each bullet should be a single concise sentence covering Who/What, Numbers, Why it matters, What's next. NO fluff.
+- Provide "title" (article headline) and optional "byline" (author/source line).
+
+Return STRICT JSON ONLY:
+{
+  "title": string,
+  "byline": string,
+  "summaryBullets": string[],
+  "paragraphs": string[]
+}
+
+Article URL: ${url}
+
+Raw extracted text:
+${rawText}`;
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    config: {
+      maxOutputTokens: 8192,
+      responseMimeType: "application/json",
+    },
+  });
+
+  const text = response.text ?? "{}";
+  const cleaned = text
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .replace(/,(\s*[\]}])/g, "$1");
+  let parsed: ArticleResult;
+  try {
+    parsed = JSON.parse(cleaned) as ArticleResult;
+  } catch {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start === -1 || end === -1) throw new Error("Gemini returned non-JSON");
+    parsed = JSON.parse(cleaned.slice(start, end + 1)) as ArticleResult;
+  }
+  if (!Array.isArray(parsed.paragraphs)) parsed.paragraphs = [];
+  if (!Array.isArray(parsed.summaryBullets)) parsed.summaryBullets = [];
+  return parsed;
+}
+
+router.get("/article", async (req, res) => {
+  const url = String(req.query["url"] ?? "");
+  if (!url || !/^https?:\/\//i.test(url)) {
+    res.status(400).json({ error: "Invalid url" });
+    return;
+  }
+
+  const cached = articleCache.get(url);
+  if (cached && Date.now() - cached.at < ARTICLE_TTL_MS) {
+    res.json({ ...cached.data, cached: true });
+    return;
+  }
+
+  try {
+    const rawText = await fetchArticleText(url);
+    if (rawText.length < 200) {
+      throw new Error("Article body too short to extract");
+    }
+    let data: ArticleResult;
+    try {
+      data = await extractReadable(url, rawText);
+      if (!data.paragraphs?.length) {
+        data.paragraphs = fallbackParagraphs(rawText);
+      }
+    } catch (geminiErr) {
+      req.log.warn({ err: geminiErr }, "gemini extract failed; using raw");
+      data = {
+        summaryBullets: [],
+        paragraphs: fallbackParagraphs(rawText),
+      };
+    }
+    articleCache.set(url, { at: Date.now(), data });
+    res.json({ ...data, cached: false });
+  } catch (err) {
+    req.log.error({ err }, "article extract failed");
+    res.status(502).json({
+      error: err instanceof Error ? err.message : "Couldn't fetch article",
+    });
+  }
+});
+
 export default router;

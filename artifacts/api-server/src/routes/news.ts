@@ -156,6 +156,90 @@ ${JSON.stringify(compact)}`;
   return parsed;
 }
 
+const MAINSTREAM_HOSTS = [
+  "reuters",
+  "bbc",
+  "apnews",
+  "ap.org",
+  "nytimes",
+  "cnn",
+  "wsj",
+  "bloomberg",
+  "guardian",
+  "washingtonpost",
+  "ft.com",
+  "aljazeera",
+  "npr",
+];
+const TECH_HOSTS = [
+  "techcrunch",
+  "theverge",
+  "arstechnica",
+  "wired",
+  "engadget",
+  "9to5mac",
+  "9to5google",
+  "thenextweb",
+  "venturebeat",
+  "gizmodo",
+  "mashable",
+];
+
+function classifySource(url: string, name: string): Source["type"] {
+  const blob = `${url} ${name}`.toLowerCase();
+  if (MAINSTREAM_HOSTS.some((h) => blob.includes(h))) return "mainstream";
+  if (TECH_HOSTS.some((h) => blob.includes(h))) return "tech";
+  return "niche";
+}
+
+function pickCategory(article: NewsDataArticle): string {
+  const raw = article.category?.[0]?.toLowerCase();
+  if (!raw) return "Top";
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+function naiveBullets(text: string, count: number): string[] {
+  if (!text) return [];
+  const sentences = text
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 12);
+  return sentences.slice(0, count);
+}
+
+function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
+  return articles.map((a, idx) => {
+    const text = (a.description ?? a.content ?? a.title ?? "").trim();
+    const sourceName = a.source_name ?? a.source_id ?? "Unknown";
+    const sourceUrl = a.link ?? "";
+    const sourceType = classifySource(sourceUrl, sourceName);
+
+    const headline = (a.title ?? text.slice(0, 90) ?? "Untitled").trim();
+    const keyHighlights = naiveBullets(text, 4);
+    const fiveWs = naiveBullets(text, 5);
+    const eli5 = naiveBullets(text, 3);
+
+    return {
+      id: `${Date.now()}-${idx}-${a.article_id ?? idx}`,
+      headline,
+      category: pickCategory(a),
+      imageUrl: a.image_url ?? null,
+      publishedAt: a.pubDate ?? new Date().toISOString(),
+      summaries: {
+        fiveWs,
+        eli5,
+        keyHighlights:
+          keyHighlights.length > 0
+            ? keyHighlights
+            : [text.slice(0, 200) || headline],
+      },
+      sources: [{ name: sourceName, url: sourceUrl, type: sourceType }],
+      sourceCount: 1,
+    };
+  });
+}
+
 function buildStoryCards(
   articles: NewsDataArticle[],
   clusters: ClusterResult,
@@ -201,25 +285,36 @@ router.get("/feed", async (req, res) => {
     return;
   }
 
+  let articles: NewsDataArticle[] = [];
   try {
-    const articles = await fetchNewsData(topic);
-    if (articles.length === 0) {
-      res.json({ stories: [], cached: false });
-      return;
-    }
-    const clusters = await clusterAndSummarize(articles);
-    const stories = buildStoryCards(articles, clusters);
-    cache.set(topic, { at: Date.now(), data: stories });
-    res.json({ stories, cached: false });
+    articles = await fetchNewsData(topic);
   } catch (err) {
-    req.log.error({ err }, "feed failed");
+    req.log.error({ err }, "newsdata fetch failed");
     if (cached) {
       res.json({ stories: cached.data, cached: true, stale: true });
       return;
     }
-    res.status(500).json({
-      error: err instanceof Error ? err.message : "Unknown error",
+    res.status(502).json({
+      error: err instanceof Error ? err.message : "News provider unavailable",
     });
+    return;
+  }
+
+  if (articles.length === 0) {
+    res.json({ stories: [], cached: false });
+    return;
+  }
+
+  try {
+    const clusters = await clusterAndSummarize(articles);
+    const stories = buildStoryCards(articles, clusters);
+    cache.set(topic, { at: Date.now(), data: stories });
+    res.json({ stories, cached: false, source: "ai" });
+  } catch (err) {
+    req.log.warn({ err }, "clustering failed, using raw fallback");
+    const stories = buildFallbackStories(articles);
+    cache.set(topic, { at: Date.now(), data: stories });
+    res.json({ stories, cached: false, source: "raw", degraded: true });
   }
 });
 

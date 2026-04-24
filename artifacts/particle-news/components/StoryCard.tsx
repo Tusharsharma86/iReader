@@ -1,6 +1,5 @@
 import { Feather } from "@expo/vector-icons";
 import { Image } from "expo-image";
-import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
 import React, { useState } from "react";
@@ -55,16 +54,6 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`;
 }
 
-function tintedBase(hex: string, mix = 0.35): string {
-  const rgb = hexToRgb(hex);
-  if (!rgb) return FALLBACK_BG;
-  const base = 26;
-  const r = Math.round(base * (1 - mix) + rgb[0] * mix);
-  const g = Math.round(base * (1 - mix) + rgb[1] * mix);
-  const b = Math.round(base * (1 - mix) + rgb[2] * mix);
-  return `rgb(${r},${g},${b})`;
-}
-
 function formatTimeAgo(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
@@ -117,18 +106,18 @@ export function StoryCardView({
       style={[
         styles.card,
         {
-          backgroundColor: hasImage ? tintedBase(dominant, 0.32) : FALLBACK_BG,
+          backgroundColor: FALLBACK_BG,
           borderRadius: colors.radius,
         },
       ]}
     >
-      <LinearGradient
-        colors={[hexToRgba(dominant, 0.35), hexToRgba(dominant, 0.08)]}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 0, y: 1 }}
-        style={StyleSheet.absoluteFill}
-        pointerEvents="none"
-      />
+      <View style={[styles.glassLayer, { backgroundColor: colors.card }]} pointerEvents="none" />
+      {hasImage ? (
+        <View
+          style={[styles.tintOverlay, { backgroundColor: hexToRgba(dominant, 0.2) }]}
+          pointerEvents="none"
+        />
+      ) : null}
 
       <View
         style={[styles.accentBar, { backgroundColor: vibrant }]}
@@ -342,6 +331,12 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     marginBottom: 16,
     position: "relative",
+  },
+  glassLayer: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  tintOverlay: {
+    ...StyleSheet.absoluteFillObject,
   },
   accentBar: {
     position: "absolute",

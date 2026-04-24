@@ -1,8 +1,9 @@
 import { Feather } from "@expo/vector-icons";
 import { Image } from "expo-image";
+import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   Platform,
   Pressable,
@@ -28,6 +29,25 @@ const MODE_LABELS: { key: SummaryMode; label: string }[] = [
   { key: "keyHighlights", label: "Key Highlights" },
   { key: "eli5", label: "ELI5" },
 ];
+
+const FALLBACK_BG = "#1A1A1A";
+
+function hexToRgba(hex: string, alpha: number): string {
+  const m = hex.replace("#", "").trim();
+  const full =
+    m.length === 3
+      ? m
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : m;
+  if (full.length !== 6) return `rgba(26,26,26,${alpha})`;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  if ([r, g, b].some((n) => Number.isNaN(n))) return `rgba(26,26,26,${alpha})`;
+  return `rgba(${r},${g},${b},${alpha})`;
+}
 
 function formatTimeAgo(iso: string): string {
   const date = new Date(iso);
@@ -57,7 +77,19 @@ export function StoryCardView({
   const [mode, setMode] = useState<SummaryMode>("keyHighlights");
   const saved = isSaved(story.id);
 
+  const hasImage = Boolean(proxiedImage);
+  const dominant = hasImage ? tint.dominant : FALLBACK_BG;
+  const vibrant = hasImage ? tint.vibrant : "#3A3A3A";
+
   const bullets = story.summaries[mode] ?? [];
+
+  const headlineShadow = hasImage
+    ? {
+        textShadowColor: hexToRgba(dominant, 0.55),
+        textShadowOffset: { width: 0, height: 1 },
+        textShadowRadius: 8,
+      }
+    : null;
 
   return (
     <Animated.View
@@ -69,12 +101,24 @@ export function StoryCardView({
       style={[
         styles.card,
         {
-          backgroundColor: tint?.cardBg ?? colors.card,
-          borderColor: tint?.border ?? colors.cardBorder,
+          backgroundColor: FALLBACK_BG,
           borderRadius: colors.radius,
         },
       ]}
     >
+      <LinearGradient
+        colors={[hexToRgba(dominant, 0.15), "rgba(0,0,0,0)"]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 0, y: 1 }}
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none"
+      />
+
+      <View
+        style={[styles.accentBar, { backgroundColor: vibrant }]}
+        pointerEvents="none"
+      />
+
       {proxiedImage ? (
         <View style={styles.imageWrap}>
           <Image
@@ -106,7 +150,7 @@ export function StoryCardView({
       )}
 
       <View style={styles.body}>
-        <Text style={[styles.headline, { color: colors.foreground }]}>
+        <Text style={[styles.headline, { color: "#FFFFFF" }, headlineShadow]}>
           {story.headline}
         </Text>
 
@@ -168,10 +212,7 @@ export function StoryCardView({
           {bullets.map((b, i) => (
             <View key={i} style={styles.bulletRow}>
               <View
-                style={[
-                  styles.bulletDot,
-                  { backgroundColor: tint?.accent ?? colors.primary },
-                ]}
+                style={[styles.bulletDot, { backgroundColor: vibrant }]}
               />
               <Text
                 style={[styles.bulletText, { color: colors.foreground }]}
@@ -282,9 +323,17 @@ export function StoryCardView({
 
 const styles = StyleSheet.create({
   card: {
-    borderWidth: 1,
     overflow: "hidden",
     marginBottom: 16,
+    position: "relative",
+  },
+  accentBar: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 4,
+    zIndex: 2,
   },
   imageWrap: {
     width: "100%",

@@ -27,8 +27,8 @@ export default function ForYouScreen() {
   const topInset = Platform.OS === "web" ? Math.max(insets.top, 12) : insets.top;
 
   const query = useQuery({
-    queryKey: ["feed", "top"],
-    queryFn: () => fetchFeed("top"),
+    queryKey: ["feed", "technology"],
+    queryFn: () => fetchFeed("technology"),
   });
 
   const stories: StoryCard[] = query.data?.stories ?? [];

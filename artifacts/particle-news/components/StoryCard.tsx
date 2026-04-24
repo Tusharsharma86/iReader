@@ -1,4 +1,5 @@
 import { Feather } from "@expo/vector-icons";
+import { BlurView } from "expo-blur";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
@@ -30,7 +31,10 @@ const MODE_LABELS: { key: SummaryMode; label: string }[] = [
   { key: "eli5", label: "ELI5" },
 ];
 
-const FALLBACK_BG = "#1A1A1A";
+const FALLBACK_DOMINANT = "#1A1A1A";
+const FALLBACK_VIBRANT = "#3A3A3A";
+const GLASS_BG = "rgba(255,255,255,0.05)";
+const HAIRLINE = "rgba(255,255,255,0.15)";
 
 function hexToRgb(hex: string): [number, number, number] | null {
   const m = hex.replace("#", "").trim();
@@ -84,18 +88,10 @@ export function StoryCardView({
   const saved = isSaved(story.id);
 
   const hasImage = Boolean(proxiedImage);
-  const dominant = hasImage ? tint.dominant : FALLBACK_BG;
-  const vibrant = hasImage ? tint.vibrant : "#3A3A3A";
+  const dominant = hasImage ? tint.dominant : FALLBACK_DOMINANT;
+  const vibrant = hasImage ? tint.vibrant : FALLBACK_VIBRANT;
 
   const bullets = story.summaries[mode] ?? [];
-
-  const headlineShadow = hasImage
-    ? {
-        textShadowColor: hexToRgba(dominant, 0.55),
-        textShadowOffset: { width: 0, height: 1 },
-        textShadowRadius: 8,
-      }
-    : null;
 
   return (
     <Animated.View
@@ -105,238 +101,264 @@ export function StoryCardView({
         .damping(18)}
       layout={LinearTransition.springify().damping(20)}
       style={[
-        styles.card,
+        styles.cardShadow,
         {
-          backgroundColor: FALLBACK_BG,
           borderRadius: colors.radius,
+          shadowColor: dominant,
+          ...Platform.select({
+            web: {
+              boxShadow: `0 12px 32px ${hexToRgba(dominant, 0.35)}`,
+            },
+            default: {},
+          }),
         },
       ]}
     >
-      <View style={[styles.glassLayer, { backgroundColor: colors.card }]} pointerEvents="none" />
-      {hasImage ? (
-        <View
-          style={[styles.tintOverlay, { backgroundColor: hexToRgba(dominant, 0.2) }]}
+      <BlurView
+        intensity={25}
+        tint="dark"
+        style={[styles.card, { borderRadius: colors.radius }]}
+      >
+        <View style={[styles.glassFill, { backgroundColor: GLASS_BG }]} pointerEvents="none" />
+        <LinearGradient
+          colors={[hexToRgba(dominant, 0.15), "rgba(0,0,0,0)"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={StyleSheet.absoluteFill}
           pointerEvents="none"
         />
-      ) : null}
-
-      <View
-        style={[styles.accentBar, { backgroundColor: vibrant }]}
-        pointerEvents="none"
-      />
-
-      {proxiedImage ? (
-        <View style={styles.imageWrap}>
-          <Image
-            source={{ uri: proxiedImage }}
-            style={styles.image}
-            contentFit="cover"
-            transition={300}
-          />
-          <View style={styles.imageOverlay} />
-          <View style={styles.categoryPill}>
-            <Text style={styles.categoryText}>
-              {story.category?.toUpperCase() ?? "NEWS"}
-            </Text>
-          </View>
-        </View>
-      ) : (
-        <View style={styles.headerRow}>
-          <View
-            style={[
-              styles.categoryPillStandalone,
-              { backgroundColor: colors.primaryGlow },
-            ]}
-          >
-            <Text style={[styles.categoryText, { color: colors.primary }]}>
-              {story.category?.toUpperCase() ?? "NEWS"}
-            </Text>
-          </View>
-        </View>
-      )}
-
-      <View style={styles.body}>
-        <Text style={[styles.headline, { color: "#FFFFFF" }, headlineShadow]}>
-          {story.headline}
-        </Text>
-
-        <View style={styles.metaRow}>
-          <Text style={[styles.meta, { color: colors.mutedForeground }]}>
-            {formatTimeAgo(story.publishedAt)}
-          </Text>
-          <View style={styles.metaDot} />
-          <Text style={[styles.meta, { color: colors.mutedForeground }]}>
-            {story.sourceCount}{" "}
-            {story.sourceCount === 1 ? "source" : "sources"}
-          </Text>
-        </View>
-
-        <View style={styles.modeRow}>
-          {MODE_LABELS.map((m) => {
-            const active = m.key === mode;
-            return (
-              <Pressable
-                key={m.key}
-                onPress={() => {
-                  if (Platform.OS !== "web") {
-                    Haptics.selectionAsync().catch(() => {});
-                  }
-                  setMode(m.key);
-                }}
-                style={({ pressed }) => [
-                  styles.modeChip,
-                  {
-                    backgroundColor: active
-                      ? colors.foreground
-                      : "rgba(255,255,255,0.06)",
-                    opacity: pressed ? 0.7 : 1,
-                  },
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.modeText,
-                    {
-                      color: active
-                        ? colors.background
-                        : colors.mutedForeground,
-                    },
-                  ]}
-                >
-                  {m.label}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </View>
-
-        <Animated.View
-          key={mode}
-          entering={FadeInDown.duration(280)}
-          style={styles.bullets}
-        >
-          {bullets.map((b, i) => (
-            <View key={i} style={styles.bulletRow}>
-              <View
-                style={[styles.bulletDot, { backgroundColor: vibrant }]}
-              />
-              <Text
-                style={[styles.bulletText, { color: colors.foreground }]}
-              >
-                {b}
-              </Text>
-            </View>
-          ))}
-          {bullets.length === 0 && (
-            <Text
-              style={[styles.bulletText, { color: colors.mutedForeground }]}
-            >
-              Summary unavailable.
-            </Text>
-          )}
-        </Animated.View>
-
         <View
-          style={[styles.divider, { backgroundColor: colors.cardBorder }]}
+          style={[styles.accentBar, { backgroundColor: vibrant }]}
+          pointerEvents="none"
         />
 
-        <PerspectiveBar sources={story.sources} />
+        {proxiedImage ? (
+          <View style={styles.imageWrap}>
+            <Image
+              source={{ uri: proxiedImage }}
+              style={styles.image}
+              contentFit="cover"
+              transition={300}
+            />
+            <View style={styles.imageOverlay} />
+            <View style={styles.categoryPill}>
+              <Text style={styles.categoryText}>
+                {story.category?.toUpperCase() ?? "NEWS"}
+              </Text>
+            </View>
+          </View>
+        ) : (
+          <View style={styles.headerRow}>
+            <View
+              style={[
+                styles.categoryPillStandalone,
+                { backgroundColor: colors.primaryGlow },
+              ]}
+            >
+              <Text style={[styles.categoryText, { color: colors.primary }]}>
+                {story.category?.toUpperCase() ?? "NEWS"}
+              </Text>
+            </View>
+          </View>
+        )}
 
-        <View style={styles.footerRow}>
-          <Pressable
-            onPress={() => {
-              if (Platform.OS !== "web") {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
-                  () => {},
-                );
-              }
-              toggle(story);
-            }}
-            style={({ pressed }) => [
-              styles.iconButton,
+        <View style={styles.body}>
+          <Text
+            style={[
+              styles.headline,
               {
-                backgroundColor: saved
-                  ? colors.primaryGlow
-                  : "rgba(255,255,255,0.06)",
-                opacity: pressed ? 0.7 : 1,
+                color: "#FFFFFF",
+                textShadowColor: hexToRgba(dominant, 0.55),
+                textShadowOffset: { width: 0, height: 1 },
+                textShadowRadius: 8,
               },
             ]}
           >
-            <Feather
-              name="bookmark"
-              size={18}
-              color={saved ? colors.primary : colors.mutedForeground}
-            />
-            <Text
-              style={[
-                styles.iconButtonText,
-                {
-                  color: saved ? colors.primary : colors.mutedForeground,
-                },
-              ]}
-            >
-              {saved ? "Saved" : "Save"}
-            </Text>
-          </Pressable>
+            {story.headline}
+          </Text>
 
-          {story.sources[0]?.url ? (
+          <View style={styles.metaRow}>
+            <Text style={[styles.meta, { color: colors.mutedForeground }]}>
+              {formatTimeAgo(story.publishedAt)}
+            </Text>
+            <View style={styles.metaDot} />
+            <Text style={[styles.meta, { color: colors.mutedForeground }]}>
+              {story.sourceCount}{" "}
+              {story.sourceCount === 1 ? "source" : "sources"}
+            </Text>
+          </View>
+
+          <View style={styles.modeRow}>
+            {MODE_LABELS.map((m) => {
+              const active = m.key === mode;
+              return (
+                <Pressable
+                  key={m.key}
+                  onPress={() => {
+                    if (Platform.OS !== "web") {
+                      Haptics.selectionAsync().catch(() => {});
+                    }
+                    setMode(m.key);
+                  }}
+                  style={({ pressed }) => [
+                    styles.modeChip,
+                    {
+                      backgroundColor: active
+                        ? colors.foreground
+                        : "rgba(255,255,255,0.06)",
+                      opacity: pressed ? 0.7 : 1,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.modeText,
+                      {
+                        color: active
+                          ? colors.background
+                          : colors.mutedForeground,
+                      },
+                    ]}
+                  >
+                    {m.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <Animated.View
+            key={mode}
+            entering={FadeInDown.duration(280)}
+            style={styles.bullets}
+          >
+            {bullets.map((b, i) => (
+              <View key={i} style={styles.bulletRow}>
+                <View
+                  style={[styles.bulletDot, { backgroundColor: vibrant }]}
+                />
+                <Text
+                  style={[styles.bulletText, { color: colors.foreground }]}
+                >
+                  {b}
+                </Text>
+              </View>
+            ))}
+            {bullets.length === 0 && (
+              <Text
+                style={[styles.bulletText, { color: colors.mutedForeground }]}
+              >
+                Summary unavailable.
+              </Text>
+            )}
+          </Animated.View>
+
+          <View
+            style={[styles.divider, { backgroundColor: colors.cardBorder }]}
+          />
+
+          <PerspectiveBar sources={story.sources} />
+
+          <View style={styles.footerRow}>
             <Pressable
               onPress={() => {
-                const src = story.sources[0];
-                if (!src?.url) return;
                 if (Platform.OS !== "web") {
-                  Haptics.selectionAsync().catch(() => {});
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(
+                    () => {},
+                  );
                 }
-                router.push({
-                  pathname: "/reader",
-                  params: {
-                    url: src.url,
-                    image: story.imageUrl ?? "",
-                    headline: story.headline,
-                    source: src.name,
-                    category: story.category ?? "",
-                  },
-                });
+                toggle(story);
               }}
               style={({ pressed }) => [
                 styles.iconButton,
                 {
-                  backgroundColor: "rgba(255,255,255,0.06)",
+                  backgroundColor: saved
+                    ? colors.primaryGlow
+                    : "rgba(255,255,255,0.06)",
                   opacity: pressed ? 0.7 : 1,
                 },
               ]}
             >
               <Feather
-                name="external-link"
+                name="bookmark"
                 size={18}
-                color={colors.mutedForeground}
+                color={saved ? colors.primary : colors.mutedForeground}
               />
               <Text
                 style={[
                   styles.iconButtonText,
-                  { color: colors.mutedForeground },
+                  {
+                    color: saved ? colors.primary : colors.mutedForeground,
+                  },
                 ]}
               >
-                Read
+                {saved ? "Saved" : "Save"}
               </Text>
             </Pressable>
-          ) : null}
+
+            {story.sources[0]?.url ? (
+              <Pressable
+                onPress={() => {
+                  const src = story.sources[0];
+                  if (!src?.url) return;
+                  if (Platform.OS !== "web") {
+                    Haptics.selectionAsync().catch(() => {});
+                  }
+                  router.push({
+                    pathname: "/reader",
+                    params: {
+                      url: src.url,
+                      image: story.imageUrl ?? "",
+                      headline: story.headline,
+                      source: src.name,
+                      category: story.category ?? "",
+                    },
+                  });
+                }}
+                style={({ pressed }) => [
+                  styles.iconButton,
+                  {
+                    backgroundColor: "rgba(255,255,255,0.06)",
+                    opacity: pressed ? 0.7 : 1,
+                  },
+                ]}
+              >
+                <Feather
+                  name="external-link"
+                  size={18}
+                  color={colors.mutedForeground}
+                />
+                <Text
+                  style={[
+                    styles.iconButtonText,
+                    { color: colors.mutedForeground },
+                  ]}
+                >
+                  Read
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
         </View>
-      </View>
+      </BlurView>
     </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
+  cardShadow: {
+    marginBottom: 16,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.35,
+    shadowRadius: 24,
+    elevation: 10,
+  },
   card: {
     overflow: "hidden",
-    marginBottom: 16,
-    position: "relative",
+    borderWidth: 1,
+    borderColor: HAIRLINE,
   },
-  glassLayer: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  tintOverlay: {
+  glassFill: {
     ...StyleSheet.absoluteFillObject,
   },
   accentBar: {

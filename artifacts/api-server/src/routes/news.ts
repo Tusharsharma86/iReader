@@ -99,18 +99,38 @@ function pickText(value: unknown): string {
   return "";
 }
 
-function stripHtml(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+function decodeEntities(s: string): string {
+  if (!s) return "";
+  return s
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
     .replace(/&#39;/gi, "'")
-    .replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&#8216;/g, "\u2018")
+    .replace(/&#8217;/g, "\u2019")
+    .replace(/&#8220;/g, "\u201C")
+    .replace(/&#8221;/g, "\u201D")
+    .replace(/&#8211;/g, "\u2013")
+    .replace(/&#8212;/g, "\u2014")
+    .replace(/&#8230;/g, "\u2026")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h: string) =>
+      String.fromCodePoint(parseInt(h, 16)),
+    )
+    .replace(/&#(\d+);/g, (_, n: string) =>
+      String.fromCodePoint(parseInt(n, 10)),
+    );
+}
+
+function stripHtml(html: string): string {
+  return decodeEntities(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " "),
+  )
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -118,6 +138,57 @@ function stripHtml(html: string): string {
 function extractFirstImage(html: string): string | null {
   const m = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
   return m?.[1] ?? null;
+}
+
+function extractOgImage(html: string): string | null {
+  const patterns = [
+    /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i,
+    /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']/i,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(html);
+    if (m?.[1]) return m[1];
+  }
+  return null;
+}
+
+async function fetchOgImage(url: string): Promise<string | null> {
+  if (!url) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3500);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; ParticleNews/1.0; +https://example.com)",
+        Accept: "text/html",
+      },
+    });
+    if (!res.ok) return null;
+    const reader = res.body?.getReader();
+    if (!reader) return null;
+    const decoder = new TextDecoder("utf-8");
+    let buf = "";
+    let bytes = 0;
+    while (bytes < 96_000) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      buf += decoder.decode(value, { stream: true });
+      if (/<\/head>/i.test(buf)) break;
+    }
+    try {
+      await reader.cancel();
+    } catch {}
+    return extractOgImage(buf);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function parseRssFeed(
@@ -132,7 +203,7 @@ function parseRssFeed(
     const items = asArray(rss.channel["item"] as unknown);
     return items.map((raw) => {
       const item = raw as Record<string, unknown>;
-      const title = pickText(item["title"]);
+      const title = decodeEntities(pickText(item["title"]));
       const link = pickText(item["link"]);
       const pubDate = pickText(item["pubDate"]);
       const descRaw = pickText(item["description"]);
@@ -188,7 +259,7 @@ function parseRssFeed(
     const entries = asArray(feed["entry"] as unknown);
     return entries.map((raw) => {
       const entry = raw as Record<string, unknown>;
-      const title = pickText(entry["title"]);
+      const title = decodeEntities(pickText(entry["title"]));
       const linkAttr = entry["link"] as
         | { "@_href"?: string }
         | { "@_href"?: string }[]
@@ -248,6 +319,19 @@ async function fetchOneRssFeed(source: RssSource): Promise<NewsDataArticle[]> {
   }
 }
 
+const ogImageCache = new Map<string, { url: string | null; ts: number }>();
+const OG_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function getOgImageCached(articleUrl: string): Promise<string | null> {
+  const cached = ogImageCache.get(articleUrl);
+  if (cached && Date.now() - cached.ts < OG_CACHE_TTL_MS) {
+    return cached.url;
+  }
+  const url = await fetchOgImage(articleUrl);
+  ogImageCache.set(articleUrl, { url, ts: Date.now() });
+  return url;
+}
+
 async function fetchTechRss(): Promise<NewsDataArticle[]> {
   const results = await Promise.allSettled(
     TECH_RSS_SOURCES.map((s) => fetchOneRssFeed(s)),
@@ -262,7 +346,25 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
-  return articles.slice(0, 24);
+  const top = articles.slice(0, 24);
+
+  // Enrich items missing image_url by scraping og:image (parallel, time-boxed).
+  const needs = top
+    .map((a, i) => ({ a, i }))
+    .filter(({ a }) => !a.image_url && a.link);
+  if (needs.length > 0) {
+    const enriched = await Promise.allSettled(
+      needs.map(({ a }) => getOgImageCached(a.link!)),
+    );
+    enriched.forEach((res, idx) => {
+      if (res.status === "fulfilled" && res.value) {
+        const target = needs[idx]!.a;
+        target.image_url = res.value;
+      }
+    });
+  }
+
+  return top;
 }
 
 async function fetchNewsData(topic: string): Promise<NewsDataArticle[]> {

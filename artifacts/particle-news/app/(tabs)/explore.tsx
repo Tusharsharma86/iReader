@@ -24,13 +24,6 @@ const TAB_BAR_HEIGHT = Platform.OS === "web" ? 84 : 60;
 
 const TOPICS = [
   { key: "technology", label: "Technology", icon: "cpu" as const },
-  { key: "business", label: "Business", icon: "trending-up" as const },
-  { key: "science", label: "Science", icon: "zap" as const },
-  { key: "world", label: "World", icon: "globe" as const },
-  { key: "sports", label: "Sports", icon: "activity" as const },
-  { key: "entertainment", label: "Culture", icon: "film" as const },
-  { key: "health", label: "Health", icon: "heart" as const },
-  { key: "politics", label: "Politics", icon: "users" as const },
 ];
 
 export default function ExploreScreen() {

@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import { XMLParser } from "fast-xml-parser";
 import { ai } from "@workspace/integrations-gemini-ai";
 
 const router: IRouter = Router();
@@ -26,7 +27,12 @@ type StoryCard = {
 
 type CacheEntry = { at: number; data: StoryCard[] };
 const cache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000;
+const TECH_CACHE_TTL_MS = 30 * 60 * 1000;
+
+function ttlFor(topic: string): number {
+  return topic === "technology" ? TECH_CACHE_TTL_MS : DEFAULT_CACHE_TTL_MS;
+}
 
 const TOPIC_CATEGORY: Record<string, string> = {
   top: "top",
@@ -53,6 +59,211 @@ type NewsDataArticle = {
   image_url?: string | null;
   category?: string[] | null;
 };
+
+type RssSource = {
+  id: string;
+  name: string;
+  url: string;
+};
+
+const TECH_RSS_SOURCES: RssSource[] = [
+  { id: "techcrunch", name: "TechCrunch", url: "https://techcrunch.com/feed/" },
+  { id: "theverge", name: "The Verge", url: "https://www.theverge.com/rss/index.xml" },
+  {
+    id: "arstechnica",
+    name: "Ars Technica",
+    url: "https://feeds.arstechnica.com/arstechnica/index",
+  },
+  { id: "gizmodo", name: "Gizmodo", url: "https://gizmodo.com/rss" },
+];
+
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  cdataPropName: "__cdata",
+  trimValues: true,
+});
+
+function asArray<T>(value: T | T[] | undefined): T[] {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function pickText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj["__cdata"] === "string") return obj["__cdata"] as string;
+    if (typeof obj["#text"] === "string") return obj["#text"] as string;
+  }
+  return "";
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n: string) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractFirstImage(html: string): string | null {
+  const m = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
+  return m?.[1] ?? null;
+}
+
+function parseRssFeed(
+  xml: string,
+  source: RssSource,
+): NewsDataArticle[] {
+  const parsed = xmlParser.parse(xml) as Record<string, unknown>;
+
+  // RSS 2.0
+  const rss = parsed["rss"] as { channel?: Record<string, unknown> } | undefined;
+  if (rss?.channel) {
+    const items = asArray(rss.channel["item"] as unknown);
+    return items.map((raw) => {
+      const item = raw as Record<string, unknown>;
+      const title = pickText(item["title"]);
+      const link = pickText(item["link"]);
+      const pubDate = pickText(item["pubDate"]);
+      const descRaw = pickText(item["description"]);
+      const contentRaw = pickText(item["content:encoded"]) || descRaw;
+
+      let imageUrl: string | null = null;
+      const enclosure = item["enclosure"] as
+        | { "@_url"?: string; "@_type"?: string }
+        | undefined;
+      if (enclosure?.["@_url"] && enclosure["@_type"]?.startsWith("image")) {
+        imageUrl = enclosure["@_url"];
+      }
+      const mediaContent = item["media:content"] as
+        | { "@_url"?: string }
+        | { "@_url"?: string }[]
+        | undefined;
+      if (!imageUrl) {
+        const m = Array.isArray(mediaContent) ? mediaContent[0] : mediaContent;
+        if (m?.["@_url"]) imageUrl = m["@_url"];
+      }
+      const mediaThumbnail = item["media:thumbnail"] as
+        | { "@_url"?: string }
+        | { "@_url"?: string }[]
+        | undefined;
+      if (!imageUrl) {
+        const t = Array.isArray(mediaThumbnail) ? mediaThumbnail[0] : mediaThumbnail;
+        if (t?.["@_url"]) imageUrl = t["@_url"];
+      }
+      if (!imageUrl) imageUrl = extractFirstImage(contentRaw);
+
+      const description = stripHtml(descRaw).slice(0, 600);
+      const content = stripHtml(contentRaw).slice(0, 2000);
+
+      return {
+        article_id: `${source.id}-${link || title}`,
+        title,
+        description,
+        content,
+        link,
+        source_id: source.id,
+        source_name: source.name,
+        source_url: source.url,
+        pubDate: pubDate ? new Date(pubDate).toISOString() : undefined,
+        image_url: imageUrl,
+        category: ["technology"],
+      };
+    });
+  }
+
+  // Atom (The Verge)
+  const feed = parsed["feed"] as Record<string, unknown> | undefined;
+  if (feed) {
+    const entries = asArray(feed["entry"] as unknown);
+    return entries.map((raw) => {
+      const entry = raw as Record<string, unknown>;
+      const title = pickText(entry["title"]);
+      const linkAttr = entry["link"] as
+        | { "@_href"?: string }
+        | { "@_href"?: string }[]
+        | undefined;
+      let link = "";
+      if (Array.isArray(linkAttr)) {
+        link = linkAttr.find((l) => l["@_href"])?.["@_href"] ?? "";
+      } else if (linkAttr?.["@_href"]) {
+        link = linkAttr["@_href"];
+      }
+      const published =
+        pickText(entry["published"]) || pickText(entry["updated"]);
+      const summaryRaw = pickText(entry["summary"]);
+      const contentRaw = pickText(entry["content"]) || summaryRaw;
+      const imageUrl = extractFirstImage(contentRaw) ?? extractFirstImage(summaryRaw);
+      const description = stripHtml(summaryRaw).slice(0, 600);
+      const content = stripHtml(contentRaw).slice(0, 2000);
+
+      return {
+        article_id: `${source.id}-${link || title}`,
+        title,
+        description,
+        content,
+        link,
+        source_id: source.id,
+        source_name: source.name,
+        source_url: source.url,
+        pubDate: published ? new Date(published).toISOString() : undefined,
+        image_url: imageUrl,
+        category: ["technology"],
+      };
+    });
+  }
+
+  return [];
+}
+
+async function fetchOneRssFeed(source: RssSource): Promise<NewsDataArticle[]> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12_000);
+  try {
+    const res = await fetch(source.url, {
+      signal: ctrl.signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; ParticleNews/1.0; +https://example.com)",
+        Accept: "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8",
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`${source.name} ${res.status}`);
+    }
+    const xml = await res.text();
+    return parseRssFeed(xml, source);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchTechRss(): Promise<NewsDataArticle[]> {
+  const results = await Promise.allSettled(
+    TECH_RSS_SOURCES.map((s) => fetchOneRssFeed(s)),
+  );
+  const articles: NewsDataArticle[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") articles.push(...r.value);
+  }
+  // Sort newest first, cap at 24 to keep clustering input lean
+  articles.sort((a, b) => {
+    const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
+    const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
+    return tb - ta;
+  });
+  return articles.slice(0, 24);
+}
 
 async function fetchNewsData(topic: string): Promise<NewsDataArticle[]> {
   const apiKey = process.env["NEWSDATA_API_KEY"];
@@ -280,16 +491,19 @@ router.get("/feed", async (req, res) => {
   const refresh = req.query["refresh"] === "1";
 
   const cached = cache.get(topic);
-  if (!refresh && cached && Date.now() - cached.at < CACHE_TTL_MS) {
+  if (!refresh && cached && Date.now() - cached.at < ttlFor(topic)) {
     res.json({ stories: cached.data, cached: true });
     return;
   }
 
   let articles: NewsDataArticle[] = [];
   try {
-    articles = await fetchNewsData(topic);
+    articles =
+      topic === "technology"
+        ? await fetchTechRss()
+        : await fetchNewsData(topic);
   } catch (err) {
-    req.log.error({ err }, "newsdata fetch failed");
+    req.log.error({ err }, "article source fetch failed");
     if (cached) {
       res.json({ stories: cached.data, cached: true, stale: true });
       return;

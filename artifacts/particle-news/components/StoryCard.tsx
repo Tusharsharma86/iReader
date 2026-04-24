@@ -32,7 +32,7 @@ const MODE_LABELS: { key: SummaryMode; label: string }[] = [
 
 const FALLBACK_BG = "#1A1A1A";
 
-function hexToRgba(hex: string, alpha: number): string {
+function hexToRgb(hex: string): [number, number, number] | null {
   const m = hex.replace("#", "").trim();
   const full =
     m.length === 3
@@ -41,12 +41,28 @@ function hexToRgba(hex: string, alpha: number): string {
           .map((c) => c + c)
           .join("")
       : m;
-  if (full.length !== 6) return `rgba(26,26,26,${alpha})`;
+  if (full.length !== 6) return null;
   const r = parseInt(full.slice(0, 2), 16);
   const g = parseInt(full.slice(2, 4), 16);
   const b = parseInt(full.slice(4, 6), 16);
-  if ([r, g, b].some((n) => Number.isNaN(n))) return `rgba(26,26,26,${alpha})`;
-  return `rgba(${r},${g},${b},${alpha})`;
+  if ([r, g, b].some((n) => Number.isNaN(n))) return null;
+  return [r, g, b];
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return `rgba(26,26,26,${alpha})`;
+  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`;
+}
+
+function tintedBase(hex: string, mix = 0.35): string {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return FALLBACK_BG;
+  const base = 26;
+  const r = Math.round(base * (1 - mix) + rgb[0] * mix);
+  const g = Math.round(base * (1 - mix) + rgb[1] * mix);
+  const b = Math.round(base * (1 - mix) + rgb[2] * mix);
+  return `rgb(${r},${g},${b})`;
 }
 
 function formatTimeAgo(iso: string): string {
@@ -101,13 +117,13 @@ export function StoryCardView({
       style={[
         styles.card,
         {
-          backgroundColor: FALLBACK_BG,
+          backgroundColor: hasImage ? tintedBase(dominant, 0.32) : FALLBACK_BG,
           borderRadius: colors.radius,
         },
       ]}
     >
       <LinearGradient
-        colors={[hexToRgba(dominant, 0.15), "rgba(0,0,0,0)"]}
+        colors={[hexToRgba(dominant, 0.35), hexToRgba(dominant, 0.08)]}
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}

@@ -18,7 +18,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://CHANGE-ME.replit.app"
+        "EXPO_PUBLIC_API_URL": "https://story-weaver--jammer9.replit.app"
       }
     },
     "production": {
@@ -28,7 +28,7 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://CHANGE-ME.replit.app"
+        "EXPO_PUBLIC_API_URL": "https://story-weaver--jammer9.replit.app"
       }
     }
   },

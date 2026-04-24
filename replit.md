@@ -26,9 +26,22 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 
 ## Artifacts
 
-- **api-server** (`artifacts/api-server`): Express API. Exposes `/api/news/feed?topic=X` which fetches NewsData.io articles, clusters and summarizes via Gemini (`gemini-2.5-flash`), 10-min in-memory cache.
-- **particle-news** (`artifacts/particle-news`): Expo React Native mobile-first news aggregator inspired by Particle News. Dark glassmorphism UI, Inter typography, three tabs (For You / Explore / Saved), StoryCard with 5Ws / Key Highlights / ELI5 modes, Perspective Bar showing source diversity (mainstream/tech/niche). Uses `EXPO_PUBLIC_DOMAIN` to call the API.
+- **api-server** (`artifacts/api-server`): Express API. Exposes `/api/news/feed?topic=X`. For `topic=technology`, fetches RSS from TechCrunch / The Verge / Ars Technica / Gizmodo in parallel (12s timeout each), enriches missing thumbnails by scraping `og:image` (3.5s budget per article, cached 6h), clusters and summarizes via Gemini (`gemini-2.5-flash`) with a `buildFallbackStories` path if Gemini returns malformed JSON. 30-min cache for technology, 10-min for other topics.
+- **particle-news** (`artifacts/particle-news`): Expo React Native mobile-first news aggregator. Dark glassmorphism UI with `expo-blur` (intensity 25), per-card dynamic color tinting from hero image (dominant + vibrant via `react-native-image-colors`), Inter typography, three tabs (For You / Explore / Saved). Both feeds are wired to `topic=technology`. Reads `EXPO_PUBLIC_API_URL` first (production builds), then `EXPO_PUBLIC_DOMAIN` (Replit dev).
 - **mockup-sandbox** (`artifacts/mockup-sandbox`): Vite component preview server.
+
+## Deployment
+
+The API server has a complete `[services.production]` block (build → `pnpm --filter @workspace/api-server run build`, run → `node artifacts/api-server/dist/index.mjs`, healthz → `/api/healthz`). Stateless except for in-memory caches → autoscale is appropriate. Publish from the Publishing pane.
+
+## Mobile APK build (EAS)
+
+`artifacts/particle-news/eas.json` defines three profiles:
+- `development` — Expo dev client (APK, internal distribution)
+- `preview` — release APK for sideloading (internal distribution). Sets `EXPO_PUBLIC_API_URL`.
+- `production` — Android App Bundle for Play Store (auto-increments versionCode). Sets `EXPO_PUBLIC_API_URL`.
+
+Before building, replace `https://CHANGE-ME.replit.app` in `eas.json` with the deployed API URL. Then from `artifacts/particle-news/`: `eas login` → `eas build:configure` → `eas build -p android --profile preview`.
 
 ## Secrets
 

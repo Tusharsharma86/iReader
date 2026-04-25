@@ -1,8 +1,18 @@
 import { Router, type IRouter } from "express";
 import { XMLParser } from "fast-xml-parser";
 import { ai } from "@workspace/integrations-gemini-ai";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 
 const router: IRouter = Router();
+
+// Disk cache lives in /tmp so it survives in-process restarts within the same
+// container (dev workflow restarts, autoscale instance reuse). Replit Autoscale
+// instances get a fresh /tmp on cold-start, so this is best-effort persistence
+// — the prewarm worker handles the rest.
+const FEED_DISK_CACHE_PATH = "/tmp/particle-news-feed-cache.json";
+const CHUNK_DISK_CACHE_PATH = "/tmp/particle-news-chunk-cache.json";
 
 type Source = {
   name: string;
@@ -34,6 +44,102 @@ const TECH_CACHE_TTL_MS = 30 * 60 * 1000;
 
 function ttlFor(topic: string): number {
   return topic === "technology" ? TECH_CACHE_TTL_MS : DEFAULT_CACHE_TTL_MS;
+}
+
+// ----- Persistent disk cache -----
+function safeWriteJson(path: string, payload: unknown): void {
+  try {
+    const dir = dirname(path);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(path, JSON.stringify(payload), "utf8");
+  } catch {
+    // best-effort; ignore disk errors
+  }
+}
+
+function safeReadJson<T>(path: string): T | null {
+  try {
+    if (!existsSync(path)) return null;
+    const raw = readFileSync(path, "utf8");
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function persistFeedCache(): void {
+  const snapshot: Record<string, CacheEntry> = {};
+  for (const [topic, entry] of cache.entries()) {
+    snapshot[topic] = entry;
+  }
+  safeWriteJson(FEED_DISK_CACHE_PATH, snapshot);
+}
+
+function loadFeedCacheFromDisk(): void {
+  const snapshot = safeReadJson<Record<string, CacheEntry>>(FEED_DISK_CACHE_PATH);
+  if (!snapshot) return;
+  for (const [topic, entry] of Object.entries(snapshot)) {
+    if (entry?.data && Array.isArray(entry.data)) {
+      cache.set(topic, entry);
+    }
+  }
+}
+
+// ----- Per-chunk cluster cache -----
+// Hashes the article set in a Gemini chunk and caches the clustered result.
+// If the same articles appear again (e.g. unchanged RSS items between refreshes),
+// we skip the Gemini call entirely.
+type ChunkCacheEntry = { at: number; result: ClusterResult };
+const chunkCache = new Map<string, ChunkCacheEntry>();
+const CHUNK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CHUNK_CACHE_MAX_ENTRIES = 500;
+
+function chunkHash(articles: NewsDataArticle[]): string {
+  const fingerprint = articles
+    .map((a) => `${a.source_id ?? ""}|${a.link ?? ""}|${a.title ?? ""}`)
+    .sort()
+    .join("\n");
+  return createHash("sha256").update(fingerprint).digest("hex");
+}
+
+function getCachedChunk(hash: string): ClusterResult | null {
+  const entry = chunkCache.get(hash);
+  if (!entry) return null;
+  if (Date.now() - entry.at > CHUNK_CACHE_TTL_MS) {
+    chunkCache.delete(hash);
+    return null;
+  }
+  return entry.result;
+}
+
+function setCachedChunk(hash: string, result: ClusterResult): void {
+  if (chunkCache.size >= CHUNK_CACHE_MAX_ENTRIES) {
+    // simple eviction: drop the oldest entry
+    const oldestKey = chunkCache.keys().next().value;
+    if (oldestKey) chunkCache.delete(oldestKey);
+  }
+  chunkCache.set(hash, { at: Date.now(), result });
+}
+
+function persistChunkCache(): void {
+  const snapshot: Record<string, ChunkCacheEntry> = {};
+  for (const [hash, entry] of chunkCache.entries()) {
+    snapshot[hash] = entry;
+  }
+  safeWriteJson(CHUNK_DISK_CACHE_PATH, snapshot);
+}
+
+function loadChunkCacheFromDisk(): void {
+  const snapshot = safeReadJson<Record<string, ChunkCacheEntry>>(
+    CHUNK_DISK_CACHE_PATH,
+  );
+  if (!snapshot) return;
+  const now = Date.now();
+  for (const [hash, entry] of Object.entries(snapshot)) {
+    if (entry?.result && now - entry.at < CHUNK_CACHE_TTL_MS) {
+      chunkCache.set(hash, entry);
+    }
+  }
 }
 
 const TOPIC_CATEGORY: Record<string, string> = {
@@ -485,13 +591,33 @@ ${JSON.stringify(compact)}`;
 async function clusterAndSummarizeBatched(
   articles: NewsDataArticle[],
 ): Promise<ClusterResult> {
-  const CHUNK_SIZE = 20;
+  const CHUNK_SIZE = 10;
   const chunks: NewsDataArticle[][] = [];
   for (let i = 0; i < articles.length; i += CHUNK_SIZE) {
     chunks.push(articles.slice(i, i + CHUNK_SIZE));
   }
+  // For each chunk, check the per-chunk cache first; only call Gemini for misses.
+  const chunkHashes = chunks.map((c) => chunkHash(c));
+  let chunkCacheHits = 0;
+  let chunkCacheWrites = 0;
   const results = await Promise.allSettled(
-    chunks.map((chunk) => clusterAndSummarize(chunk)),
+    chunks.map(async (chunk, idx) => {
+      const hash = chunkHashes[idx]!;
+      const cached = getCachedChunk(hash);
+      if (cached) {
+        chunkCacheHits += 1;
+        return cached;
+      }
+      const fresh = await clusterAndSummarize(chunk);
+      setCachedChunk(hash, fresh);
+      chunkCacheWrites += 1;
+      return fresh;
+    }),
+  );
+  if (chunkCacheWrites > 0) persistChunkCache();
+  // eslint-disable-next-line no-console
+  console.log(
+    `[clustering] chunks=${chunks.length} cacheHits=${chunkCacheHits} fresh=${chunkCacheWrites}`,
   );
   const merged: ClusterResult = { clusters: [] };
   let offset = 0;
@@ -699,11 +825,20 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
 
 const inflightFeed = new Map<string, Promise<StoryCard[]>>();
 
-function refreshInBackground(topic: string, log: { warn: Function }): void {
+function refreshInBackground(
+  topic: string,
+  log: { warn: (...args: unknown[]) => void },
+): void {
   if (inflightFeed.has(topic)) return;
+  const started = Date.now();
   const p = buildFreshFeed(topic)
     .then((stories) => {
       cache.set(topic, { at: Date.now(), data: stories });
+      persistFeedCache();
+      // eslint-disable-next-line no-console
+      console.log(
+        `[prewarm] ${topic} refreshed in ${Date.now() - started}ms (${stories.length} stories)`,
+      );
       return stories;
     })
     .catch((err) => {
@@ -715,6 +850,32 @@ function refreshInBackground(topic: string, log: { warn: Function }): void {
     });
   inflightFeed.set(topic, p);
 }
+
+// ----- Background prewarm worker -----
+// Keeps the feed cache always warm so user requests are sub-100ms.
+// Runs on module load and every PREWARM_INTERVAL_MS thereafter.
+const PREWARM_TOPICS = ["technology"];
+const PREWARM_INTERVAL_MS = 2 * 60 * 1000;
+
+const noopLog = { warn: () => {} };
+
+function prewarmAll(): void {
+  for (const topic of PREWARM_TOPICS) {
+    refreshInBackground(topic, noopLog);
+  }
+}
+
+// Hydrate from disk first (so we have something to serve even before the first
+// prewarm completes), then kick off an immediate prewarm and a recurring timer.
+loadFeedCacheFromDisk();
+loadChunkCacheFromDisk();
+// eslint-disable-next-line no-console
+console.log(
+  `[boot] feedCache=${cache.size} topics, chunkCache=${chunkCache.size} entries`,
+);
+// Don't block boot — fire and forget.
+setTimeout(prewarmAll, 500);
+setInterval(prewarmAll, PREWARM_INTERVAL_MS).unref();
 
 router.get("/feed", async (req, res) => {
   const topic = String(req.query["topic"] ?? "top").toLowerCase();

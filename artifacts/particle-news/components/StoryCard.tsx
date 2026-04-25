@@ -155,6 +155,7 @@ export function StoryCardView({
         headline: story.headline,
         source: src.name,
         category: story.category ?? "",
+        publishedAt: src.publishedAt ?? story.publishedAt ?? "",
       },
     });
   };

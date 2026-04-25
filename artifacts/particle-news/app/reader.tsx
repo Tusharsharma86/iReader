@@ -1,5 +1,6 @@
 import { Feather } from "@expo/vector-icons";
 import { Image } from "expo-image";
+import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as WebBrowser from "expo-web-browser";
@@ -17,8 +18,10 @@ import {
 import Animated, { FadeInDown } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { useColors } from "@/hooks/useColors";
+import { useImageTint } from "@/hooks/useImageTint";
 import { fetchArticle, proxiedImageUrl } from "@/lib/api";
+
+const FALLBACK_DOMINANT = "#1F2128";
 
 function tryHostname(url: string): string {
   try {
@@ -28,16 +31,99 @@ function tryHostname(url: string): string {
   }
 }
 
+function hexToRgb(hex: string): [number, number, number] | null {
+  const m = hex.replace("#", "").trim();
+  const full =
+    m.length === 3
+      ? m
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : m;
+  if (full.length !== 6) return null;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  if ([r, g, b].some((n) => Number.isNaN(n))) return null;
+  return [r, g, b];
+}
+
+function parseColor(value: string): [number, number, number] | null {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("#")) return hexToRgb(trimmed);
+  const rgbMatch = trimmed.match(
+    /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i,
+  );
+  if (rgbMatch) {
+    const r = Math.round(parseFloat(rgbMatch[1]));
+    const g = Math.round(parseFloat(rgbMatch[2]));
+    const b = Math.round(parseFloat(rgbMatch[3]));
+    if ([r, g, b].some((n) => Number.isNaN(n))) return null;
+    return [r, g, b];
+  }
+  return null;
+}
+
+function toHex(rgb: [number, number, number]): string {
+  return (
+    "#" +
+    rgb
+      .map((c) =>
+        Math.max(0, Math.min(255, c)).toString(16).padStart(2, "0"),
+      )
+      .join("")
+  );
+}
+
+function rgbaFromHex(input: string, alpha: number): string {
+  const rgb = parseColor(input);
+  if (!rgb) return `rgba(31,33,40,${alpha})`;
+  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`;
+}
+
+function darken(input: string, amount: number): string {
+  const rgb = parseColor(input);
+  if (!rgb) return "#101013";
+  return toHex(
+    rgb.map((c) => Math.round(c * (1 - amount))) as [number, number, number],
+  );
+}
+
+function lighten(input: string, amount: number): string {
+  const rgb = parseColor(input);
+  if (!rgb) return "#FFFFFF";
+  return toHex(
+    rgb.map((c) => Math.round(c + (255 - c) * amount)) as [
+      number,
+      number,
+      number,
+    ],
+  );
+}
+
+function formatTimeAgo(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const diffMs = Date.now() - date.getTime();
+  const m = Math.floor(diffMs / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 export default function ReaderScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const colors = useColors();
   const params = useLocalSearchParams<{
     url?: string;
     image?: string;
     headline?: string;
     source?: string;
     category?: string;
+    publishedAt?: string;
   }>();
 
   const url = typeof params.url === "string" ? params.url : "";
@@ -45,7 +131,19 @@ export default function ReaderScreen() {
   const headline = typeof params.headline === "string" ? params.headline : "";
   const source = typeof params.source === "string" ? params.source : "";
   const category = typeof params.category === "string" ? params.category : "";
+  const publishedAt =
+    typeof params.publishedAt === "string" ? params.publishedAt : "";
   const hostname = url ? tryHostname(url) : "";
+
+  const proxiedHero = proxiedImageUrl(image);
+  const tint = useImageTint(proxiedHero);
+  const dominant = image ? tint.dominant : FALLBACK_DOMINANT;
+
+  // Color system derived from the image's dominant color.
+  const screenBg = darken(dominant, 0.7);
+  const cardBg = darken(dominant, 0.82);
+  const accentText = lighten(dominant, 0.55);
+  const subtleText = lighten(dominant, 0.35);
 
   const article = useQuery({
     queryKey: ["article", url],
@@ -57,289 +155,463 @@ export default function ReaderScreen() {
 
   const topPad = Platform.OS === "web" ? Math.max(insets.top, 12) : insets.top;
   const title = article.data?.title || headline;
+  const timeAgo = publishedAt ? formatTimeAgo(publishedAt) : "";
+
+  const openOriginal = () => {
+    if (!url) return;
+    if (Platform.OS !== "web") {
+      Haptics.selectionAsync().catch(() => {});
+    }
+    WebBrowser.openBrowserAsync(url).catch(() => {});
+  };
+
+  const goBack = () => {
+    if (Platform.OS !== "web") {
+      Haptics.selectionAsync().catch(() => {});
+    }
+    if (router.canGoBack()) router.back();
+    else router.replace("/");
+  };
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <View
-        style={[
-          styles.topBar,
-          {
-            paddingTop: topPad + 8,
-            backgroundColor: colors.background,
-            borderBottomColor: colors.cardBorder,
-          },
-        ]}
-      >
-        <Pressable
-          onPress={() => {
-            if (Platform.OS !== "web") {
-              Haptics.selectionAsync().catch(() => {});
-            }
-            if (router.canGoBack()) router.back();
-            else router.replace("/");
-          }}
-          style={({ pressed }) => [
-            styles.iconBtn,
-            {
-              backgroundColor: "rgba(255,255,255,0.06)",
-              opacity: pressed ? 0.7 : 1,
-            },
-          ]}
-          hitSlop={10}
-        >
-          <Feather name="chevron-left" size={20} color={colors.foreground} />
-        </Pressable>
-
-        <View style={styles.topMeta}>
-          <Text style={[styles.topMetaLabel, { color: colors.mutedForeground }]}>
-            READER
-          </Text>
-          {hostname ? (
-            <Text
-              style={[styles.topMetaHost, { color: colors.foreground }]}
-              numberOfLines={1}
-            >
-              {hostname}
-            </Text>
-          ) : null}
-        </View>
-
-        {url ? (
-          <Pressable
-            onPress={() => WebBrowser.openBrowserAsync(url).catch(() => {})}
-            style={({ pressed }) => [
-              styles.iconBtn,
-              {
-                backgroundColor: "rgba(255,255,255,0.06)",
-                opacity: pressed ? 0.7 : 1,
-              },
-            ]}
-            hitSlop={10}
-          >
-            <Feather
-              name="external-link"
-              size={18}
-              color={colors.foreground}
-            />
-          </Pressable>
-        ) : (
-          <View style={styles.iconBtn} />
-        )}
-      </View>
-
+    <View style={[styles.container, { backgroundColor: screenBg }]}>
       <ScrollView
         style={{ flex: 1 }}
         contentContainerStyle={{
-          paddingBottom: insets.bottom + 40,
+          paddingBottom: insets.bottom + 110,
         }}
         showsVerticalScrollIndicator={false}
       >
-        {image ? (
-          <View style={styles.heroWrap}>
+        {/* Hero image with floating glassmorphic action buttons. */}
+        <View style={styles.heroWrap}>
+          {proxiedHero ? (
             <Image
-              source={{ uri: proxiedImageUrl(image) ?? image }}
+              source={{ uri: proxiedHero }}
               style={styles.hero}
               contentFit="cover"
-              transition={300}
+              transition={400}
             />
-            <View style={styles.heroOverlay} />
-            {category ? (
-              <View style={styles.categoryPill}>
-                <Text style={styles.categoryText}>
-                  {category.toUpperCase()}
-                </Text>
-              </View>
-            ) : null}
-          </View>
-        ) : null}
+          ) : (
+            <View style={[styles.hero, { backgroundColor: cardBg }]} />
+          )}
+          {/* Tint wash to push the image toward the dominant color */}
+          <View
+            pointerEvents="none"
+            style={[
+              StyleSheet.absoluteFill,
+              { backgroundColor: rgbaFromHex(dominant, 0.18) },
+            ]}
+          />
+          {/* Bottom-fade gradient that bleeds the hero into the screen tint */}
+          <LinearGradient
+            pointerEvents="none"
+            colors={["rgba(0,0,0,0)", "rgba(0,0,0,0)", screenBg]}
+            locations={[0, 0.55, 1]}
+            style={StyleSheet.absoluteFill}
+          />
 
-        <View style={styles.headerBlock}>
-          {title ? (
-            <Text style={[styles.headline, { color: colors.foreground }]}>
-              {title}
-            </Text>
-          ) : null}
-          <View style={styles.metaRow}>
-            {source ? (
-              <Text style={[styles.meta, { color: colors.mutedForeground }]}>
-                {source}
-              </Text>
+          {/* Floating glass buttons */}
+          <View
+            style={[
+              styles.floatingBar,
+              { top: topPad + 6 },
+            ]}
+          >
+            <GlassButton onPress={goBack}>
+              <Feather name="chevron-left" size={20} color="#FFFFFF" />
+            </GlassButton>
+            <View style={{ flex: 1 }} />
+            {url ? (
+              <GlassButton onPress={openOriginal}>
+                <Feather name="share" size={17} color="#FFFFFF" />
+              </GlassButton>
             ) : null}
-            {article.data?.byline ? (
-              <>
-                <View style={styles.metaDot} />
-                <Text style={[styles.meta, { color: colors.mutedForeground }]}>
-                  {article.data.byline}
-                </Text>
-              </>
+            {url ? (
+              <GlassButton onPress={openOriginal}>
+                <Feather name="more-horizontal" size={20} color="#FFFFFF" />
+              </GlassButton>
             ) : null}
           </View>
         </View>
 
-        {article.isLoading ? (
-          <View style={styles.loadingBlock}>
-            <ActivityIndicator color={colors.mutedForeground} />
+        {/* Source brand display */}
+        {source ? (
+          <View style={styles.brandWrap}>
             <Text
-              style={[styles.loadingText, { color: colors.mutedForeground }]}
+              style={[
+                styles.brandText,
+                {
+                  color: "#FFFFFF",
+                  textShadowColor: rgbaFromHex(accentText, 0.45),
+                },
+              ]}
+              numberOfLines={1}
             >
-              Cleaning up the article…
+              {source}
             </Text>
           </View>
-        ) : article.isError ? (
-          <View style={styles.errorBlock}>
-            <Feather
-              name="alert-circle"
-              size={28}
-              color={colors.mutedForeground}
-            />
-            <Text style={[styles.errorTitle, { color: colors.foreground }]}>
-              Couldn't extract this article
+        ) : null}
+
+        {/* Meta row: lightning + time ago */}
+        <View style={styles.metaRow}>
+          <Feather name="zap" size={11} color={accentText} />
+          {timeAgo ? (
+            <Text style={[styles.metaText, { color: accentText }]}>
+              {timeAgo.toUpperCase()}
             </Text>
-            <Text
-              style={[styles.errorText, { color: colors.mutedForeground }]}
-            >
-              {article.error instanceof Error
-                ? article.error.message
-                : "The publisher may be blocking automated reads."}
-            </Text>
-            {url ? (
-              <Pressable
-                onPress={() =>
-                  WebBrowser.openBrowserAsync(url).catch(() => {})
-                }
-                style={({ pressed }) => [
-                  styles.openBtn,
-                  {
-                    backgroundColor: colors.foreground,
-                    opacity: pressed ? 0.75 : 1,
-                  },
-                ]}
-              >
-                <Text style={[styles.openBtnText, { color: colors.background }]}>
-                  Open in browser
-                </Text>
-              </Pressable>
-            ) : null}
-          </View>
-        ) : (
-          <View style={styles.articleBlock}>
-            {(article.data?.paragraphs ?? []).map((p, i) => (
-              <Animated.Text
-                key={i}
-                entering={FadeInDown.delay(Math.min(i, 8) * 30).duration(280)}
-                style={[styles.paragraph, { color: colors.foreground }]}
-              >
-                {p}
-              </Animated.Text>
-            ))}
-            {(article.data?.paragraphs ?? []).length === 0 ? (
-              <Text style={[styles.meta, { color: colors.mutedForeground }]}>
-                No article body available.
+          ) : null}
+          {category ? (
+            <>
+              <View
+                style={[styles.metaDot, { backgroundColor: subtleText }]}
+              />
+              <Text style={[styles.metaText, { color: accentText }]}>
+                {category.toUpperCase()}
               </Text>
-            ) : null}
-          </View>
-        )}
+            </>
+          ) : null}
+        </View>
+
+        {/* Headline */}
+        {title ? (
+          <Text style={[styles.headline, { color: "#FFFFFF" }]}>{title}</Text>
+        ) : null}
+
+        {/* Dek / source line */}
+        {hostname ? (
+          <Text style={[styles.dek, { color: subtleText }]}>
+            From {hostname}
+          </Text>
+        ) : null}
+
+        {/* Tab strip */}
+        <View style={styles.tabStrip}>
+          <Tab label="Article" active />
+          <Tab label="Open Original" onPress={openOriginal} />
+        </View>
+
+        {/* Content card */}
+        <View
+          style={[
+            styles.contentCard,
+            {
+              backgroundColor: cardBg,
+              shadowColor: dominant,
+              ...Platform.select({
+                web: {
+                  boxShadow: `0 18px 40px ${rgbaFromHex(dominant, 0.45)}`,
+                },
+                default: {},
+              }),
+            },
+          ]}
+        >
+          {article.isLoading ? (
+            <View style={styles.loadingBlock}>
+              <ActivityIndicator color={accentText} />
+              <Text style={[styles.loadingText, { color: subtleText }]}>
+                Pulling the article…
+              </Text>
+            </View>
+          ) : article.isError ? (
+            <View style={styles.errorBlock}>
+              <Feather name="alert-circle" size={24} color={subtleText} />
+              <Text style={[styles.errorTitle, { color: "#FFFFFF" }]}>
+                Couldn't extract this article
+              </Text>
+              <Text style={[styles.errorText, { color: subtleText }]}>
+                {article.error instanceof Error
+                  ? article.error.message
+                  : "The publisher may be blocking automated reads."}
+              </Text>
+              {url ? (
+                <Pressable
+                  onPress={openOriginal}
+                  style={({ pressed }) => [
+                    styles.openBtn,
+                    {
+                      backgroundColor: "#FFFFFF",
+                      opacity: pressed ? 0.75 : 1,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.openBtnText, { color: "#0A0A0A" }]}>
+                    Open in browser
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : (
+            <View style={styles.articleBody}>
+              {(article.data?.paragraphs ?? []).map((p, i) => (
+                <View key={i} style={styles.bulletRow}>
+                  <View
+                    style={[styles.bulletDot, { backgroundColor: accentText }]}
+                  />
+                  <Animated.Text
+                    entering={FadeInDown.delay(Math.min(i, 8) * 30).duration(280)}
+                    style={[styles.bulletText, { color: "#F2F2F4" }]}
+                  >
+                    {p}
+                  </Animated.Text>
+                </View>
+              ))}
+              {(article.data?.paragraphs ?? []).length === 0 ? (
+                <Text style={[styles.bulletText, { color: subtleText }]}>
+                  No article body available.
+                </Text>
+              ) : null}
+            </View>
+          )}
+        </View>
       </ScrollView>
+
+      {/* Bottom floating action bar */}
+      <View
+        style={[
+          styles.bottomBarWrap,
+          {
+            paddingBottom: Math.max(insets.bottom, 14),
+          },
+        ]}
+        pointerEvents="box-none"
+      >
+        <View
+          style={[
+            styles.bottomBar,
+            {
+              backgroundColor: rgbaFromHex(lighten(dominant, 0.15), 0.88),
+              shadowColor: "#000000",
+            },
+          ]}
+        >
+          <BottomAction
+            icon="bookmark"
+            label="Save Article"
+            onPress={() => {
+              // Save logic lives on the home tile already; here it's a no-op
+              // hint to the user.
+              if (Platform.OS !== "web") {
+                Haptics.selectionAsync().catch(() => {});
+              }
+            }}
+          />
+          <View style={styles.bottomBarDivider} />
+          <BottomAction
+            icon="external-link"
+            label="Open Original"
+            onPress={openOriginal}
+          />
+        </View>
+      </View>
     </View>
+  );
+}
+
+function GlassButton({
+  onPress,
+  children,
+}: {
+  onPress: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={10}
+      style={({ pressed }) => [
+        styles.glassBtn,
+        {
+          backgroundColor: "rgba(20,22,28,0.55)",
+          borderColor: "rgba(255,255,255,0.18)",
+          opacity: pressed ? 0.7 : 1,
+        },
+      ]}
+    >
+      {children}
+    </Pressable>
+  );
+}
+
+function Tab({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active?: boolean;
+  onPress?: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!onPress && active}
+      style={({ pressed }) => [
+        styles.tab,
+        { opacity: pressed && onPress ? 0.7 : 1 },
+      ]}
+    >
+      <Text
+        style={[
+          styles.tabText,
+          {
+            color: active ? "#FFFFFF" : "rgba(255,255,255,0.55)",
+            fontFamily: active ? "Inter_700Bold" : "Inter_500Medium",
+          },
+        ]}
+      >
+        {label}
+      </Text>
+      <View
+        style={[
+          styles.tabUnderline,
+          { backgroundColor: active ? "#FFFFFF" : "transparent" },
+        ]}
+      />
+    </Pressable>
+  );
+}
+
+function BottomAction({
+  icon,
+  label,
+  onPress,
+}: {
+  icon: keyof typeof Feather.glyphMap;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={6}
+      style={({ pressed }) => [
+        styles.bottomAction,
+        { opacity: pressed ? 0.65 : 1 },
+      ]}
+    >
+      <Feather name={icon} size={15} color="#0A0A0A" />
+      <Text style={styles.bottomActionText}>{label}</Text>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
-  topBar: {
+  heroWrap: {
+    width: "100%",
+    aspectRatio: 16 / 10,
+    overflow: "hidden",
+  },
+  hero: { width: "100%", height: "100%" },
+  floatingBar: {
+    position: "absolute",
+    left: 16,
+    right: 16,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingBottom: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    gap: 12,
+    gap: 10,
   },
-  iconBtn: {
-    width: 36,
-    height: 36,
+  glassBtn: {
+    width: 38,
+    height: 38,
     borderRadius: 999,
     alignItems: "center",
     justifyContent: "center",
+    borderWidth: StyleSheet.hairlineWidth,
   },
-  topMeta: { flex: 1, alignItems: "center" },
-  topMetaLabel: {
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 9,
-    letterSpacing: 1.4,
-  },
-  topMetaHost: {
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 13,
-    letterSpacing: 0.2,
-    marginTop: 2,
-  },
-  heroWrap: {
-    width: "100%",
-    aspectRatio: 16 / 9,
-    backgroundColor: "rgba(255,255,255,0.04)",
-  },
-  hero: { width: "100%", height: "100%" },
-  heroOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.25)",
-  },
-  categoryPill: {
-    position: "absolute",
-    top: 14,
-    left: 14,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 999,
-    backgroundColor: "rgba(0,0,0,0.55)",
-  },
-  categoryText: {
-    color: "#FFFFFF",
-    fontFamily: "Inter_600SemiBold",
-    fontSize: 10,
-    letterSpacing: 1.2,
-  },
-  headerBlock: {
+  brandWrap: {
     paddingHorizontal: 22,
-    paddingTop: 22,
-    paddingBottom: 14,
-    gap: 10,
+    paddingTop: 18,
+    alignItems: "center",
   },
-  headline: {
+  brandText: {
     fontFamily: "Inter_700Bold",
-    fontSize: 24,
-    lineHeight: 31,
-    letterSpacing: -0.3,
+    fontSize: 26,
+    letterSpacing: -0.4,
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 16,
   },
   metaRow: {
+    paddingHorizontal: 22,
+    paddingTop: 14,
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    flexWrap: "wrap",
+    gap: 6,
   },
-  meta: { fontFamily: "Inter_500Medium", fontSize: 13 },
+  metaText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 11,
+    letterSpacing: 1.1,
+  },
   metaDot: {
     width: 3,
     height: 3,
     borderRadius: 2,
-    backgroundColor: "rgba(255,255,255,0.3)",
+    marginHorizontal: 4,
+    opacity: 0.6,
+  },
+  headline: {
+    paddingHorizontal: 22,
+    paddingTop: 8,
+    fontFamily: "Inter_700Bold",
+    fontSize: 26,
+    lineHeight: 32,
+    letterSpacing: -0.5,
+  },
+  dek: {
+    paddingHorizontal: 22,
+    paddingTop: 8,
+    fontFamily: "Inter_500Medium",
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  tabStrip: {
+    paddingHorizontal: 22,
+    paddingTop: 22,
+    paddingBottom: 14,
+    flexDirection: "row",
+    gap: 24,
+  },
+  tab: {
+    paddingVertical: 4,
+    alignItems: "flex-start",
+  },
+  tabText: {
+    fontSize: 14,
+    letterSpacing: 0.1,
+  },
+  tabUnderline: {
+    height: 2,
+    width: 26,
+    marginTop: 8,
+    borderRadius: 1,
+  },
+  contentCard: {
+    marginHorizontal: 16,
+    borderRadius: 22,
+    padding: 18,
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.45,
+    shadowRadius: 28,
+    elevation: 10,
   },
   loadingBlock: {
-    paddingVertical: 60,
+    paddingVertical: 50,
     alignItems: "center",
     gap: 10,
   },
   loadingText: { fontFamily: "Inter_500Medium", fontSize: 13 },
   errorBlock: {
-    paddingVertical: 60,
-    paddingHorizontal: 30,
+    paddingVertical: 40,
+    paddingHorizontal: 18,
     alignItems: "center",
     gap: 10,
   },
   errorTitle: {
     fontFamily: "Inter_700Bold",
-    fontSize: 17,
-    marginTop: 6,
+    fontSize: 16,
+    marginTop: 4,
   },
   errorText: {
     fontFamily: "Inter_500Medium",
@@ -348,61 +620,64 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   openBtn: {
-    marginTop: 14,
-    paddingHorizontal: 20,
-    paddingVertical: 11,
+    marginTop: 12,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
     borderRadius: 999,
   },
   openBtnText: { fontFamily: "Inter_600SemiBold", fontSize: 13 },
-  summaryCard: {
-    marginHorizontal: 16,
-    marginTop: 4,
-    marginBottom: 8,
-    borderWidth: 1,
-    padding: 18,
-    gap: 14,
-  },
-  summaryHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  aiPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 999,
-  },
-  aiPillText: {
-    fontFamily: "Inter_700Bold",
-    fontSize: 10,
-    letterSpacing: 1.2,
-  },
-  bullets: { gap: 10 },
-  bulletRow: { flexDirection: "row", gap: 10, alignItems: "flex-start" },
+  articleBody: { gap: 14 },
+  bulletRow: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
   bulletDot: {
-    width: 5,
-    height: 5,
+    width: 6,
+    height: 6,
     borderRadius: 3,
     marginTop: 9,
   },
   bulletText: {
     flex: 1,
     fontFamily: "Inter_500Medium",
-    fontSize: 14,
-    lineHeight: 21,
+    fontSize: 15,
+    lineHeight: 23,
+    letterSpacing: 0.05,
   },
-  articleBlock: {
-    paddingHorizontal: 22,
-    paddingTop: 18,
-    gap: 16,
+  bottomBarWrap: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 24,
+    alignItems: "center",
   },
-  paragraph: {
-    fontFamily: "Inter_400Regular",
-    fontSize: 16,
-    lineHeight: 27,
-    letterSpacing: 0.1,
+  bottomBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    borderRadius: 999,
+    minWidth: 280,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.35,
+    shadowRadius: 22,
+    elevation: 12,
+  },
+  bottomBarDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 22,
+    backgroundColor: "rgba(0,0,0,0.18)",
+    marginHorizontal: 4,
+  },
+  bottomAction: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 18,
+    paddingVertical: 9,
+    borderRadius: 999,
+  },
+  bottomActionText: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 13,
+    color: "#0A0A0A",
   },
 });

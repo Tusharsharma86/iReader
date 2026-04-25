@@ -452,7 +452,7 @@ ${JSON.stringify(compact)}`;
     model: "gemini-2.5-flash",
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     config: {
-      maxOutputTokens: 8192,
+      maxOutputTokens: 16384,
       responseMimeType: "application/json",
     },
   });
@@ -475,6 +475,63 @@ ${JSON.stringify(compact)}`;
     throw new Error("Invalid cluster response");
   }
   return parsed;
+}
+
+// Splits articles into chunks and runs clusterAndSummarize on each in parallel.
+// Failed chunks fall back to per-article singletons with naive bullets so they
+// still render with at least keyHighlights populated.
+async function clusterAndSummarizeBatched(
+  articles: NewsDataArticle[],
+): Promise<ClusterResult> {
+  const CHUNK_SIZE = 20;
+  const chunks: NewsDataArticle[][] = [];
+  for (let i = 0; i < articles.length; i += CHUNK_SIZE) {
+    chunks.push(articles.slice(i, i + CHUNK_SIZE));
+  }
+  const results = await Promise.allSettled(
+    chunks.map((chunk) => clusterAndSummarize(chunk)),
+  );
+  const merged: ClusterResult = { clusters: [] };
+  let offset = 0;
+  let okChunks = 0;
+  results.forEach((r, idx) => {
+    const chunkLen = chunks[idx]!.length;
+    if (r.status === "fulfilled") {
+      okChunks += 1;
+      r.value.clusters.forEach((c) => {
+        merged.clusters.push({
+          ...c,
+          article_indexes: c.article_indexes.map((i) => i + offset),
+        });
+      });
+    } else {
+      // Chunk failed: emit singleton clusters with naive bullets so the cards
+      // still show 5Ws/ELI5/keyHighlights derived from the description.
+      for (let i = 0; i < chunkLen; i++) {
+        const a = articles[offset + i]!;
+        const desc = a.description ?? a.content ?? "";
+        merged.clusters.push({
+          headline: a.title ?? "Untitled",
+          category: "Technology",
+          article_indexes: [offset + i],
+          fiveWs: naiveBullets(desc, 5),
+          eli5: naiveBullets(desc, 3),
+          keyHighlights: naiveBullets(desc, 4),
+          source_types: [
+            classifySource(a.link ?? "", a.source_name ?? "") as
+              | "mainstream"
+              | "tech"
+              | "niche",
+          ],
+        });
+      }
+    }
+    offset += chunkLen;
+  });
+  if (okChunks === 0) {
+    throw new Error("All Gemini chunks failed");
+  }
+  return merged;
 }
 
 const MAINSTREAM_HOSTS = [
@@ -596,49 +653,82 @@ function buildStoryCards(
   });
 }
 
+async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
+  const articles =
+    topic === "technology"
+      ? await fetchTechRss()
+      : await fetchNewsData(topic);
+  if (articles.length === 0) return [];
+  try {
+    const clusters = await clusterAndSummarizeBatched(articles);
+    return buildStoryCards(articles, clusters);
+  } catch {
+    return buildFallbackStories(articles);
+  }
+}
+
+const inflightFeed = new Map<string, Promise<StoryCard[]>>();
+
+function refreshInBackground(topic: string, log: { warn: Function }): void {
+  if (inflightFeed.has(topic)) return;
+  const p = buildFreshFeed(topic)
+    .then((stories) => {
+      cache.set(topic, { at: Date.now(), data: stories });
+      return stories;
+    })
+    .catch((err) => {
+      log.warn({ err, topic }, "background refresh failed");
+      return [] as StoryCard[];
+    })
+    .finally(() => {
+      inflightFeed.delete(topic);
+    });
+  inflightFeed.set(topic, p);
+}
+
 router.get("/feed", async (req, res) => {
   const topic = String(req.query["topic"] ?? "top").toLowerCase();
   const refresh = req.query["refresh"] === "1";
-
   const cached = cache.get(topic);
-  if (!refresh && cached && Date.now() - cached.at < ttlFor(topic)) {
+  const isFresh = cached && Date.now() - cached.at < ttlFor(topic);
+
+  // Fast path: return cached data if fresh.
+  if (!refresh && isFresh) {
     res.json({ stories: cached.data, cached: true });
     return;
   }
 
-  let articles: NewsDataArticle[] = [];
+  // Stale-while-revalidate: if user hit refresh OR cache is stale, return what
+  // we have immediately and refetch in the background. The next request will
+  // see the fresh data.
+  if (cached) {
+    refreshInBackground(topic, req.log);
+    res.json({ stories: cached.data, cached: true, stale: true });
+    return;
+  }
+
+  // Cold path (no cache at all): user has to wait for the first build.
+  // De-dupe concurrent first-time fetches with inflightFeed.
+  let p = inflightFeed.get(topic);
+  if (!p) {
+    p = buildFreshFeed(topic)
+      .then((stories) => {
+        cache.set(topic, { at: Date.now(), data: stories });
+        return stories;
+      })
+      .finally(() => {
+        inflightFeed.delete(topic);
+      });
+    inflightFeed.set(topic, p);
+  }
   try {
-    articles =
-      topic === "technology"
-        ? await fetchTechRss()
-        : await fetchNewsData(topic);
+    const stories = await p;
+    res.json({ stories, cached: false, source: "ai" });
   } catch (err) {
-    req.log.error({ err }, "article source fetch failed");
-    if (cached) {
-      res.json({ stories: cached.data, cached: true, stale: true });
-      return;
-    }
+    req.log.error({ err }, "feed cold fetch failed");
     res.status(502).json({
       error: err instanceof Error ? err.message : "News provider unavailable",
     });
-    return;
-  }
-
-  if (articles.length === 0) {
-    res.json({ stories: [], cached: false });
-    return;
-  }
-
-  try {
-    const clusters = await clusterAndSummarize(articles);
-    const stories = buildStoryCards(articles, clusters);
-    cache.set(topic, { at: Date.now(), data: stories });
-    res.json({ stories, cached: false, source: "ai" });
-  } catch (err) {
-    req.log.warn({ err }, "clustering failed, using raw fallback");
-    const stories = buildFallbackStories(articles);
-    cache.set(topic, { at: Date.now(), data: stories });
-    res.json({ stories, cached: false, source: "raw", degraded: true });
   }
 });
 

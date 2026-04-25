@@ -75,6 +75,14 @@ const TECH_RSS_SOURCES: RssSource[] = [
     url: "https://feeds.arstechnica.com/arstechnica/index",
   },
   { id: "gizmodo", name: "Gizmodo", url: "https://gizmodo.com/rss" },
+  { id: "engadget", name: "Engadget", url: "https://www.engadget.com/rss.xml" },
+  { id: "wired", name: "Wired", url: "https://www.wired.com/feed/rss" },
+  { id: "9to5mac", name: "9to5Mac", url: "https://9to5mac.com/feed/" },
+  {
+    id: "mittech",
+    name: "MIT Tech Review",
+    url: "https://www.technologyreview.com/feed/",
+  },
 ];
 
 const xmlParser = new XMLParser({
@@ -346,7 +354,7 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
-  const top = articles.slice(0, 24);
+  const top = articles.slice(0, 80);
 
   // Enrich items missing image_url by scraping og:image (parallel, time-boxed).
   const needs = top

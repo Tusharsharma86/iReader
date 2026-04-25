@@ -4,12 +4,14 @@ export type Source = {
   name: string;
   url: string;
   type: SourceType;
+  imageUrl?: string | null;
+  publishedAt?: string;
 };
 
 export type Summaries = {
   fiveWs: string[];
-  eli5: string[];
-  keyHighlights: string[];
+  eli5: string;
+  keyHighlights: string;
 };
 
 export type StoryCard = {

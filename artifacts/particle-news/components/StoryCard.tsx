@@ -16,11 +16,14 @@ import Animated, {
   LinearTransition,
 } from "react-native-reanimated";
 
-import { PerspectiveBar } from "@/components/PerspectiveBar";
 import { useColors } from "@/hooks/useColors";
 import { useImageTint } from "@/hooks/useImageTint";
 import { useSaved } from "@/contexts/SavedContext";
-import { proxiedImageUrl, type StoryCard as StoryCardType } from "@/lib/api";
+import {
+  proxiedImageUrl,
+  type Source,
+  type StoryCard as StoryCardType,
+} from "@/lib/api";
 
 type SummaryMode = "fiveWs" | "eli5" | "keyHighlights";
 
@@ -56,8 +59,6 @@ function rgbaFromHex(hex: string, alpha: number): string {
   return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`;
 }
 
-// Mix `hex` toward black by `amount` (0..1). Used to produce a deeply
-// saturated dark surface from the dominant color (Particle-style backdrop).
 function darken(hex: string, amount: number): string {
   const rgb = hexToRgb(hex);
   if (!rgb) return "#101013";
@@ -65,7 +66,6 @@ function darken(hex: string, amount: number): string {
   return `rgb(${r},${g},${b})`;
 }
 
-// Brighten toward white for accent text.
 function lighten(hex: string, amount: number): string {
   const rgb = hexToRgb(hex);
   if (!rgb) return "#FFFFFF";
@@ -96,6 +96,14 @@ function parseFiveW(line: string): { label: string | null; body: string } {
   return { label: null, body: line };
 }
 
+function tryHostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
 export function StoryCardView({
   story,
   index,
@@ -115,17 +123,12 @@ export function StoryCardView({
   const dominant = hasImage ? tint.dominant : FALLBACK_DOMINANT;
   const vibrant = hasImage ? tint.vibrant : FALLBACK_VIBRANT;
 
-  // Particle-style heavy tint: card surface is a very dark mix of the
-  // dominant color, image gets a strong colored wash on top, and accent
-  // text uses a light version of the dominant color.
   const surfaceColor = darken(dominant, 0.78);
   const imageWash = rgbaFromHex(dominant, 0.55);
   const accentText = lighten(dominant, 0.55);
 
-  const bullets = story.summaries[mode] ?? [];
-
-  const openReader = () => {
-    const src = story.sources[0];
+  const openReader = (sourceOverride?: Source) => {
+    const src = sourceOverride ?? story.sources[0];
     if (!src?.url) return;
     if (Platform.OS !== "web") {
       Haptics.selectionAsync().catch(() => {});
@@ -134,7 +137,7 @@ export function StoryCardView({
       pathname: "/reader",
       params: {
         url: src.url,
-        image: story.imageUrl ?? "",
+        image: src.imageUrl ?? story.imageUrl ?? "",
         headline: story.headline,
         source: src.name,
         category: story.category ?? "",
@@ -164,7 +167,7 @@ export function StoryCardView({
       ]}
     >
       <Pressable
-        onPress={openReader}
+        onPress={() => openReader()}
         android_ripple={{ color: rgbaFromHex(dominant, 0.25) }}
         style={({ pressed }) => [
           styles.card,
@@ -175,7 +178,6 @@ export function StoryCardView({
           },
         ]}
       >
-        {/* Subtle top-to-bottom gradient over the surface for depth */}
         <LinearGradient
           colors={[
             rgbaFromHex(dominant, 0.25),
@@ -195,7 +197,6 @@ export function StoryCardView({
               contentFit="cover"
               transition={300}
             />
-            {/* Heavy colored wash over the image */}
             <View
               style={[styles.imageOverlay, { backgroundColor: imageWash }]}
               pointerEvents="none"
@@ -230,16 +231,12 @@ export function StoryCardView({
         <View style={styles.body}>
           <View style={styles.metaRow}>
             <Text
-              style={[
-                styles.meta,
-                { color: accentText, letterSpacing: 1.1 },
-              ]}
+              style={[styles.meta, { color: accentText, letterSpacing: 1.1 }]}
             >
-              {story.sourceCount} {story.sourceCount === 1 ? "SOURCE" : "SOURCES"}
+              {story.sourceCount}{" "}
+              {story.sourceCount === 1 ? "SOURCE" : "SOURCES"}
             </Text>
-            <View
-              style={[styles.metaDot, { backgroundColor: accentText }]}
-            />
+            <View style={[styles.metaDot, { backgroundColor: accentText }]} />
             <Text style={[styles.meta, { color: accentText }]}>
               {formatTimeAgo(story.publishedAt).toUpperCase()}
             </Text>
@@ -287,18 +284,24 @@ export function StoryCardView({
           <Animated.View
             key={mode}
             entering={FadeInDown.duration(280)}
-            style={styles.bullets}
+            style={styles.summaryWrap}
           >
             {mode === "fiveWs" ? (
-              <FiveWsList lines={bullets} accent={accentText} />
+              <FiveWsList lines={story.summaries.fiveWs} accent={accentText} />
+            ) : mode === "eli5" ? (
+              <SummaryParagraph text={story.summaries.eli5} />
             ) : (
-              <BulletList lines={bullets} dot={vibrant} />
+              <SummaryParagraph text={story.summaries.keyHighlights} />
             )}
           </Animated.View>
 
           <View style={styles.divider} />
 
-          <PerspectiveBar sources={story.sources} />
+          <SourcesList
+            sources={story.sources}
+            accent={accentText}
+            onOpenSource={(s) => openReader(s)}
+          />
 
           <View style={styles.footerRow}>
             <Pressable
@@ -337,13 +340,6 @@ export function StoryCardView({
                 {saved ? "Saved" : "Save"}
               </Text>
             </Pressable>
-
-            <View style={styles.tapHint}>
-              <Text style={[styles.tapHintText, { color: accentText }]}>
-                TAP TO READ
-              </Text>
-              <Feather name="chevron-right" size={16} color={accentText} />
-            </View>
           </View>
         </View>
       </Pressable>
@@ -351,30 +347,21 @@ export function StoryCardView({
   );
 }
 
-function BulletList({ lines, dot }: { lines: string[]; dot: string }) {
-  if (lines.length === 0) {
+function SummaryParagraph({ text }: { text: string }) {
+  if (!text || !text.trim()) {
     return (
-      <Text style={[styles.bulletText, { color: "rgba(255,255,255,0.55)" }]}>
+      <Text style={[styles.paragraph, { color: "rgba(255,255,255,0.55)" }]}>
         Summary unavailable.
       </Text>
     );
   }
-  return (
-    <>
-      {lines.map((b, i) => (
-        <View key={i} style={styles.bulletRow}>
-          <View style={[styles.bulletDot, { backgroundColor: dot }]} />
-          <Text style={[styles.bulletText, { color: "#F2F2F4" }]}>{b}</Text>
-        </View>
-      ))}
-    </>
-  );
+  return <Text style={styles.paragraph}>{text}</Text>;
 }
 
 function FiveWsList({ lines, accent }: { lines: string[]; accent: string }) {
-  if (lines.length === 0) {
+  if (!lines || lines.length === 0) {
     return (
-      <Text style={[styles.bulletText, { color: "rgba(255,255,255,0.55)" }]}>
+      <Text style={[styles.paragraph, { color: "rgba(255,255,255,0.55)" }]}>
         Summary unavailable.
       </Text>
     );
@@ -392,6 +379,102 @@ function FiveWsList({ lines, accent }: { lines: string[]; accent: string }) {
           </View>
         );
       })}
+    </View>
+  );
+}
+
+const SOURCE_TYPE_LABEL: Record<Source["type"], string> = {
+  mainstream: "Mainstream",
+  tech: "Tech",
+  niche: "Niche",
+};
+
+function SourcesList({
+  sources,
+  accent,
+  onOpenSource,
+}: {
+  sources: Source[];
+  accent: string;
+  onOpenSource: (s: Source) => void;
+}) {
+  if (!sources || sources.length === 0) return null;
+  return (
+    <View style={styles.sourcesWrap}>
+      <Text style={[styles.sourcesHeader, { color: accent }]}>
+        REFERENCED ARTICLES
+      </Text>
+      <View style={{ gap: 8 }}>
+        {sources.map((s, i) => {
+          const thumb = proxiedImageUrl(s.imageUrl ?? null);
+          const host = tryHostname(s.url);
+          return (
+            <Pressable
+              key={`${i}-${s.url}`}
+              onPress={(e) => {
+                e.stopPropagation?.();
+                onOpenSource(s);
+              }}
+              style={({ pressed }) => [
+                styles.sourceRow,
+                {
+                  backgroundColor: pressed
+                    ? "rgba(255,255,255,0.10)"
+                    : "rgba(255,255,255,0.05)",
+                },
+              ]}
+            >
+              <View style={styles.sourceThumbWrap}>
+                {thumb ? (
+                  <Image
+                    source={{ uri: thumb }}
+                    style={styles.sourceThumb}
+                    contentFit="cover"
+                    transition={200}
+                  />
+                ) : (
+                  <View
+                    style={[
+                      styles.sourceThumb,
+                      {
+                        backgroundColor: "rgba(255,255,255,0.08)",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      },
+                    ]}
+                  >
+                    <Feather
+                      name="file-text"
+                      size={16}
+                      color="rgba(255,255,255,0.45)"
+                    />
+                  </View>
+                )}
+              </View>
+              <View style={styles.sourceMeta}>
+                <Text
+                  style={styles.sourceName}
+                  numberOfLines={1}
+                >
+                  {s.name}
+                </Text>
+                <Text
+                  style={styles.sourceSub}
+                  numberOfLines={1}
+                >
+                  {SOURCE_TYPE_LABEL[s.type] ?? "Source"}
+                  {host ? ` · ${host}` : ""}
+                </Text>
+              </View>
+              <Feather
+                name="chevron-right"
+                size={16}
+                color="rgba(255,255,255,0.55)"
+              />
+            </Pressable>
+          );
+        })}
+      </View>
     </View>
   );
 }
@@ -469,19 +552,12 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   modeText: { fontFamily: "Inter_600SemiBold", fontSize: 12 },
-  bullets: { gap: 10, marginTop: 2 },
-  bulletRow: { flexDirection: "row", gap: 10, alignItems: "flex-start" },
-  bulletDot: {
-    width: 5,
-    height: 5,
-    borderRadius: 3,
-    marginTop: 9,
-  },
-  bulletText: {
-    flex: 1,
+  summaryWrap: { marginTop: 2 },
+  paragraph: {
     fontFamily: "Inter_500Medium",
     fontSize: 14,
-    lineHeight: 21,
+    lineHeight: 22,
+    color: "#F2F2F4",
   },
   qaBlock: { gap: 4 },
   qaLabel: {
@@ -500,10 +576,40 @@ const styles = StyleSheet.create({
     marginVertical: 4,
     backgroundColor: "rgba(255,255,255,0.10)",
   },
+  sourcesWrap: { gap: 10 },
+  sourcesHeader: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 11,
+    letterSpacing: 1.4,
+  },
+  sourceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 8,
+    borderRadius: 12,
+  },
+  sourceThumbWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    overflow: "hidden",
+  },
+  sourceThumb: { width: "100%", height: "100%" },
+  sourceMeta: { flex: 1, gap: 2 },
+  sourceName: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 13,
+    color: "#FFFFFF",
+  },
+  sourceSub: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 11,
+    color: "rgba(255,255,255,0.6)",
+  },
   footerRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
     gap: 10,
   },
   iconButton: {
@@ -515,15 +621,4 @@ const styles = StyleSheet.create({
     borderRadius: 999,
   },
   iconButtonText: { fontFamily: "Inter_600SemiBold", fontSize: 13 },
-  tapHint: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 4,
-  },
-  tapHintText: {
-    fontFamily: "Inter_700Bold",
-    fontSize: 11,
-    letterSpacing: 1.2,
-  },
 });

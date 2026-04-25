@@ -222,77 +222,22 @@ export default function ReaderScreen() {
             ) : null}
           </View>
         ) : (
-          <>
-            {(article.data?.summaryBullets ?? []).length > 0 ? (
-              <Animated.View
-                entering={FadeInDown.duration(360).springify().damping(18)}
-                style={[
-                  styles.summaryCard,
-                  {
-                    backgroundColor: colors.card,
-                    borderColor: colors.cardBorder,
-                    borderRadius: colors.radius,
-                  },
-                ]}
+          <View style={styles.articleBlock}>
+            {(article.data?.paragraphs ?? []).map((p, i) => (
+              <Animated.Text
+                key={i}
+                entering={FadeInDown.delay(Math.min(i, 8) * 30).duration(280)}
+                style={[styles.paragraph, { color: colors.foreground }]}
               >
-                <View style={styles.summaryHeader}>
-                  <View
-                    style={[
-                      styles.aiPill,
-                      { backgroundColor: colors.primaryGlow },
-                    ]}
-                  >
-                    <Feather
-                      name="zap"
-                      size={11}
-                      color={colors.primary}
-                    />
-                    <Text style={[styles.aiPillText, { color: colors.primary }]}>
-                      AI SUMMARY · 100 WORDS
-                    </Text>
-                  </View>
-                </View>
-                <View style={styles.bullets}>
-                  {article.data!.summaryBullets.map((b, i) => (
-                    <View key={i} style={styles.bulletRow}>
-                      <View
-                        style={[
-                          styles.bulletDot,
-                          { backgroundColor: colors.primary },
-                        ]}
-                      />
-                      <Text
-                        style={[
-                          styles.bulletText,
-                          { color: colors.foreground },
-                        ]}
-                      >
-                        {b}
-                      </Text>
-                    </View>
-                  ))}
-                </View>
-              </Animated.View>
+                {p}
+              </Animated.Text>
+            ))}
+            {(article.data?.paragraphs ?? []).length === 0 ? (
+              <Text style={[styles.meta, { color: colors.mutedForeground }]}>
+                No article body available.
+              </Text>
             ) : null}
-
-            <View style={styles.articleBlock}>
-              {(article.data?.paragraphs ?? []).map((p, i) => (
-                <Animated.Text
-                  key={i}
-                  entering={FadeInDown.delay(Math.min(i, 8) * 30)
-                    .duration(280)}
-                  style={[styles.paragraph, { color: colors.foreground }]}
-                >
-                  {p}
-                </Animated.Text>
-              ))}
-              {(article.data?.paragraphs ?? []).length === 0 ? (
-                <Text style={[styles.meta, { color: colors.mutedForeground }]}>
-                  No article body available.
-                </Text>
-              ) : null}
-            </View>
-          </>
+          </View>
         )}
       </ScrollView>
     </View>

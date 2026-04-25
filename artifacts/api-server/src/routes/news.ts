@@ -8,6 +8,8 @@ type Source = {
   name: string;
   url: string;
   type: "mainstream" | "tech" | "niche";
+  imageUrl?: string | null;
+  publishedAt?: string;
 };
 
 type StoryCard = {
@@ -18,8 +20,8 @@ type StoryCard = {
   publishedAt: string;
   summaries: {
     fiveWs: string[];
-    eli5: string[];
-    keyHighlights: string[];
+    eli5: string;
+    keyHighlights: string;
   };
   sources: Source[];
   sourceCount: number;
@@ -402,8 +404,8 @@ type ClusterResult = {
     category: string;
     article_indexes: number[];
     fiveWs: string[];
-    eli5: string[];
-    keyHighlights: string[];
+    eli5: string;
+    keyHighlights: string;
     source_types: ("mainstream" | "tech" | "niche")[];
   }[];
 };
@@ -422,10 +424,10 @@ async function clusterAndSummarize(
 
 1. Write a single neutral, sharp headline (10-14 words max).
 2. Pick the best matching category (one of: World, Politics, Business, Technology, Science, Health, Sports, Entertainment).
-3. Write THREE summary modes — each as bullet point arrays. ANTI-FLUFF rules: NO repetitive paragraphs, NO redundant background, NO filler phrases ("In a world where...", "It is important to note..."). Only unique, high-density facts. Each bullet 14-28 words.
-   - "fiveWs": EXACTLY 5 entries. Each entry MUST start with the literal label and a colon, in this exact order: "WHO: ...", "WHAT: ...", "WHEN: ...", "WHERE: ...", "WHY: ...". The text after the colon is a complete answer (no fragment, no rewording of the label).
-   - "eli5": 3 bullets explaining the story like the reader is 11. Plain language, concrete analogies. NO label prefixes.
-   - "keyHighlights": 4-5 bullets with the most newsworthy facts, numbers, quotes, or implications. NO label prefixes.
+3. Write THREE summary modes. ANTI-FLUFF rules: NO repetitive sentences, NO redundant background, NO filler phrases ("In a world where...", "It is important to note...", "In conclusion..."). Only unique, high-density facts. Plain prose, no bullet markers, no headings.
+   - "fiveWs": ARRAY of EXACTLY 5 strings. Each entry MUST start with the literal label and a colon, in this exact order: "WHO: ...", "WHAT: ...", "WHEN: ...", "WHERE: ...", "WHY: ...". Each answer is a complete sentence of 18-32 words.
+   - "eli5": ONE string. A single 90-110 word PARAGRAPH explaining the story like the reader is 11. Plain language, concrete analogies, conversational. NO bullets, NO labels, NO line breaks.
+   - "keyHighlights": ONE string. A single 90-110 word PARAGRAPH delivering the most newsworthy facts, numbers, quotes, and implications in a tight neutral voice. NO bullets, NO labels, NO line breaks.
 4. For each source in the cluster, classify its type: "mainstream" (e.g. Reuters, BBC, AP, NYT, CNN, WSJ, Bloomberg, Guardian), "tech" (e.g. TechCrunch, The Verge, Ars Technica, Wired, Engadget, 9to5Mac), or "niche" (specialty/regional/independent blogs).
 
 Return STRICT JSON ONLY matching this TypeScript type:
@@ -436,8 +438,8 @@ Return STRICT JSON ONLY matching this TypeScript type:
       "category": string,
       "article_indexes": number[],
       "fiveWs": string[],
-      "eli5": string[],
-      "keyHighlights": string[],
+      "eli5": string,
+      "keyHighlights": string,
       "source_types": ("mainstream"|"tech"|"niche")[]
     }
   ]
@@ -505,8 +507,8 @@ async function clusterAndSummarizeBatched(
         });
       });
     } else {
-      // Chunk failed: emit singleton clusters with naive bullets so the cards
-      // still show 5Ws/ELI5/keyHighlights derived from the description.
+      // Chunk failed: emit singleton clusters with naive paragraphs so the
+      // cards still show 5Ws/ELI5/keyHighlights derived from the description.
       for (let i = 0; i < chunkLen; i++) {
         const a = articles[offset + i]!;
         const desc = a.description ?? a.content ?? "";
@@ -515,8 +517,8 @@ async function clusterAndSummarizeBatched(
           category: "Technology",
           article_indexes: [offset + i],
           fiveWs: naiveFiveWs(desc),
-          eli5: naiveBullets(desc, 3),
-          keyHighlights: naiveBullets(desc, 4),
+          eli5: naiveParagraph(desc),
+          keyHighlights: naiveParagraph(desc),
           source_types: [
             classifySource(a.link ?? "", a.source_name ?? "") as
               | "mainstream"
@@ -593,6 +595,18 @@ function naiveFiveWs(text: string): string[] {
   return bullets.map((s, i) => `${FIVE_W_LABELS[i]}: ${s}`);
 }
 
+// Squash a description into a single ~100 word paragraph, used as a
+// last-resort fallback when AI summarization fails.
+function naiveParagraph(text: string): string {
+  if (!text) return "";
+  const compact = text
+    .replace(/\s+/g, " ")
+    .trim();
+  const words = compact.split(" ");
+  if (words.length <= 110) return compact;
+  return words.slice(0, 110).join(" ") + "…";
+}
+
 function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
   return articles.map((a, idx) => {
     const text = (a.description ?? a.content ?? a.title ?? "").trim();
@@ -601,9 +615,8 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
     const sourceType = classifySource(sourceUrl, sourceName);
 
     const headline = (a.title ?? text.slice(0, 90) ?? "Untitled").trim();
-    const keyHighlights = naiveBullets(text, 4);
     const fiveWs = naiveFiveWs(text);
-    const eli5 = naiveBullets(text, 3);
+    const paragraph = naiveParagraph(text);
 
     return {
       id: `${Date.now()}-${idx}-${a.article_id ?? idx}`,
@@ -613,13 +626,18 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
       publishedAt: a.pubDate ?? new Date().toISOString(),
       summaries: {
         fiveWs,
-        eli5,
-        keyHighlights:
-          keyHighlights.length > 0
-            ? keyHighlights
-            : [text.slice(0, 200) || headline],
+        eli5: paragraph,
+        keyHighlights: paragraph,
       },
-      sources: [{ name: sourceName, url: sourceUrl, type: sourceType }],
+      sources: [
+        {
+          name: sourceName,
+          url: sourceUrl,
+          type: sourceType,
+          imageUrl: a.image_url ?? null,
+          publishedAt: a.pubDate ?? undefined,
+        },
+      ],
       sourceCount: 1,
     };
   });
@@ -638,6 +656,8 @@ function buildStoryCards(
       name: a.source_name ?? a.source_id ?? "Unknown",
       url: a.link ?? "",
       type: cluster.source_types?.[i] ?? "niche",
+      imageUrl: a.image_url ?? null,
+      publishedAt: a.pubDate ?? undefined,
     }));
 
     const firstWithImage = clusterArticles.find((a) => a.image_url);
@@ -651,8 +671,11 @@ function buildStoryCards(
       publishedAt: firstArticle?.pubDate ?? new Date().toISOString(),
       summaries: {
         fiveWs: cluster.fiveWs ?? [],
-        eli5: cluster.eli5 ?? [],
-        keyHighlights: cluster.keyHighlights ?? [],
+        eli5: typeof cluster.eli5 === "string" ? cluster.eli5 : "",
+        keyHighlights:
+          typeof cluster.keyHighlights === "string"
+            ? cluster.keyHighlights
+            : "",
       },
       sources,
       sourceCount: sources.length,

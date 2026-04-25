@@ -1091,7 +1091,115 @@ async function fetchArticleHtml(url: string): Promise<string> {
   }
 }
 
+// Publishers known to expose the full article body via the WordPress REST API
+// (`/wp-json/wp/v2/posts?slug=…`). For these, we hit the JSON API first because
+// their public HTML pages are JS-hydrated and only ship a stub of the body in
+// the initial response. The JSON path is faster (smaller payload) and gives
+// us the complete article. If anything fails or the response looks empty we
+// fall back to the standard HTML extractor — so non-WP behaviour is unchanged.
+const WP_JSON_HOSTS = new Set(["techcrunch.com"]);
+
+// Strip a few decorative wrappers WordPress wraps around captions/figures so
+// the "first paragraph" the dedup model sees is real article prose, not a
+// figcaption. The general htmlToParagraphs already drops figures via its tag
+// stripping, but this helps the title field render cleanly.
+function decodeHtmlEntitiesOnce(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#039;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&mdash;/g, "—")
+    .replace(/&ndash;/g, "–")
+    .replace(/&hellip;/g, "…")
+    .replace(/&ldquo;/g, "“")
+    .replace(/&rdquo;/g, "”")
+    .replace(/&lsquo;/g, "‘")
+    .replace(/&rsquo;/g, "’");
+}
+
+// Two passes to handle double-encoded entities like `&amp;#8217;` that
+// WordPress sometimes emits.
+function decodeHtmlEntities(s: string): string {
+  const once = decodeHtmlEntitiesOnce(s);
+  return /&[a-z#0-9]+;/i.test(once) ? decodeHtmlEntitiesOnce(once) : once;
+}
+
+async function tryWordPressJson(
+  url: string,
+): Promise<{ paragraphs: string[]; title?: string } | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  const host = parsed.hostname.replace(/^www\./, "");
+  if (!WP_JSON_HOSTS.has(host)) return null;
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const slug = segments[segments.length - 1];
+  if (!slug) return null;
+  const apiUrl = `${parsed.origin}/wp-json/wp/v2/posts?slug=${encodeURIComponent(slug)}&_fields=title,content`;
+  const ctrl = new AbortController();
+  // 2.5s timeout: WP-JSON is a small JSON read; if it can't respond fast we
+  // bail and let the HTML fallback run, keeping worst-case latency at
+  // ~11.5s (2.5s WP + 9s HTML) instead of 13s.
+  const timer = setTimeout(() => ctrl.abort(), 2_500);
+  try {
+    const res = await fetch(apiUrl, {
+      signal: ctrl.signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as Array<{
+      title?: { rendered?: string };
+      content?: { rendered?: string };
+    }>;
+    if (!Array.isArray(data) || data.length === 0) return null;
+    const post = data[0];
+    const html = post?.content?.rendered;
+    if (typeof html !== "string" || !html) return null;
+    const paragraphs = htmlToParagraphs(html);
+    // Sanity floor: WP-JSON should give us a real article body. We accept
+    // anything ≥2 paragraphs (covers legit short news posts) — the HTML
+    // fallback only runs if we got 0–1 paragraphs back, which usually means
+    // the post is deleted, paywalled, or returned an unexpected shape.
+    if (paragraphs.length < 2) return null;
+    const titleRaw = post?.title?.rendered;
+    const title =
+      typeof titleRaw === "string" && titleRaw
+        ? decodeHtmlEntities(titleRaw.replace(/<[^>]+>/g, "")).trim()
+        : undefined;
+    return { paragraphs, title };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function extractArticle(url: string): Promise<ArticleResult> {
+  // Fast path for known WordPress publishers (currently TechCrunch). Returns
+  // the full article body via their public JSON API — bypasses the JS-hydrated
+  // stub HTML their page ships with. Falls through to HTML extraction on any
+  // failure, so non-WP sites and WP failures both behave exactly as before.
+  const wp = await tryWordPressJson(url);
+  if (wp) {
+    return {
+      title: wp.title,
+      summaryBullets: [],
+      paragraphs: wp.paragraphs,
+    };
+  }
   const html = await fetchArticleHtml(url);
   const { bodyHtml, title } = extractArticleBody(html);
   const paragraphs = htmlToParagraphs(bodyHtml);

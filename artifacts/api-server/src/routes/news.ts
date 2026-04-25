@@ -825,6 +825,26 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
 
 const inflightFeed = new Map<string, Promise<StoryCard[]>>();
 
+// Minimum number of distinct publisher hostnames a refresh must produce before
+// we'll let it overwrite an existing healthy cache entry. Prevents a cold-start
+// scenario where only one RSS source returned in time from poisoning the cache
+// for the next TTL window.
+const MIN_HEALTHY_PUBLISHERS = 3;
+
+function distinctPublisherCount(stories: StoryCard[]): number {
+  const hosts = new Set<string>();
+  for (const story of stories) {
+    for (const src of story.sources ?? []) {
+      try {
+        if (src.url) hosts.add(new URL(src.url).hostname.replace(/^www\./, ""));
+      } catch {
+        // ignore unparseable URLs
+      }
+    }
+  }
+  return hosts.size;
+}
+
 function refreshInBackground(
   topic: string,
   log: { warn: (...args: unknown[]) => void },
@@ -833,12 +853,31 @@ function refreshInBackground(
   const started = Date.now();
   const p = buildFreshFeed(topic)
     .then((stories) => {
-      cache.set(topic, { at: Date.now(), data: stories });
-      persistFeedCache();
-      // eslint-disable-next-line no-console
-      console.log(
-        `[prewarm] ${topic} refreshed in ${Date.now() - started}ms (${stories.length} stories)`,
-      );
+      const freshPubs = distinctPublisherCount(stories);
+      const existing = cache.get(topic);
+      const existingPubs = existing ? distinctPublisherCount(existing.data) : 0;
+
+      // Skip the cache write if this refresh is degraded (too few publishers)
+      // AND we already have a healthier entry. Don't regress the cache just
+      // because some RSS feeds were slow this round. We still return `stories`
+      // to any in-flight awaiter so they get something rather than nothing.
+      const isDegraded = freshPubs < MIN_HEALTHY_PUBLISHERS;
+      const shouldKeepExisting =
+        isDegraded && existing && existingPubs > freshPubs;
+
+      if (shouldKeepExisting) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `[prewarm] ${topic} SKIPPED cache write (degraded: ${freshPubs} publishers, ${stories.length} stories) — keeping existing (${existingPubs} publishers, ${existing.data.length} stories)`,
+        );
+      } else {
+        cache.set(topic, { at: Date.now(), data: stories });
+        persistFeedCache();
+        // eslint-disable-next-line no-console
+        console.log(
+          `[prewarm] ${topic} refreshed in ${Date.now() - started}ms (${stories.length} stories, ${freshPubs} publishers${isDegraded ? " — DEGRADED but accepted (no prior cache)" : ""})`,
+        );
+      }
       return stories;
     })
     .catch((err) => {

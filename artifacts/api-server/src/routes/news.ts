@@ -928,6 +928,7 @@ type ArticleResult = {
   summaryBullets: string[];
   paragraphs: string[];
   byline?: string;
+  deduped?: boolean;
 };
 
 const articleCache = new Map<string, { at: number; data: ArticleResult }>();
@@ -935,6 +936,13 @@ const ARTICLE_TTL_MS = 6 * 60 * 60 * 1000;
 const ARTICLE_CACHE_MAX_ENTRIES = 300;
 const ARTICLE_DISK_CACHE_PATH = "/tmp/particle-news-article-cache.json";
 const inflightArticle = new Map<string, Promise<ArticleResult>>();
+
+// ----- Dedup cache (AI-cleaned article bodies) -----
+const dedupCache = new Map<string, { at: number; data: ArticleResult }>();
+const DEDUP_TTL_MS = 6 * 60 * 60 * 1000;
+const DEDUP_CACHE_MAX_ENTRIES = 300;
+const DEDUP_DISK_CACHE_PATH = "/tmp/particle-news-dedup-cache.json";
+const inflightDedup = new Map<string, Promise<ArticleResult>>();
 
 function persistArticleCache(): void {
   const snapshot: Record<string, { at: number; data: ArticleResult }> = {};
@@ -1108,6 +1116,9 @@ function trimArticleCacheIfNeeded(): void {
 async function getOrFetchArticle(url: string): Promise<ArticleResult> {
   const cached = articleCache.get(url);
   if (cached && Date.now() - cached.at < ARTICLE_TTL_MS) {
+    // True LRU: refresh recency on hit by re-inserting the key.
+    articleCache.delete(url);
+    articleCache.set(url, cached);
     return cached.data;
   }
   const inflight = inflightArticle.get(url);
@@ -1132,20 +1143,218 @@ loadArticleCacheFromDisk();
 // eslint-disable-next-line no-console
 console.log(`[boot] articleCache=${articleCache.size} entries (from disk)`);
 
+// ----- Dedup cache plumbing -----
+
+function persistDedupCache(): void {
+  const snapshot: Record<string, { at: number; data: ArticleResult }> = {};
+  for (const [url, entry] of dedupCache.entries()) {
+    snapshot[url] = entry;
+  }
+  safeWriteJson(DEDUP_DISK_CACHE_PATH, snapshot);
+}
+
+function loadDedupCacheFromDisk(): void {
+  const snapshot = safeReadJson<Record<string, { at: number; data: ArticleResult }>>(
+    DEDUP_DISK_CACHE_PATH,
+  );
+  if (!snapshot) return;
+  const now = Date.now();
+  for (const [url, entry] of Object.entries(snapshot)) {
+    if (entry?.data && now - entry.at < DEDUP_TTL_MS) {
+      dedupCache.set(url, entry);
+    }
+  }
+}
+
+function trimDedupCacheIfNeeded(): void {
+  if (dedupCache.size <= DEDUP_CACHE_MAX_ENTRIES) return;
+  const oldestKey = dedupCache.keys().next().value;
+  if (oldestKey) dedupCache.delete(oldestKey);
+}
+
+// Hard timeout for the Gemini dedup call. If the model stalls, we return the
+// raw paragraphs so the reader never hangs indefinitely.
+const DEDUP_TIMEOUT_MS = 20_000;
+
+// Result shape for the dedup pass: includes whether the cleaned output is
+// trustworthy enough to display in place of the raw paragraphs.
+type DedupOutcome = { paragraphs: string[]; deduped: boolean };
+
+// Strips punctuation and lowercases — used to measure how much of the cleaned
+// text overlaps with the source. Cheap proxy for "did Gemini hallucinate?".
+function normalizeForFidelity(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+// Returns true if `out` looks like a trimmed/edited version of `source` rather
+// than a free-form rewrite. We require:
+// - cleaned length is between 25% and 110% of source length (no over-compression,
+//   no inflation),
+// - at least 75% of the cleaned text's tokens appear in the source text.
+function passesFidelityCheck(source: string[], out: string[]): boolean {
+  if (out.length === 0) return false;
+  const sourceText = normalizeForFidelity(source.join(" "));
+  const outText = normalizeForFidelity(out.join(" "));
+  if (outText.length === 0) return false;
+  const ratio = outText.length / Math.max(1, sourceText.length);
+  if (ratio < 0.25 || ratio > 1.1) return false;
+  const sourceTokens = new Set(sourceText.split(" ").filter((t) => t.length > 2));
+  const outTokens = outText.split(" ").filter((t) => t.length > 2);
+  if (outTokens.length === 0) return false;
+  let hits = 0;
+  for (const t of outTokens) if (sourceTokens.has(t)) hits += 1;
+  const overlap = hits / outTokens.length;
+  return overlap >= 0.75;
+}
+
+// Calls Gemini 2.5 Flash to remove redundant/repetitive sentences from the
+// article body and return tightened paragraphs in the original order. Falls
+// back to the input on any error or fidelity failure so the user always sees
+// something faithful to the source.
+async function dedupParagraphs(paragraphs: string[]): Promise<DedupOutcome> {
+  if (paragraphs.length <= 2) return { paragraphs, deduped: false };
+  const joined = paragraphs.map((p, i) => `[${i}] ${p}`).join("\n\n");
+  const prompt = `You are an editor. Below is the body of a news article, split
+into numbered paragraphs.
+
+Your job:
+- Remove paragraphs that are exact duplicates or near-duplicates of earlier paragraphs.
+- Remove paragraphs that are clearly boilerplate (newsletter prompts, "follow us on social", "this story originally appeared in…", author bios, related-link lists, ads).
+- Within the remaining paragraphs, tighten any sentences that repeat information already stated. Preserve the writer's voice and all factual claims.
+- Do NOT summarize. Do NOT add any new information. Do NOT reorder paragraphs. Do NOT change quotes inside quotation marks.
+- Output the cleaned paragraphs in their original order.
+
+Return ONLY JSON in this exact shape:
+{
+  "paragraphs": [string, string, ...]
+}
+
+Article paragraphs:
+${joined}`;
+
+  // Race the Gemini call against a hard timeout.
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(
+      () => reject(new Error(`dedup timeout after ${DEDUP_TIMEOUT_MS}ms`)),
+      DEDUP_TIMEOUT_MS,
+    );
+  });
+
+  try {
+    const response = await Promise.race([
+      ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+          maxOutputTokens: 8192,
+          responseMimeType: "application/json",
+        },
+      }),
+      timeoutPromise,
+    ]);
+    const text = response.text ?? "{}";
+    const cleaned = text
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/```\s*$/i, "")
+      .replace(/,(\s*[\]}])/g, "$1");
+    let parsed: { paragraphs?: unknown };
+    try {
+      parsed = JSON.parse(cleaned) as { paragraphs?: unknown };
+    } catch {
+      const start = cleaned.indexOf("{");
+      const end = cleaned.lastIndexOf("}");
+      if (start === -1 || end === -1) return { paragraphs, deduped: false };
+      parsed = JSON.parse(cleaned.slice(start, end + 1)) as {
+        paragraphs?: unknown;
+      };
+    }
+    if (!Array.isArray(parsed.paragraphs)) {
+      return { paragraphs, deduped: false };
+    }
+    const out = parsed.paragraphs
+      .filter((p): p is string => typeof p === "string")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+    // Fidelity guard: if Gemini went off the rails, discard its output.
+    if (!passesFidelityCheck(paragraphs, out)) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[dedup] fidelity check failed (src=${paragraphs.length}p, out=${out.length}p) — keeping raw`,
+      );
+      return { paragraphs, deduped: false };
+    }
+    // If output is essentially identical to input, mark as not-deduped so the
+    // client doesn't claim AI cleanup happened when nothing meaningful changed.
+    const meaningfulChange = out.length !== paragraphs.length;
+    return { paragraphs: out, deduped: meaningfulChange };
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[dedup] gemini failed, returning raw: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return { paragraphs, deduped: false };
+  }
+}
+
+async function getOrFetchDedupedArticle(url: string): Promise<ArticleResult> {
+  const cached = dedupCache.get(url);
+  if (cached && Date.now() - cached.at < DEDUP_TTL_MS) {
+    // True LRU: refresh recency on hit by re-inserting the key.
+    dedupCache.delete(url);
+    dedupCache.set(url, cached);
+    return cached.data;
+  }
+  const inflight = inflightDedup.get(url);
+  if (inflight) return inflight;
+
+  const p = (async () => {
+    const raw = await getOrFetchArticle(url);
+    if (!raw.paragraphs.length) {
+      // Nothing to dedup — cache the empty result so we don't keep retrying.
+      const data: ArticleResult = { ...raw, deduped: false };
+      dedupCache.set(url, { at: Date.now(), data });
+      trimDedupCacheIfNeeded();
+      Promise.resolve().then(() => persistDedupCache());
+      return data;
+    }
+    const outcome = await dedupParagraphs(raw.paragraphs);
+    const data: ArticleResult = {
+      ...raw,
+      paragraphs: outcome.paragraphs,
+      deduped: outcome.deduped,
+    };
+    dedupCache.set(url, { at: Date.now(), data });
+    trimDedupCacheIfNeeded();
+    Promise.resolve().then(() => persistDedupCache());
+    return data;
+  })().finally(() => {
+    inflightDedup.delete(url);
+  });
+  inflightDedup.set(url, p);
+  return p;
+}
+
+// Hydrate the dedup cache from disk on boot.
+loadDedupCacheFromDisk();
+// eslint-disable-next-line no-console
+console.log(`[boot] dedupCache=${dedupCache.size} entries (from disk)`);
+
 router.get("/article", async (req, res) => {
   const url = String(req.query["url"] ?? "");
   if (!url || !/^https?:\/\//i.test(url)) {
     res.status(400).json({ error: "Invalid url" });
     return;
   }
-  // Fast path: cached.
-  const cached = articleCache.get(url);
-  if (cached && Date.now() - cached.at < ARTICLE_TTL_MS) {
-    res.json({ ...cached.data, cached: true });
+  // Fastest path: AI-deduped version cached.
+  const dedupHit = dedupCache.get(url);
+  if (dedupHit && Date.now() - dedupHit.at < DEDUP_TTL_MS) {
+    res.json({ ...dedupHit.data, cached: true });
     return;
   }
   try {
-    const data = await getOrFetchArticle(url);
+    const data = await getOrFetchDedupedArticle(url);
     if (!data.paragraphs.length) {
       res.status(502).json({ error: "Couldn't extract article body" });
       return;
@@ -1159,22 +1368,23 @@ router.get("/article", async (req, res) => {
   }
 });
 
-// Lightweight prefetch endpoint: warms the cache without forcing the client to
-// wait for the body. Returns 204 immediately and continues fetching in the
-// background. Used by the feed to prefetch the first source for visible cards.
+// Lightweight prefetch endpoint: warms BOTH the raw extraction cache and the
+// AI-deduped cache without forcing the client to wait. Returns 204 immediately
+// and continues working in the background. Used by the feed to prefetch the
+// first source for visible cards so taps feel instant.
 router.get("/article/prefetch", (req, res) => {
   const url = String(req.query["url"] ?? "");
   if (!url || !/^https?:\/\//i.test(url)) {
     res.status(400).end();
     return;
   }
-  const cached = articleCache.get(url);
-  if (cached && Date.now() - cached.at < ARTICLE_TTL_MS) {
+  const dedupHit = dedupCache.get(url);
+  if (dedupHit && Date.now() - dedupHit.at < DEDUP_TTL_MS) {
     res.status(204).end();
     return;
   }
-  // Fire-and-forget; dedupe via getOrFetchArticle's inflight map.
-  getOrFetchArticle(url).catch(() => {});
+  // Fire-and-forget; dedupe via getOrFetchDedupedArticle's inflight map.
+  getOrFetchDedupedArticle(url).catch(() => {});
   res.status(204).end();
 });
 

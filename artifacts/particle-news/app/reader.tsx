@@ -310,7 +310,7 @@ export default function ReaderScreen() {
             <View style={styles.loadingBlock}>
               <ActivityIndicator color={accentText} />
               <Text style={[styles.loadingText, { color: subtleText }]}>
-                Pulling the article…
+                Cleaning up the article…
               </Text>
             </View>
           ) : article.isError ? (
@@ -344,20 +344,16 @@ export default function ReaderScreen() {
           ) : (
             <View style={styles.articleBody}>
               {(article.data?.paragraphs ?? []).map((p, i) => (
-                <View key={i} style={styles.bulletRow}>
-                  <View
-                    style={[styles.bulletDot, { backgroundColor: accentText }]}
-                  />
-                  <Animated.Text
-                    entering={FadeInDown.delay(Math.min(i, 8) * 30).duration(280)}
-                    style={[styles.bulletText, { color: "#F2F2F4" }]}
-                  >
-                    {p}
-                  </Animated.Text>
-                </View>
+                <Animated.Text
+                  key={i}
+                  entering={FadeInDown.delay(Math.min(i, 8) * 30).duration(280)}
+                  style={[styles.paragraph, { color: "#F2F2F4" }]}
+                >
+                  {p}
+                </Animated.Text>
               ))}
               {(article.data?.paragraphs ?? []).length === 0 ? (
-                <Text style={[styles.bulletText, { color: subtleText }]}>
+                <Text style={[styles.paragraph, { color: subtleText }]}>
                   No article body available.
                 </Text>
               ) : null}
@@ -627,19 +623,11 @@ const styles = StyleSheet.create({
   },
   openBtnText: { fontFamily: "Inter_600SemiBold", fontSize: 13 },
   articleBody: { gap: 14 },
-  bulletRow: { flexDirection: "row", gap: 12, alignItems: "flex-start" },
-  bulletDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    marginTop: 9,
-  },
-  bulletText: {
-    flex: 1,
-    fontFamily: "Inter_500Medium",
-    fontSize: 15,
-    lineHeight: 23,
-    letterSpacing: 0.05,
+  paragraph: {
+    fontFamily: "Inter_400Regular",
+    fontSize: 16,
+    lineHeight: 26,
+    letterSpacing: 0.1,
   },
   bottomBarWrap: {
     position: "absolute",

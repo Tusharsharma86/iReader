@@ -10,7 +10,7 @@ const router: IRouter = Router();
 // Disk cache lives in /tmp so it survives in-process restarts within the same
 // container (dev workflow restarts, autoscale instance reuse). Replit Autoscale
 // instances get a fresh /tmp on cold-start, so this is best-effort persistence
-// — the prewarm worker handles the rest.
+// — the next user request will trigger a fresh refresh if cache is empty.
 const FEED_DISK_CACHE_PATH = "/tmp/particle-news-feed-cache.json";
 const CHUNK_DISK_CACHE_PATH = "/tmp/particle-news-chunk-cache.json";
 
@@ -1019,31 +1019,17 @@ async function notifyOnNewClusters(
   }
 }
 
-// ----- Background prewarm worker -----
-// Keeps the feed cache always warm so user requests are sub-100ms.
-// Runs on module load and every PREWARM_INTERVAL_MS thereafter.
-const PREWARM_TOPICS = ["technology"];
-const PREWARM_INTERVAL_MS = 2 * 60 * 1000;
-
-const noopLog = { warn: () => {} };
-
-function prewarmAll(): void {
-  for (const topic of PREWARM_TOPICS) {
-    refreshInBackground(topic, noopLog);
-  }
-}
-
-// Hydrate from disk first (so we have something to serve even before the first
-// prewarm completes), then kick off an immediate prewarm and a recurring timer.
+// ----- Cache hydration on boot -----
+// We intentionally DO NOT run a background prewarm worker. Refreshes happen
+// only on demand: when a user pulls-to-refresh in the app (which sends
+// `?refresh=1`) or when the disk cache is empty/stale at request time. This
+// keeps Gemini and NewsData spend bounded by actual user activity.
 loadFeedCacheFromDisk();
 loadChunkCacheFromDisk();
 // eslint-disable-next-line no-console
 console.log(
-  `[boot] feedCache=${cache.size} topics, chunkCache=${chunkCache.size} entries`,
+  `[boot] feedCache=${cache.size} topics, chunkCache=${chunkCache.size} entries (no background prewarm)`,
 );
-// Don't block boot — fire and forget.
-setTimeout(prewarmAll, 500);
-setInterval(prewarmAll, PREWARM_INTERVAL_MS).unref();
 
 // Filter clusters down to those that include at least one source matching the
 // given source id (e.g. "techcrunch"). Source ids align with the RSS source

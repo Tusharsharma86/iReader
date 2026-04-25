@@ -708,10 +708,7 @@ function buildStoryCards(
       imageUrl: firstWithImage?.image_url ?? null,
       publishedAt: firstArticle?.pubDate ?? new Date().toISOString(),
       summary: first50Words(
-        clusterArticles
-          .map((a) => (a.description ?? a.content ?? a.title ?? "").trim())
-          .filter(Boolean)
-          .join(" "),
+        firstArticle?.description ?? firstArticle?.content ?? firstArticle?.title ?? "",
       ),
       summaries: {
         fiveWs: cluster.fiveWs ?? [],

@@ -278,7 +278,6 @@ export function StoryCardView({
             })}
           </View>
 
-          <SummaryParagraph text={story.summary} />
           {mode ? (
             <Animated.View
               key={mode}

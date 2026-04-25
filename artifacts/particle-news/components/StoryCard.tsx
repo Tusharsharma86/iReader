@@ -241,6 +241,8 @@ export function StoryCardView({
 
           <Text style={styles.headline}>{story.headline}</Text>
 
+          <Text style={styles.snippet}>{story.summary}</Text>
+
           <View style={styles.modeRow}>
             {MODE_LABELS.map((m) => {
               const active = m.key === mode;
@@ -543,6 +545,13 @@ const styles = StyleSheet.create({
     height: 3,
     borderRadius: 2,
     opacity: 0.8,
+  },
+  snippet: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 13,
+    lineHeight: 19,
+    color: "rgba(255,255,255,0.72)",
+    marginTop: 2,
   },
   modeRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
   modeChip: {

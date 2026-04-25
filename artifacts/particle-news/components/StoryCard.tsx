@@ -3,7 +3,7 @@ import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   Platform,
   Pressable,
@@ -19,12 +19,7 @@ import Animated, {
 import { useColors } from "@/hooks/useColors";
 import { useImageTint } from "@/hooks/useImageTint";
 import { useSaved } from "@/contexts/SavedContext";
-import {
-  prefetchArticle,
-  proxiedImageUrl,
-  type Source,
-  type StoryCard as StoryCardType,
-} from "@/lib/api";
+import { proxiedImageUrl, type Source, type StoryCard as StoryCardType } from "@/lib/api";
 
 type SummaryMode = "fiveWs" | "eli5" | "keyHighlights";
 
@@ -117,21 +112,8 @@ export function StoryCardView({
   const proxiedImage = proxiedImageUrl(story.imageUrl);
   const tint = useImageTint(proxiedImage);
   const { isSaved, toggle } = useSaved();
-  const [mode, setMode] = useState<SummaryMode>("keyHighlights");
+  const [mode, setMode] = useState<SummaryMode | null>(null);
   const saved = isSaved(story.id);
-
-  // Prefetch the first source's article on mount so opening the reader is
-  // instant. Stagger by index so we don't hammer the API with 20 simultaneous
-  // prefetches when the feed first renders.
-  useEffect(() => {
-    const firstUrl = story.sources[0]?.url;
-    if (!firstUrl) return;
-    const delay = Math.min(index, 12) * 250;
-    const t = setTimeout(() => {
-      prefetchArticle(firstUrl);
-    }, delay);
-    return () => clearTimeout(t);
-  }, [story.sources, index]);
 
   const hasImage = Boolean(proxiedImage);
   const dominant = hasImage ? tint.dominant : FALLBACK_DOMINANT;
@@ -296,19 +278,25 @@ export function StoryCardView({
             })}
           </View>
 
-          <Animated.View
-            key={mode}
-            entering={FadeInDown.duration(280)}
-            style={styles.summaryWrap}
-          >
-            {mode === "fiveWs" ? (
-              <FiveWsList lines={story.summaries.fiveWs} accent={accentText} />
-            ) : mode === "eli5" ? (
-              <SummaryParagraph text={story.summaries.eli5} />
-            ) : (
-              <SummaryParagraph text={story.summaries.keyHighlights} />
-            )}
-          </Animated.View>
+          {mode ? (
+            <Animated.View
+              key={mode}
+              entering={FadeInDown.duration(280)}
+              style={styles.summaryWrap}
+            >
+              {mode === "fiveWs" ? (
+                <FiveWsList lines={story.summaries.fiveWs} accent={accentText} />
+              ) : mode === "eli5" ? (
+                <SummaryParagraph text={story.summaries.eli5} />
+              ) : (
+                <SummaryParagraph text={story.summaries.keyHighlights} />
+              )}
+            </Animated.View>
+          ) : (
+            <Text style={[styles.paragraph, { color: "rgba(255,255,255,0.55)" }]}>
+              Tap a tab to load a summary.
+            </Text>
+          )}
 
           <View style={styles.divider} />
 

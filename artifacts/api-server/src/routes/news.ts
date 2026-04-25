@@ -1470,7 +1470,13 @@ function trimArticleCacheIfNeeded(): void {
 
 async function getOrFetchArticle(url: string): Promise<ArticleResult> {
   const cached = articleCache.get(url);
-  if (cached && Date.now() - cached.at < ARTICLE_TTL_MS) {
+  // Treat zero-paragraph cache entries as misses. They are almost always the
+  // result of a transient publisher block (e.g. Cloudflare 403 from a
+  // datacenter IP) and we'd rather retry — possibly with a different UA — than
+  // serve a blank article for the next 6 hours.
+  const cachedHasContent =
+    cached && (cached.data.paragraphs?.length ?? 0) > 0;
+  if (cached && cachedHasContent && Date.now() - cached.at < ARTICLE_TTL_MS) {
     // True LRU: refresh recency on hit by re-inserting the key.
     articleCache.delete(url);
     articleCache.set(url, cached);
@@ -1480,10 +1486,17 @@ async function getOrFetchArticle(url: string): Promise<ArticleResult> {
   if (inflight) return inflight;
   const p = extractArticle(url)
     .then((data) => {
-      articleCache.set(url, { at: Date.now(), data });
-      trimArticleCacheIfNeeded();
-      // Persist asynchronously; ignore errors.
-      Promise.resolve().then(() => persistArticleCache());
+      // Only cache successful extractions so a transient block doesn't pin a
+      // bad result for the full TTL window.
+      if ((data.paragraphs?.length ?? 0) > 0) {
+        articleCache.set(url, { at: Date.now(), data });
+        trimArticleCacheIfNeeded();
+        // Persist asynchronously; ignore errors.
+        Promise.resolve().then(() => persistArticleCache());
+      } else {
+        // Drop any prior empty entry so the next request retries cleanly.
+        articleCache.delete(url);
+      }
       return data;
     })
     .finally(() => {

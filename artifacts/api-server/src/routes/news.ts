@@ -422,10 +422,10 @@ async function clusterAndSummarize(
 
 1. Write a single neutral, sharp headline (10-14 words max).
 2. Pick the best matching category (one of: World, Politics, Business, Technology, Science, Health, Sports, Entertainment).
-3. Write THREE summary modes — each as bullet point arrays. ANTI-FLUFF rules: NO repetitive paragraphs, NO redundant background, NO filler phrases ("In a world where...", "It is important to note..."). Only unique, high-density facts. Each bullet 12-22 words.
-   - "fiveWs": 5 bullets answering Who, What, When, Where, Why (in that order, prefix-free).
-   - "eli5": 3 bullets explaining the story like the reader is 11. Plain language, concrete analogies.
-   - "keyHighlights": 4-5 bullets with the most newsworthy facts, numbers, quotes, or implications.
+3. Write THREE summary modes — each as bullet point arrays. ANTI-FLUFF rules: NO repetitive paragraphs, NO redundant background, NO filler phrases ("In a world where...", "It is important to note..."). Only unique, high-density facts. Each bullet 14-28 words.
+   - "fiveWs": EXACTLY 5 entries. Each entry MUST start with the literal label and a colon, in this exact order: "WHO: ...", "WHAT: ...", "WHEN: ...", "WHERE: ...", "WHY: ...". The text after the colon is a complete answer (no fragment, no rewording of the label).
+   - "eli5": 3 bullets explaining the story like the reader is 11. Plain language, concrete analogies. NO label prefixes.
+   - "keyHighlights": 4-5 bullets with the most newsworthy facts, numbers, quotes, or implications. NO label prefixes.
 4. For each source in the cluster, classify its type: "mainstream" (e.g. Reuters, BBC, AP, NYT, CNN, WSJ, Bloomberg, Guardian), "tech" (e.g. TechCrunch, The Verge, Ars Technica, Wired, Engadget, 9to5Mac), or "niche" (specialty/regional/independent blogs).
 
 Return STRICT JSON ONLY matching this TypeScript type:
@@ -514,7 +514,7 @@ async function clusterAndSummarizeBatched(
           headline: a.title ?? "Untitled",
           category: "Technology",
           article_indexes: [offset + i],
-          fiveWs: naiveBullets(desc, 5),
+          fiveWs: naiveFiveWs(desc),
           eli5: naiveBullets(desc, 3),
           keyHighlights: naiveBullets(desc, 4),
           source_types: [
@@ -586,6 +586,13 @@ function naiveBullets(text: string, count: number): string[] {
   return sentences.slice(0, count);
 }
 
+const FIVE_W_LABELS = ["WHO", "WHAT", "WHEN", "WHERE", "WHY"];
+
+function naiveFiveWs(text: string): string[] {
+  const bullets = naiveBullets(text, 5);
+  return bullets.map((s, i) => `${FIVE_W_LABELS[i]}: ${s}`);
+}
+
 function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
   return articles.map((a, idx) => {
     const text = (a.description ?? a.content ?? a.title ?? "").trim();
@@ -595,7 +602,7 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
 
     const headline = (a.title ?? text.slice(0, 90) ?? "Untitled").trim();
     const keyHighlights = naiveBullets(text, 4);
-    const fiveWs = naiveBullets(text, 5);
+    const fiveWs = naiveFiveWs(text);
     const eli5 = naiveBullets(text, 3);
 
     return {

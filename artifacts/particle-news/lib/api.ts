@@ -53,7 +53,12 @@ export type ArticleResponse = {
   title?: string;
   byline?: string;
   summaryBullets: string[];
+  // Cleaned/deduped paragraphs (Key Information tab).
   paragraphs: string[];
+  // Raw extraction with no AI editing (Original tab). Optional for backwards
+  // compatibility with older cache entries — fall back to `paragraphs` when
+  // missing.
+  originalParagraphs?: string[];
   cached?: boolean;
 };
 

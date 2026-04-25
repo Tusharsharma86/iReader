@@ -927,6 +927,10 @@ type ArticleResult = {
   title?: string;
   summaryBullets: string[];
   paragraphs: string[];
+  // Raw paragraphs as they came from the publisher's HTML, before any AI
+  // dedup pass. Surfaced so the reader's "Original" tab can show the full
+  // unedited article.
+  originalParagraphs?: string[];
   byline?: string;
   deduped?: boolean;
 };
@@ -1186,51 +1190,52 @@ function normalizeForFidelity(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-// Returns true if `out` looks like a trimmed/edited version of `source` rather
-// than a free-form rewrite. We require:
-// - cleaned length is between 25% and 110% of source length (no over-compression,
-//   no inflation),
-// - at least 75% of the cleaned text's tokens appear in the source text.
-function passesFidelityCheck(source: string[], out: string[]): boolean {
-  if (out.length === 0) return false;
-  const sourceText = normalizeForFidelity(source.join(" "));
-  const outText = normalizeForFidelity(out.join(" "));
-  if (outText.length === 0) return false;
-  const ratio = outText.length / Math.max(1, sourceText.length);
-  if (ratio < 0.25 || ratio > 1.1) return false;
-  const sourceTokens = new Set(sourceText.split(" ").filter((t) => t.length > 2));
-  const outTokens = outText.split(" ").filter((t) => t.length > 2);
-  if (outTokens.length === 0) return false;
-  let hits = 0;
-  for (const t of outTokens) if (sourceTokens.has(t)) hits += 1;
-  const overlap = hits / outTokens.length;
-  return overlap >= 0.75;
+// With the index-based dedup, kept text is byte-identical to source by
+// construction. We only need a count-floor guard so the model can't aggressively
+// compress the article into something resembling a summary. Floor of 0.70 means
+// at least 70% of the source paragraphs must survive — well above what any
+// reasonable summary would keep, while still allowing real duplicate/boilerplate
+// removal on the noisiest sources.
+const KEPT_PARAGRAPH_FLOOR = 0.7;
+
+function passesIndexDedupFidelityCheck(
+  sourceCount: number,
+  keptCount: number,
+): boolean {
+  if (keptCount === 0) return false;
+  if (keptCount > sourceCount) return false;
+  return keptCount / sourceCount >= KEPT_PARAGRAPH_FLOOR;
 }
 
-// Calls Gemini 2.5 Flash to remove redundant/repetitive sentences from the
-// article body and return tightened paragraphs in the original order. Falls
-// back to the input on any error or fidelity failure so the user always sees
-// something faithful to the source.
+// Calls Gemini 2.5 Flash to identify redundant paragraphs in a news article.
+// Crucially, Gemini only returns INDICES of paragraphs to keep — it never
+// returns text. The server reconstructs the deduped article by copying those
+// paragraphs verbatim from the source. This makes summarisation, paraphrase,
+// and quote-tampering impossible by construction (not by trust).
 async function dedupParagraphs(paragraphs: string[]): Promise<DedupOutcome> {
   if (paragraphs.length <= 2) return { paragraphs, deduped: false };
-  const joined = paragraphs.map((p, i) => `[${i}] ${p}`).join("\n\n");
-  const prompt = `You are an editor. Below is the body of a news article, split
-into numbered paragraphs.
+  const numbered = paragraphs.map((p, i) => `[${i}] ${p}`).join("\n\n");
+  const prompt = `You are reviewing the body of a news article that has been split into numbered paragraphs. The reader wants the WHOLE article preserved word-for-word. Your only job is to identify which paragraphs to DROP because they are redundant.
 
-Your job:
-- Remove paragraphs that are exact duplicates or near-duplicates of earlier paragraphs.
-- Remove paragraphs that are clearly boilerplate (newsletter prompts, "follow us on social", "this story originally appeared in…", author bios, related-link lists, ads).
-- Within the remaining paragraphs, tighten any sentences that repeat information already stated. Preserve the writer's voice and all factual claims.
-- Do NOT summarize. Do NOT add any new information. Do NOT reorder paragraphs. Do NOT change quotes inside quotation marks.
-- Output the cleaned paragraphs in their original order.
+DROP a paragraph ONLY if it is one of:
+1. An exact or near-exact duplicate of an earlier paragraph (same facts, same quotes, same conclusions, just restated).
+2. Pure boilerplate that is not part of the article's reporting: newsletter signup prompts, "follow us on social media", "this story originally appeared in…", author/byline bios, "related reading" link lists, advertising copy, podcast plugs, affiliate-link disclaimers, "subscribe for more" calls to action.
+
+KEEP everything else, including:
+- Paragraphs that feel less important — relevance is not your call.
+- Paragraphs that elaborate, give context, quote a source, give an example, or add nuance.
+- Paragraphs whose ideas are touched on elsewhere but in different words.
+- Short paragraphs, transitional sentences, scene-setting.
+
+You are NOT summarising. You are NOT rewriting. You are NOT condensing. You return only a list of paragraph indices to KEEP, in ascending order. The server will reconstruct the article by copying your kept paragraphs verbatim. If there are no duplicates and no boilerplate, return every index. Expect to keep 80-100% of paragraphs in most articles.
 
 Return ONLY JSON in this exact shape:
 {
-  "paragraphs": [string, string, ...]
+  "keep": [0, 1, 2, ...]
 }
 
-Article paragraphs:
-${joined}`;
+Article paragraphs (${paragraphs.length} total, indices 0-${paragraphs.length - 1}):
+${numbered}`;
 
   // Race the Gemini call against a hard timeout.
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -1246,7 +1251,7 @@ ${joined}`;
         model: "gemini-2.5-flash",
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         config: {
-          maxOutputTokens: 8192,
+          maxOutputTokens: 4096,
           responseMimeType: "application/json",
         },
       }),
@@ -1257,34 +1262,42 @@ ${joined}`;
       .replace(/^```(?:json)?\s*/i, "")
       .replace(/```\s*$/i, "")
       .replace(/,(\s*[\]}])/g, "$1");
-    let parsed: { paragraphs?: unknown };
+    let parsed: { keep?: unknown };
     try {
-      parsed = JSON.parse(cleaned) as { paragraphs?: unknown };
+      parsed = JSON.parse(cleaned) as { keep?: unknown };
     } catch {
       const start = cleaned.indexOf("{");
       const end = cleaned.lastIndexOf("}");
       if (start === -1 || end === -1) return { paragraphs, deduped: false };
-      parsed = JSON.parse(cleaned.slice(start, end + 1)) as {
-        paragraphs?: unknown;
-      };
+      parsed = JSON.parse(cleaned.slice(start, end + 1)) as { keep?: unknown };
     }
-    if (!Array.isArray(parsed.paragraphs)) {
+    if (!Array.isArray(parsed.keep)) {
       return { paragraphs, deduped: false };
     }
-    const out = parsed.paragraphs
-      .filter((p): p is string => typeof p === "string")
-      .map((p) => p.trim())
-      .filter((p) => p.length > 0);
-    // Fidelity guard: if Gemini went off the rails, discard its output.
-    if (!passesFidelityCheck(paragraphs, out)) {
+    // Validate indices: integers, in range, unique. Sort ascending so output
+    // order matches source order even if Gemini shuffled them.
+    const seen = new Set<number>();
+    const keep: number[] = [];
+    for (const v of parsed.keep) {
+      const n = typeof v === "number" ? v : Number(v);
+      if (!Number.isInteger(n)) continue;
+      if (n < 0 || n >= paragraphs.length) continue;
+      if (seen.has(n)) continue;
+      seen.add(n);
+      keep.push(n);
+    }
+    keep.sort((a, b) => a - b);
+    if (!passesIndexDedupFidelityCheck(paragraphs.length, keep.length)) {
       // eslint-disable-next-line no-console
       console.warn(
-        `[dedup] fidelity check failed (src=${paragraphs.length}p, out=${out.length}p) — keeping raw`,
+        `[dedup] fidelity floor failed (src=${paragraphs.length}p, kept=${keep.length}p) — keeping raw`,
       );
       return { paragraphs, deduped: false };
     }
-    // If output is essentially identical to input, mark as not-deduped so the
-    // client doesn't claim AI cleanup happened when nothing meaningful changed.
+    // Reconstruct the deduped article by copying source paragraphs verbatim.
+    // This is the key guarantee: it is byte-identical to the source, just with
+    // some paragraphs missing. Summarisation is impossible here.
+    const out = keep.map((i) => paragraphs[i]).filter((p): p is string => typeof p === "string");
     const meaningfulChange = out.length !== paragraphs.length;
     return { paragraphs: out, deduped: meaningfulChange };
   } catch (err) {
@@ -1313,7 +1326,11 @@ async function getOrFetchDedupedArticle(url: string): Promise<ArticleResult> {
     const raw = await getOrFetchArticle(url);
     if (!raw.paragraphs.length) {
       // Nothing to dedup — cache the empty result so we don't keep retrying.
-      const data: ArticleResult = { ...raw, deduped: false };
+      const data: ArticleResult = {
+        ...raw,
+        originalParagraphs: raw.paragraphs,
+        deduped: false,
+      };
       dedupCache.set(url, { at: Date.now(), data });
       trimDedupCacheIfNeeded();
       Promise.resolve().then(() => persistDedupCache());
@@ -1323,6 +1340,8 @@ async function getOrFetchDedupedArticle(url: string): Promise<ArticleResult> {
     const data: ArticleResult = {
       ...raw,
       paragraphs: outcome.paragraphs,
+      // Always preserve the raw extraction for the reader's "Original" tab.
+      originalParagraphs: raw.paragraphs,
       deduped: outcome.deduped,
     };
     dedupCache.set(url, { at: Date.now(), data });

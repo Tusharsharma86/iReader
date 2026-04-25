@@ -153,9 +153,26 @@ export default function ReaderScreen() {
     retry: 1,
   });
 
+  const [tab, setTab] = React.useState<"key" | "original">("key");
+
   const topPad = Platform.OS === "web" ? Math.max(insets.top, 12) : insets.top;
   const title = article.data?.title || headline;
   const timeAgo = publishedAt ? formatTimeAgo(publishedAt) : "";
+
+  // Choose which paragraphs to render based on active tab. The Original tab
+  // falls back to the deduped paragraphs only if the server didn't send the
+  // raw extraction (older cache entries from before this field existed).
+  const keyParagraphs = article.data?.paragraphs ?? [];
+  const originalParagraphs =
+    article.data?.originalParagraphs ?? article.data?.paragraphs ?? [];
+  const visibleParagraphs = tab === "key" ? keyParagraphs : originalParagraphs;
+  const selectTab = (next: "key" | "original") => {
+    if (tab === next) return;
+    if (Platform.OS !== "web") {
+      Haptics.selectionAsync().catch(() => {});
+    }
+    setTab(next);
+  };
 
   const openOriginal = () => {
     if (!url) return;
@@ -286,8 +303,16 @@ export default function ReaderScreen() {
 
         {/* Tab strip */}
         <View style={styles.tabStrip}>
-          <Tab label="Article" active />
-          <Tab label="Open Original" onPress={openOriginal} />
+          <Tab
+            label="Key Information"
+            active={tab === "key"}
+            onPress={() => selectTab("key")}
+          />
+          <Tab
+            label="Original"
+            active={tab === "original"}
+            onPress={() => selectTab("original")}
+          />
         </View>
 
         {/* Content card */}
@@ -310,7 +335,9 @@ export default function ReaderScreen() {
             <View style={styles.loadingBlock}>
               <ActivityIndicator color={accentText} />
               <Text style={[styles.loadingText, { color: subtleText }]}>
-                Cleaning up the article…
+                {tab === "key"
+                  ? "Cleaning up the article…"
+                  : "Fetching the original article…"}
               </Text>
             </View>
           ) : article.isError ? (
@@ -343,16 +370,16 @@ export default function ReaderScreen() {
             </View>
           ) : (
             <View style={styles.articleBody}>
-              {(article.data?.paragraphs ?? []).map((p, i) => (
+              {visibleParagraphs.map((p, i) => (
                 <Animated.Text
-                  key={i}
+                  key={`${tab}-${i}`}
                   entering={FadeInDown.delay(Math.min(i, 8) * 30).duration(280)}
                   style={[styles.paragraph, { color: "#F2F2F4" }]}
                 >
                   {p}
                 </Animated.Text>
               ))}
-              {(article.data?.paragraphs ?? []).length === 0 ? (
+              {visibleParagraphs.length === 0 ? (
                 <Text style={[styles.paragraph, { color: subtleText }]}>
                   No article body available.
                 </Text>
@@ -395,7 +422,7 @@ export default function ReaderScreen() {
           <View style={styles.bottomBarDivider} />
           <BottomAction
             icon="external-link"
-            label="Open Original"
+            label="Open in Browser"
             onPress={openOriginal}
           />
         </View>

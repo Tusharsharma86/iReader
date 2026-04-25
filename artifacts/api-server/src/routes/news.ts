@@ -186,6 +186,10 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "engadget", name: "Engadget", url: "https://www.engadget.com/rss.xml" },
   { id: "wired", name: "Wired", url: "https://www.wired.com/feed/rss" },
   { id: "9to5mac", name: "9to5Mac", url: "https://9to5mac.com/feed/" },
+  { id: "9to5google", name: "9to5Google", url: "https://9to5google.com/feed/" },
+  { id: "venturebeat", name: "VentureBeat", url: "https://venturebeat.com/feed/" },
+  { id: "thenextweb", name: "The Next Web", url: "https://thenextweb.com/feed/" },
+  { id: "hackernews", name: "Hacker News", url: "https://hnrss.org/frontpage" },
   {
     id: "mittech",
     name: "MIT Tech Review",
@@ -871,12 +875,25 @@ function refreshInBackground(
           `[prewarm] ${topic} SKIPPED cache write (degraded: ${freshPubs} publishers, ${stories.length} stories) — keeping existing (${existingPubs} publishers, ${existing.data.length} stories)`,
         );
       } else {
+        // Use a CONTENT fingerprint (not StoryCard.id, which is Date.now()-
+        // based and therefore changes every refresh) to detect new clusters.
+        // Without this, every prewarm cycle would treat all stories as new
+        // and spam users with push notifications.
+        const previousFps = new Set(
+          (existing?.data ?? []).map(clusterFingerprint),
+        );
         cache.set(topic, { at: Date.now(), data: stories });
         persistFeedCache();
         // eslint-disable-next-line no-console
         console.log(
           `[prewarm] ${topic} refreshed in ${Date.now() - started}ms (${stories.length} stories, ${freshPubs} publishers${isDegraded ? " — DEGRADED but accepted (no prior cache)" : ""})`,
         );
+        // Fire-and-forget push notifications for new clusters. Skip on the
+        // very first prewarm (no `existing`) to avoid pushing the entire
+        // initial feed at boot.
+        if (existing) {
+          notifyOnNewClusters(stories, previousFps).catch(() => {});
+        }
       }
       return stories;
     })
@@ -888,6 +905,118 @@ function refreshInBackground(
       inflightFeed.delete(topic);
     });
   inflightFeed.set(topic, p);
+}
+
+// ----- Push notification fan-out -----
+// Tracks which cluster fingerprints we've already pushed in the past 24h so we
+// never double-notify even if a story stays in the cache across multiple
+// refreshes. The fingerprint hashes the cluster's source URLs + headline so it
+// is stable across refreshes (unlike StoryCard.id, which uses Date.now()).
+const sentFingerprints = new Map<string, number>();
+const SENT_TTL_MS = 24 * 60 * 60 * 1000;
+
+function clusterFingerprint(s: StoryCard): string {
+  const urls = (s.sources ?? [])
+    .map((src) => (src.url ?? "").trim().toLowerCase())
+    .filter((u) => u.length > 0)
+    .sort()
+    .join("|");
+  const head = (s.headline ?? "").trim().toLowerCase().slice(0, 200);
+  return createHash("sha256").update(`${head}\n${urls}`).digest("hex");
+}
+
+function rememberSent(fp: string): void {
+  // Cheap GC: prune expired entries when the map grows.
+  if (sentFingerprints.size > 1000) {
+    const cutoff = Date.now() - SENT_TTL_MS;
+    for (const [k, v] of sentFingerprints.entries()) {
+      if (v < cutoff) sentFingerprints.delete(k);
+    }
+  }
+  sentFingerprints.set(fp, Date.now());
+}
+
+function alreadySent(fp: string): boolean {
+  const at = sentFingerprints.get(fp);
+  if (!at) return false;
+  if (Date.now() - at > SENT_TTL_MS) {
+    sentFingerprints.delete(fp);
+    return false;
+  }
+  return true;
+}
+
+async function notifyOnNewClusters(
+  stories: StoryCard[],
+  previousFps: Set<string>,
+): Promise<void> {
+  // Tag each cluster with its fingerprint so we filter and send-side dedupe
+  // using the same key.
+  const tagged = stories.map((s) => ({ s, fp: clusterFingerprint(s) }));
+  const newClusters = tagged.filter(
+    ({ fp }) => !previousFps.has(fp) && !alreadySent(fp),
+  );
+  if (newClusters.length === 0) return;
+
+  // Lazy-load DB + push sender so this module can boot without a DB at all if
+  // it's broken — the news API still works.
+  let db: typeof import("@workspace/db").db;
+  let notificationPrefsTable: typeof import("@workspace/db").notificationPrefsTable;
+  let sendPushToTokens: typeof import("../lib/push-sender").sendPushToTokens;
+  try {
+    const dbMod = await import("@workspace/db");
+    db = dbMod.db;
+    notificationPrefsTable = dbMod.notificationPrefsTable;
+    const senderMod = await import("../lib/push-sender");
+    sendPushToTokens = senderMod.sendPushToTokens;
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("[push] skipped fan-out (db/sender import failed):", err);
+    return;
+  }
+
+  // Fetch all opted-in users once.
+  const allPrefs = await db.select().from(notificationPrefsTable);
+  if (allPrefs.length === 0) return;
+
+  const breakingTokens = allPrefs
+    .filter((p) => p.breakingEnabled)
+    .map((p) => p.token);
+  const topicSubs = allPrefs
+    .filter((p) => p.topicsEnabled && p.topicsKeywords.length > 0)
+    .map((p) => ({ token: p.token, kws: p.topicsKeywords }));
+
+  for (const { s: cluster, fp } of newClusters) {
+    const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 3;
+
+    // B) Breaking news: 3+ publisher confirmation
+    if (isBreaking && breakingTokens.length > 0) {
+      await sendPushToTokens(breakingTokens, {
+        title: "Breaking",
+        body: cluster.headline,
+        data: { kind: "breaking", clusterId: cluster.id, fp },
+      });
+    }
+
+    // C) Topic alerts: per-user keyword match against headline + category.
+    if (topicSubs.length > 0) {
+      const haystack = `${cluster.headline} ${cluster.category ?? ""}`.toLowerCase();
+      const matched: string[] = [];
+      for (const sub of topicSubs) {
+        if (sub.kws.some((k: string) => haystack.includes(k)))
+          matched.push(sub.token);
+      }
+      if (matched.length > 0) {
+        await sendPushToTokens(matched, {
+          title: "Topic alert",
+          body: cluster.headline,
+          data: { kind: "topic", clusterId: cluster.id, fp },
+        });
+      }
+    }
+
+    rememberSent(fp);
+  }
 }
 
 // ----- Background prewarm worker -----
@@ -916,15 +1045,71 @@ console.log(
 setTimeout(prewarmAll, 500);
 setInterval(prewarmAll, PREWARM_INTERVAL_MS).unref();
 
+// Filter clusters down to those that include at least one source matching the
+// given source id (e.g. "techcrunch"). Source ids align with the RSS source
+// list in TECH_RSS_SOURCES — we match by hostname containment so it works for
+// both raw articles and AI-clustered output.
+function filterStoriesBySource(
+  stories: StoryCard[],
+  sourceId: string,
+): StoryCard[] {
+  const id = sourceId.toLowerCase();
+  const rssSource = TECH_RSS_SOURCES.find((s) => s.id === id);
+  let matchHost: string | null = null;
+  try {
+    matchHost = rssSource ? new URL(rssSource.url).hostname.replace(/^www\./, "") : null;
+  } catch {
+    matchHost = null;
+  }
+  // Hacker News special case: the feed lives on hnrss.org but story links go
+  // to news.ycombinator.com or the original article — so source-filtering by
+  // hostname doesn't work. We tag clusters that came from hackernews via the
+  // friendly source name instead.
+  return stories.filter((story) =>
+    (story.sources ?? []).some((src) => {
+      const nameMatch =
+        rssSource && src.name && src.name.toLowerCase() === rssSource.name.toLowerCase();
+      if (nameMatch) return true;
+      if (!matchHost) return false;
+      try {
+        const host = new URL(src.url).hostname.replace(/^www\./, "");
+        return host.includes(matchHost) || matchHost.includes(host);
+      } catch {
+        return false;
+      }
+    }),
+  );
+}
+
+router.get("/sources", (_req, res) => {
+  res.json({
+    sources: TECH_RSS_SOURCES.map((s) => ({ id: s.id, name: s.name })),
+  });
+});
+
 router.get("/feed", async (req, res) => {
   const topic = String(req.query["topic"] ?? "top").toLowerCase();
   const refresh = req.query["refresh"] === "1";
+  const sourceFilter =
+    typeof req.query["source"] === "string" && req.query["source"].length > 0
+      ? String(req.query["source"]).toLowerCase()
+      : null;
   const cached = cache.get(topic);
   const isFresh = cached && Date.now() - cached.at < ttlFor(topic);
 
+  const respond = (
+    stories: StoryCard[],
+    extra: Record<string, unknown> = {},
+  ) => {
+    const filtered = sourceFilter
+      ? filterStoriesBySource(stories, sourceFilter)
+      : stories;
+    res.json({ stories: filtered, ...extra });
+  };
+
   // Fast path: return cached data if fresh.
   if (!refresh && isFresh) {
-    res.json({ stories: cached.data, cached: true });
+    respond(cached.data, { cached: true });
     return;
   }
 
@@ -933,7 +1118,7 @@ router.get("/feed", async (req, res) => {
   // see the fresh data.
   if (cached) {
     refreshInBackground(topic, req.log);
-    res.json({ stories: cached.data, cached: true, stale: true });
+    respond(cached.data, { cached: true, stale: true });
     return;
   }
 
@@ -953,7 +1138,7 @@ router.get("/feed", async (req, res) => {
   }
   try {
     const stories = await p;
-    res.json({ stories, cached: false, source: "ai" });
+    respond(stories, { cached: false, source: "ai" });
   } catch (err) {
     req.log.error({ err }, "feed cold fetch failed");
     res.status(502).json({

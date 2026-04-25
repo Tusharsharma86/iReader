@@ -90,14 +90,72 @@ export function prefetchArticle(url: string): void {
 export async function fetchFeed(
   topic: string,
   refresh = false,
+  source?: string | null,
 ): Promise<FeedResponse> {
   const url = new URL(`${getBaseUrl()}/api/news/feed`);
   url.searchParams.set("topic", topic);
   if (refresh) url.searchParams.set("refresh", "1");
+  if (source) url.searchParams.set("source", source);
   const res = await fetch(url.toString());
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Feed failed (${res.status}): ${body.slice(0, 120)}`);
   }
   return res.json() as Promise<FeedResponse>;
+}
+
+export type NewsSource = { id: string; name: string };
+
+export async function fetchSources(): Promise<NewsSource[]> {
+  const res = await fetch(`${getBaseUrl()}/api/news/sources`);
+  if (!res.ok) throw new Error(`Sources failed (${res.status})`);
+  const json = (await res.json()) as { sources: NewsSource[] };
+  return json.sources ?? [];
+}
+
+// ----- Push registration helpers -----
+
+export type NotificationPrefs = {
+  digestEnabled: boolean;
+  digestHour: number;
+  digestMinute: number;
+  breakingEnabled: boolean;
+  topicsEnabled: boolean;
+  topicsKeywords: string[];
+};
+
+export async function registerPushToken(
+  token: string,
+  platform: string,
+): Promise<NotificationPrefs | null> {
+  const res = await fetch(`${getBaseUrl()}/api/push/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, platform }),
+  });
+  if (!res.ok) return null;
+  const data = (await res.json()) as { prefs?: NotificationPrefs };
+  return data.prefs ?? null;
+}
+
+export async function updatePushPreferences(
+  token: string,
+  prefs: Partial<NotificationPrefs>,
+): Promise<NotificationPrefs | null> {
+  const res = await fetch(`${getBaseUrl()}/api/push/preferences`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token, ...prefs }),
+  });
+  if (!res.ok) return null;
+  const data = (await res.json()) as { prefs?: NotificationPrefs };
+  return data.prefs ?? null;
+}
+
+export async function unregisterPushToken(token: string): Promise<void> {
+  await fetch(`${getBaseUrl()}/api/push/unregister`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  }).catch(() => {});
 }

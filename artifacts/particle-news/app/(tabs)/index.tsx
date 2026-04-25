@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Feather } from "@expo/vector-icons";
+import { router } from "expo-router";
 import React from "react";
 import {
   ActivityIndicator,
@@ -53,11 +54,30 @@ export default function ForYouScreen() {
           paddingBottom: insets.bottom + TAB_BAR_HEIGHT + 24,
         }}
         ListHeaderComponent={
-          <ScreenHeader
-            eyebrow="Today"
-            title="For You"
-            subtitle="High-density news, clustered and stripped of fluff."
-          />
+          <View>
+            <View style={styles.gearRow}>
+              <Pressable
+                onPress={() => router.push("/settings" as never)}
+                hitSlop={12}
+                style={({ pressed }) => [
+                  styles.gearBtn,
+                  {
+                    backgroundColor: colors.card,
+                    borderColor: colors.cardBorder,
+                    opacity: pressed ? 0.7 : 1,
+                  },
+                ]}
+                accessibilityLabel="Notification settings"
+              >
+                <Feather name="settings" size={16} color={colors.foreground} />
+              </Pressable>
+            </View>
+            <ScreenHeader
+              eyebrow="Today"
+              title="For You"
+              subtitle="High-density news, clustered and stripped of fluff."
+            />
+          </View>
         }
         ListEmptyComponent={
           query.isLoading ? (
@@ -152,6 +172,20 @@ function ErrorState({
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  gearRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    paddingHorizontal: 20,
+    paddingTop: 4,
+  },
+  gearBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   empty: {
     alignItems: "center",
     justifyContent: "center",

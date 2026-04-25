@@ -16,6 +16,7 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { NotificationsProvider } from "@/contexts/NotificationsContext";
 import { SavedProvider } from "@/contexts/SavedContext";
 
 SplashScreen.preventAutoHideAsync();
@@ -49,6 +50,15 @@ function RootLayoutNav() {
           contentStyle: { backgroundColor: "#0A0A0A" },
         }}
       />
+      <Stack.Screen
+        name="settings"
+        options={{
+          headerShown: false,
+          presentation: "modal",
+          animation: "slide_from_bottom",
+          contentStyle: { backgroundColor: "#0A0A0A" },
+        }}
+      />
     </Stack>
   );
 }
@@ -74,12 +84,14 @@ export default function RootLayout() {
       <ErrorBoundary>
         <QueryClientProvider client={queryClient}>
           <SavedProvider>
-            <GestureHandlerRootView style={{ flex: 1, backgroundColor: "#0A0A0A" }}>
-              <KeyboardProvider>
-                <StatusBar style="light" />
-                <RootLayoutNav />
-              </KeyboardProvider>
-            </GestureHandlerRootView>
+            <NotificationsProvider>
+              <GestureHandlerRootView style={{ flex: 1, backgroundColor: "#0A0A0A" }}>
+                <KeyboardProvider>
+                  <StatusBar style="light" />
+                  <RootLayoutNav />
+                </KeyboardProvider>
+              </GestureHandlerRootView>
+            </NotificationsProvider>
           </SavedProvider>
         </QueryClientProvider>
       </ErrorBoundary>

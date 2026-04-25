@@ -18,26 +18,41 @@ import { ScreenHeader } from "@/components/ScreenHeader";
 import { StoryCardView } from "@/components/StoryCard";
 import { StorySkeleton } from "@/components/StorySkeleton";
 import { useColors } from "@/hooks/useColors";
-import { fetchFeed, type StoryCard } from "@/lib/api";
+import {
+  fetchFeed,
+  fetchSources,
+  type NewsSource,
+  type StoryCard,
+} from "@/lib/api";
 
 const TAB_BAR_HEIGHT = Platform.OS === "web" ? 84 : 60;
-
-const TOPICS = [
-  { key: "technology", label: "Technology", icon: "cpu" as const },
-];
+const ALL_SOURCE: NewsSource = { id: "__all__", name: "All sources" };
 
 export default function ExploreScreen() {
   const insets = useSafeAreaInsets();
   const colors = useColors();
   const topInset = Platform.OS === "web" ? Math.max(insets.top, 12) : insets.top;
-  const [topic, setTopic] = useState<string>("technology");
+  const [sourceId, setSourceId] = useState<string>(ALL_SOURCE.id);
 
-  const query = useQuery({
-    queryKey: ["feed", topic],
-    queryFn: () => fetchFeed(topic),
+  // The list of available sources rarely changes — give it a long stale time.
+  const sourcesQuery = useQuery({
+    queryKey: ["news-sources"],
+    queryFn: fetchSources,
+    staleTime: 60 * 60 * 1000,
   });
 
-  const stories: StoryCard[] = query.data?.stories ?? [];
+  const sources: NewsSource[] = [
+    ALL_SOURCE,
+    ...(sourcesQuery.data ?? []),
+  ];
+
+  const filterSource = sourceId === ALL_SOURCE.id ? null : sourceId;
+  const feedQuery = useQuery({
+    queryKey: ["feed", "technology", filterSource],
+    queryFn: () => fetchFeed("technology", false, filterSource),
+  });
+
+  const stories: StoryCard[] = feedQuery.data?.stories ?? [];
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -57,19 +72,19 @@ export default function ExploreScreen() {
             <ScreenHeader
               eyebrow="Discover"
               title="Explore"
-              subtitle="Pick a beat. Get the day, summarized."
+              subtitle="Browse by publisher. Same clustering, focused source."
             />
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.topicsRow}
             >
-              {TOPICS.map((t) => {
-                const active = topic === t.key;
+              {sources.map((s) => {
+                const active = sourceId === s.id;
                 return (
                   <Pressable
-                    key={t.key}
-                    onPress={() => setTopic(t.key)}
+                    key={s.id}
+                    onPress={() => setSourceId(s.id)}
                     style={({ pressed }) => [
                       styles.topicChip,
                       {
@@ -83,11 +98,13 @@ export default function ExploreScreen() {
                       },
                     ]}
                   >
-                    <Feather
-                      name={t.icon}
-                      size={14}
-                      color={active ? colors.background : colors.foreground}
-                    />
+                    {s.id === ALL_SOURCE.id ? (
+                      <Feather
+                        name="grid"
+                        size={13}
+                        color={active ? colors.background : colors.foreground}
+                      />
+                    ) : null}
                     <Text
                       style={[
                         styles.topicText,
@@ -98,7 +115,7 @@ export default function ExploreScreen() {
                         },
                       ]}
                     >
-                      {t.label}
+                      {s.name}
                     </Text>
                   </Pressable>
                 );
@@ -108,12 +125,12 @@ export default function ExploreScreen() {
           </View>
         }
         ListEmptyComponent={
-          query.isLoading ? (
+          feedQuery.isLoading ? (
             <View>
               <StorySkeleton />
               <StorySkeleton />
             </View>
-          ) : query.isError ? (
+          ) : feedQuery.isError ? (
             <View style={styles.empty}>
               <Feather
                 name="alert-circle"
@@ -121,10 +138,10 @@ export default function ExploreScreen() {
                 color={colors.destructive}
               />
               <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
-                Couldn't load
+                Couldn&apos;t load
               </Text>
               <Pressable
-                onPress={() => query.refetch()}
+                onPress={() => feedQuery.refetch()}
                 style={({ pressed }) => [
                   styles.retryBtn,
                   {
@@ -142,13 +159,18 @@ export default function ExploreScreen() {
             <View style={styles.empty}>
               <Feather name="search" size={32} color={colors.mutedForeground} />
               <Text style={[styles.emptyTitle, { color: colors.foreground }]}>
-                Nothing in this beat right now
+                No stories from this source right now
+              </Text>
+              <Text
+                style={[styles.emptyText, { color: colors.mutedForeground }]}
+              >
+                Try another publisher or check back later.
               </Text>
             </View>
           )
         }
         ListFooterComponent={
-          query.isFetching && stories.length > 0 ? (
+          feedQuery.isFetching && stories.length > 0 ? (
             <View style={{ paddingVertical: 18, alignItems: "center" }}>
               <ActivityIndicator color={colors.mutedForeground} />
             </View>
@@ -156,8 +178,8 @@ export default function ExploreScreen() {
         }
         refreshControl={
           <RefreshControl
-            refreshing={query.isRefetching}
-            onRefresh={() => query.refetch()}
+            refreshing={feedQuery.isRefetching}
+            onRefresh={() => feedQuery.refetch()}
             tintColor={colors.mutedForeground}
           />
         }
@@ -192,6 +214,12 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   emptyTitle: { fontFamily: "Inter_700Bold", fontSize: 16, marginTop: 6 },
+  emptyText: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: "center",
+  },
   retryBtn: {
     marginTop: 12,
     paddingHorizontal: 18,

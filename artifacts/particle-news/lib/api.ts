@@ -20,6 +20,7 @@ export type StoryCard = {
   category: string;
   imageUrl: string | null;
   publishedAt: string;
+  summary: string;
   summaries: Summaries;
   sources: Source[];
   sourceCount: number;

@@ -27,6 +27,7 @@ type StoryCard = {
   category: string;
   imageUrl: string | null;
   publishedAt: string;
+  summary: string;
   summaries: {
     fiveWs: string[];
     eli5: string;
@@ -635,6 +636,14 @@ function naiveParagraph(text: string): string {
   return words.slice(0, 110).join(" ") + "…";
 }
 
+function first50Words(text: string): string {
+  if (!text) return "";
+  const compact = text.replace(/\s+/g, " ").trim();
+  const words = compact.split(" ").filter(Boolean);
+  if (words.length <= 50) return compact;
+  return words.slice(0, 50).join(" ") + "…";
+}
+
 function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
   return articles.map((a, idx) => {
     const text = (a.description ?? a.content ?? a.title ?? "").trim();
@@ -652,6 +661,7 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
       category: pickCategory(a),
       imageUrl: a.image_url ?? null,
       publishedAt: a.pubDate ?? new Date().toISOString(),
+      summary: first50Words(text),
       summaries: {
         fiveWs,
         eli5: paragraph,
@@ -697,6 +707,12 @@ function buildStoryCards(
       category: cluster.category,
       imageUrl: firstWithImage?.image_url ?? null,
       publishedAt: firstArticle?.pubDate ?? new Date().toISOString(),
+      summary: first50Words(
+        clusterArticles
+          .map((a) => (a.description ?? a.content ?? a.title ?? "").trim())
+          .filter(Boolean)
+          .join(" "),
+      ),
       summaries: {
         fiveWs: cluster.fiveWs ?? [],
         eli5: typeof cluster.eli5 === "string" ? cluster.eli5 : "",

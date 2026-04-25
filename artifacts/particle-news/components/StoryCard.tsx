@@ -278,6 +278,7 @@ export function StoryCardView({
             })}
           </View>
 
+          <SummaryParagraph text={story.summary} />
           {mode ? (
             <Animated.View
               key={mode}
@@ -292,11 +293,7 @@ export function StoryCardView({
                 <SummaryParagraph text={story.summaries.keyHighlights} />
               )}
             </Animated.View>
-          ) : (
-            <Text style={[styles.paragraph, { color: "rgba(255,255,255,0.55)" }]}>
-              Tap a tab to load a summary.
-            </Text>
-          )}
+          ) : null}
 
           <View style={styles.divider} />
 

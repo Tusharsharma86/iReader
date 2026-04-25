@@ -68,6 +68,20 @@ export async function fetchArticle(url: string): Promise<ArticleResponse> {
   return res.json() as Promise<ArticleResponse>;
 }
 
+// Fire-and-forget prefetch. Tells the API to warm its article cache for `url`
+// so when the user actually opens the reader, the response is instant.
+const prefetchedUrls = new Set<string>();
+export function prefetchArticle(url: string): void {
+  if (!url || prefetchedUrls.has(url)) return;
+  prefetchedUrls.add(url);
+  const u = new URL(`${getBaseUrl()}/api/news/article/prefetch`);
+  u.searchParams.set("url", url);
+  // Don't await; ignore errors.
+  fetch(u.toString()).catch(() => {
+    prefetchedUrls.delete(url);
+  });
+}
+
 export async function fetchFeed(
   topic: string,
   refresh = false,

@@ -931,9 +931,50 @@ type ArticleResult = {
 };
 
 const articleCache = new Map<string, { at: number; data: ArticleResult }>();
-const ARTICLE_TTL_MS = 60 * 60 * 1000;
+const ARTICLE_TTL_MS = 6 * 60 * 60 * 1000;
+const ARTICLE_CACHE_MAX_ENTRIES = 300;
+const ARTICLE_DISK_CACHE_PATH = "/tmp/particle-news-article-cache.json";
+const inflightArticle = new Map<string, Promise<ArticleResult>>();
 
-function stripHtmlToText(html: string): string {
+function persistArticleCache(): void {
+  const snapshot: Record<string, { at: number; data: ArticleResult }> = {};
+  for (const [url, entry] of articleCache.entries()) {
+    snapshot[url] = entry;
+  }
+  safeWriteJson(ARTICLE_DISK_CACHE_PATH, snapshot);
+}
+
+function loadArticleCacheFromDisk(): void {
+  const snapshot = safeReadJson<Record<string, { at: number; data: ArticleResult }>>(
+    ARTICLE_DISK_CACHE_PATH,
+  );
+  if (!snapshot) return;
+  const now = Date.now();
+  for (const [url, entry] of Object.entries(snapshot)) {
+    if (entry?.data && now - entry.at < ARTICLE_TTL_MS) {
+      articleCache.set(url, entry);
+    }
+  }
+}
+
+function decodeArticleEntities(s: string): string {
+  return s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) =>
+      String.fromCodePoint(parseInt(n, 16)),
+    );
+}
+
+// Strip out chrome (scripts, styles, nav, etc.) from an HTML fragment but keep
+// paragraph-level structure so we can split sensibly later.
+function cleanHtmlFragment(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
@@ -944,103 +985,152 @@ function stripHtmlToText(html: string): string {
     .replace(/<aside[\s\S]*?<\/aside>/gi, " ")
     .replace(/<form[\s\S]*?<\/form>/gi, " ")
     .replace(/<svg[\s\S]*?<\/svg>/gi, " ")
+    .replace(/<figure[\s\S]*?<\/figure>/gi, " ")
+    .replace(/<figcaption[\s\S]*?<\/figcaption>/gi, " ")
     .replace(/<!--([\s\S]*?)-->/g, " ")
-    .replace(/<\/(p|div|li|h[1-6]|br|section|article)>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|br|section|article)>/gi, "\n\n")
     .replace(/<br\s*\/?>(?!\n)/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/<[^>]+>/g, " ");
+}
+
+function htmlToParagraphs(rawHtmlChunk: string): string[] {
+  const text = decodeArticleEntities(cleanHtmlFragment(rawHtmlChunk))
     .replace(/[ \t]+/g, " ")
     .replace(/\n{2,}/g, "\n\n")
     .trim();
-}
-
-async function fetchArticleText(url: string): Promise<string> {
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-      Accept: "text/html,application/xhtml+xml",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`Source ${res.status}`);
-  }
-  const html = await res.text();
-  const text = stripHtmlToText(html);
-  return text.slice(0, 12000);
-}
-
-function fallbackParagraphs(rawText: string): string[] {
-  return rawText
+  // Drop boilerplate lines that commonly survive the strip pass.
+  const BOILERPLATE_RE =
+    /^(advertisement|share this|read more|sign up|subscribe|follow us|related stories?|copyright|all rights reserved|terms of (use|service)|privacy policy|cookies?|by .{1,40}$|published .{1,40}$|updated .{1,40}$)/i;
+  return text
     .split(/\n{2,}/)
     .map((p) => p.replace(/\s+/g, " ").trim())
-    .filter((p) => p.length > 80 && p.split(" ").length > 12)
-    .slice(0, 40);
+    .filter(
+      (p) =>
+        p.length > 80 &&
+        p.split(" ").length > 14 &&
+        !BOILERPLATE_RE.test(p),
+    )
+    .slice(0, 60);
 }
 
-async function extractReadable(
-  url: string,
-  rawText: string,
-): Promise<ArticleResult> {
-  const prompt = `You will receive raw extracted text from a news article web page. Your job is to produce a clean READER MODE version of the article.
+// Pull the most likely article body using simple structural heuristics.
+// Tries <article>, then common article containers, and falls back to <body>.
+function extractArticleBody(html: string): {
+  bodyHtml: string;
+  title?: string;
+} {
+  const titleMatch =
+    /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i.exec(
+      html,
+    ) ??
+    /<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i.exec(
+      html,
+    ) ??
+    /<title>([^<]+)<\/title>/i.exec(html);
+  const title = titleMatch?.[1] ? decodeArticleEntities(titleMatch[1]).trim() : undefined;
 
-Rules:
-- Remove navigation, cookie banners, related-stories teasers, ads, social CTAs, author bios, comments, and boilerplate.
-- Keep only the substantive article body.
-- Preserve original wording — do NOT rewrite paragraphs. Only clean and split.
-- Split the article into well-formed paragraphs (3-7 sentences each, no markdown).
-- Drop any paragraph that is repetitive, navigation, or filler.
-- Provide a "summaryBullets" field: 4-5 bullet pointers totaling about 100 words combined (90-110 words). Each bullet should be a single concise sentence covering Who/What, Numbers, Why it matters, What's next. NO fluff.
-- Provide "title" (article headline) and optional "byline" (author/source line).
-
-Return STRICT JSON ONLY:
-{
-  "title": string,
-  "byline": string,
-  "summaryBullets": string[],
-  "paragraphs": string[]
-}
-
-Article URL: ${url}
-
-Raw extracted text:
-${rawText}`;
-
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      maxOutputTokens: 8192,
-      responseMimeType: "application/json",
-    },
-  });
-
-  const text = response.text ?? "{}";
-  const cleaned = text
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/```\s*$/i, "")
-    .replace(/,(\s*[\]}])/g, "$1");
-  let parsed: ArticleResult;
-  try {
-    parsed = JSON.parse(cleaned) as ArticleResult;
-  } catch {
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start === -1 || end === -1) throw new Error("Gemini returned non-JSON");
-    parsed = JSON.parse(cleaned.slice(start, end + 1)) as ArticleResult;
+  // Prefer <article>...</article>
+  const articleMatches = [...html.matchAll(/<article\b[^>]*>([\s\S]*?)<\/article>/gi)];
+  if (articleMatches.length > 0) {
+    // Pick the largest article block.
+    const biggest = articleMatches
+      .map((m) => m[1] ?? "")
+      .reduce((a, b) => (b.length > a.length ? b : a), "");
+    if (biggest.length > 500) return { bodyHtml: biggest, title };
   }
-  if (!Array.isArray(parsed.paragraphs)) parsed.paragraphs = [];
-  if (!Array.isArray(parsed.summaryBullets)) parsed.summaryBullets = [];
-  return parsed;
+
+  // Look for common article body containers (itemprop, role, class hints).
+  const containerPatterns: RegExp[] = [
+    /<div[^>]+itemprop=["']articleBody["'][^>]*>([\s\S]*?)<\/div>/i,
+    /<div[^>]+(?:class|id)=["'][^"']*(?:article-body|articleBody|post-body|entry-content|c-entry-content|story-body|prose|article__body)[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+    /<main\b[^>]*>([\s\S]*?)<\/main>/i,
+  ];
+  for (const re of containerPatterns) {
+    const m = re.exec(html);
+    if (m?.[1] && m[1].length > 500) return { bodyHtml: m[1], title };
+  }
+
+  // Fallback: <body>
+  const bodyMatch = /<body[^>]*>([\s\S]*?)<\/body>/i.exec(html);
+  if (bodyMatch?.[1]) return { bodyHtml: bodyMatch[1], title };
+
+  return { bodyHtml: html, title };
 }
+
+async function fetchArticleHtml(url: string): Promise<string> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 9_000);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`Source ${res.status}`);
+    }
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function extractArticle(url: string): Promise<ArticleResult> {
+  const html = await fetchArticleHtml(url);
+  const { bodyHtml, title } = extractArticleBody(html);
+  const paragraphs = htmlToParagraphs(bodyHtml);
+  if (paragraphs.length === 0) {
+    // Last-resort: try the whole document.
+    const fallback = htmlToParagraphs(html);
+    return {
+      title,
+      summaryBullets: [],
+      paragraphs: fallback,
+    };
+  }
+  return {
+    title,
+    summaryBullets: [],
+    paragraphs,
+  };
+}
+
+function trimArticleCacheIfNeeded(): void {
+  if (articleCache.size <= ARTICLE_CACHE_MAX_ENTRIES) return;
+  const oldestKey = articleCache.keys().next().value;
+  if (oldestKey) articleCache.delete(oldestKey);
+}
+
+async function getOrFetchArticle(url: string): Promise<ArticleResult> {
+  const cached = articleCache.get(url);
+  if (cached && Date.now() - cached.at < ARTICLE_TTL_MS) {
+    return cached.data;
+  }
+  const inflight = inflightArticle.get(url);
+  if (inflight) return inflight;
+  const p = extractArticle(url)
+    .then((data) => {
+      articleCache.set(url, { at: Date.now(), data });
+      trimArticleCacheIfNeeded();
+      // Persist asynchronously; ignore errors.
+      Promise.resolve().then(() => persistArticleCache());
+      return data;
+    })
+    .finally(() => {
+      inflightArticle.delete(url);
+    });
+  inflightArticle.set(url, p);
+  return p;
+}
+
+// Hydrate the article cache from disk on boot.
+loadArticleCacheFromDisk();
+// eslint-disable-next-line no-console
+console.log(`[boot] articleCache=${articleCache.size} entries (from disk)`);
 
 router.get("/article", async (req, res) => {
   const url = String(req.query["url"] ?? "");
@@ -1048,32 +1138,18 @@ router.get("/article", async (req, res) => {
     res.status(400).json({ error: "Invalid url" });
     return;
   }
-
+  // Fast path: cached.
   const cached = articleCache.get(url);
   if (cached && Date.now() - cached.at < ARTICLE_TTL_MS) {
     res.json({ ...cached.data, cached: true });
     return;
   }
-
   try {
-    const rawText = await fetchArticleText(url);
-    if (rawText.length < 200) {
-      throw new Error("Article body too short to extract");
+    const data = await getOrFetchArticle(url);
+    if (!data.paragraphs.length) {
+      res.status(502).json({ error: "Couldn't extract article body" });
+      return;
     }
-    let data: ArticleResult;
-    try {
-      data = await extractReadable(url, rawText);
-      if (!data.paragraphs?.length) {
-        data.paragraphs = fallbackParagraphs(rawText);
-      }
-    } catch (geminiErr) {
-      req.log.warn({ err: geminiErr }, "gemini extract failed; using raw");
-      data = {
-        summaryBullets: [],
-        paragraphs: fallbackParagraphs(rawText),
-      };
-    }
-    articleCache.set(url, { at: Date.now(), data });
     res.json({ ...data, cached: false });
   } catch (err) {
     req.log.error({ err }, "article extract failed");
@@ -1081,6 +1157,25 @@ router.get("/article", async (req, res) => {
       error: err instanceof Error ? err.message : "Couldn't fetch article",
     });
   }
+});
+
+// Lightweight prefetch endpoint: warms the cache without forcing the client to
+// wait for the body. Returns 204 immediately and continues fetching in the
+// background. Used by the feed to prefetch the first source for visible cards.
+router.get("/article/prefetch", (req, res) => {
+  const url = String(req.query["url"] ?? "");
+  if (!url || !/^https?:\/\//i.test(url)) {
+    res.status(400).end();
+    return;
+  }
+  const cached = articleCache.get(url);
+  if (cached && Date.now() - cached.at < ARTICLE_TTL_MS) {
+    res.status(204).end();
+    return;
+  }
+  // Fire-and-forget; dedupe via getOrFetchArticle's inflight map.
+  getOrFetchArticle(url).catch(() => {});
+  res.status(204).end();
 });
 
 router.get("/image", async (req, res) => {

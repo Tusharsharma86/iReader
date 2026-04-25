@@ -3,7 +3,7 @@ import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Platform,
   Pressable,
@@ -20,6 +20,7 @@ import { useColors } from "@/hooks/useColors";
 import { useImageTint } from "@/hooks/useImageTint";
 import { useSaved } from "@/contexts/SavedContext";
 import {
+  prefetchArticle,
   proxiedImageUrl,
   type Source,
   type StoryCard as StoryCardType,
@@ -118,6 +119,19 @@ export function StoryCardView({
   const { isSaved, toggle } = useSaved();
   const [mode, setMode] = useState<SummaryMode>("keyHighlights");
   const saved = isSaved(story.id);
+
+  // Prefetch the first source's article on mount so opening the reader is
+  // instant. Stagger by index so we don't hammer the API with 20 simultaneous
+  // prefetches when the feed first renders.
+  useEffect(() => {
+    const firstUrl = story.sources[0]?.url;
+    if (!firstUrl) return;
+    const delay = Math.min(index, 12) * 250;
+    const t = setTimeout(() => {
+      prefetchArticle(firstUrl);
+    }, delay);
+    return () => clearTimeout(t);
+  }, [story.sources, index]);
 
   const hasImage = Boolean(proxiedImage);
   const dominant = hasImage ? tint.dominant : FALLBACK_DOMINANT;

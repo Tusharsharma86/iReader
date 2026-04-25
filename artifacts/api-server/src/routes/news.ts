@@ -12,7 +12,6 @@ const router: IRouter = Router();
 // instances get a fresh /tmp on cold-start, so this is best-effort persistence
 // — the next user request will trigger a fresh refresh if cache is empty.
 const FEED_DISK_CACHE_PATH = "/tmp/particle-news-feed-cache.json";
-const CHUNK_DISK_CACHE_PATH = "/tmp/particle-news-chunk-cache.json";
 
 type Source = {
   name: string;
@@ -85,62 +84,6 @@ function loadFeedCacheFromDisk(): void {
   }
 }
 
-// ----- Per-chunk cluster cache -----
-// Hashes the article set in a Gemini chunk and caches the clustered result.
-// If the same articles appear again (e.g. unchanged RSS items between refreshes),
-// we skip the Gemini call entirely.
-type ChunkCacheEntry = { at: number; result: ClusterResult };
-const chunkCache = new Map<string, ChunkCacheEntry>();
-const CHUNK_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const CHUNK_CACHE_MAX_ENTRIES = 500;
-
-function chunkHash(articles: NewsDataArticle[]): string {
-  const fingerprint = articles
-    .map((a) => `${a.source_id ?? ""}|${a.link ?? ""}|${a.title ?? ""}`)
-    .sort()
-    .join("\n");
-  return createHash("sha256").update(fingerprint).digest("hex");
-}
-
-function getCachedChunk(hash: string): ClusterResult | null {
-  const entry = chunkCache.get(hash);
-  if (!entry) return null;
-  if (Date.now() - entry.at > CHUNK_CACHE_TTL_MS) {
-    chunkCache.delete(hash);
-    return null;
-  }
-  return entry.result;
-}
-
-function setCachedChunk(hash: string, result: ClusterResult): void {
-  if (chunkCache.size >= CHUNK_CACHE_MAX_ENTRIES) {
-    // simple eviction: drop the oldest entry
-    const oldestKey = chunkCache.keys().next().value;
-    if (oldestKey) chunkCache.delete(oldestKey);
-  }
-  chunkCache.set(hash, { at: Date.now(), result });
-}
-
-function persistChunkCache(): void {
-  const snapshot: Record<string, ChunkCacheEntry> = {};
-  for (const [hash, entry] of chunkCache.entries()) {
-    snapshot[hash] = entry;
-  }
-  safeWriteJson(CHUNK_DISK_CACHE_PATH, snapshot);
-}
-
-function loadChunkCacheFromDisk(): void {
-  const snapshot = safeReadJson<Record<string, ChunkCacheEntry>>(
-    CHUNK_DISK_CACHE_PATH,
-  );
-  if (!snapshot) return;
-  const now = Date.now();
-  for (const [hash, entry] of Object.entries(snapshot)) {
-    if (entry?.result && now - entry.at < CHUNK_CACHE_TTL_MS) {
-      chunkCache.set(hash, entry);
-    }
-  }
-}
 
 const TOPIC_CATEGORY: Record<string, string> = {
   top: "top",
@@ -520,150 +463,105 @@ type ClusterResult = {
   }[];
 };
 
-async function clusterAndSummarize(
-  articles: NewsDataArticle[],
-): Promise<ClusterResult> {
-  const compact = articles.map((a, i) => ({
-    i,
-    title: a.title ?? "",
-    desc: (a.description ?? a.content ?? "").slice(0, 400),
-    source: a.source_name ?? a.source_id ?? "Unknown",
-  }));
+// ----- Deterministic clustering (zero AI cost) -----
+// Groups articles by title similarity (Jaccard on word tokens) and same-domain
+// proximity. No external API calls, runs in <1ms per article.
+const STOPWORDS = new Set([
+  "a","an","the","is","are","was","were","be","been","being","have","has",
+  "had","do","does","did","will","would","could","should","may","might",
+  "shall","to","of","in","for","on","with","as","at","by","from","that",
+  "this","it","its","and","or","but","not","no","if","so","up","out","about",
+  "into","over","after","new","says","said","us","can","now","more","how",
+  "than","its","their","they","we","he","she","his","her","our","your",
+]);
 
-  const prompt = `You are a news editor for a premium aggregator like Particle News. Below is a JSON array of news articles. Group articles covering the same underlying STORY into clusters (use 1-element clusters for unique stories). For each cluster:
-
-1. Write a single neutral, sharp headline (10-14 words max).
-2. Pick the best matching category (one of: World, Politics, Business, Technology, Science, Health, Sports, Entertainment).
-3. Write THREE summary modes. ANTI-FLUFF rules: NO repetitive sentences, NO redundant background, NO filler phrases ("In a world where...", "It is important to note...", "In conclusion..."). Only unique, high-density facts. Plain prose, no bullet markers, no headings.
-   - "fiveWs": ARRAY of EXACTLY 5 strings. Each entry MUST start with the literal label and a colon, in this exact order: "WHO: ...", "WHAT: ...", "WHEN: ...", "WHERE: ...", "WHY: ...". Each answer is a complete sentence of 18-32 words.
-   - "eli5": ONE string. A single 90-110 word PARAGRAPH explaining the story like the reader is 11. Plain language, concrete analogies, conversational. NO bullets, NO labels, NO line breaks.
-   - "keyHighlights": ONE string. A single 90-110 word PARAGRAPH delivering the most newsworthy facts, numbers, quotes, and implications in a tight neutral voice. NO bullets, NO labels, NO line breaks.
-4. For each source in the cluster, classify its type: "mainstream" (e.g. Reuters, BBC, AP, NYT, CNN, WSJ, Bloomberg, Guardian), "tech" (e.g. TechCrunch, The Verge, Ars Technica, Wired, Engadget, 9to5Mac), or "niche" (specialty/regional/independent blogs).
-
-Return STRICT JSON ONLY matching this TypeScript type:
-{
-  "clusters": [
-    {
-      "headline": string,
-      "category": string,
-      "article_indexes": number[],
-      "fiveWs": string[],
-      "eli5": string,
-      "keyHighlights": string,
-      "source_types": ("mainstream"|"tech"|"niche")[]
-    }
-  ]
-}
-
-source_types must have the SAME length and order as article_indexes.
-
-Articles:
-${JSON.stringify(compact)}`;
-
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    config: {
-      maxOutputTokens: 16384,
-      responseMimeType: "application/json",
-    },
-  });
-
-  const text = response.text ?? "{}";
-  const cleaned = text
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/```\s*$/i, "")
-    .replace(/,(\s*[\]}])/g, "$1");
-  let parsed: ClusterResult;
-  try {
-    parsed = JSON.parse(cleaned) as ClusterResult;
-  } catch {
-    const start = cleaned.indexOf("{");
-    const end = cleaned.lastIndexOf("}");
-    if (start === -1 || end === -1) throw new Error("Gemini returned non-JSON");
-    parsed = JSON.parse(cleaned.slice(start, end + 1)) as ClusterResult;
-  }
-  if (!parsed.clusters || !Array.isArray(parsed.clusters)) {
-    throw new Error("Invalid cluster response");
-  }
-  return parsed;
-}
-
-// Splits articles into chunks and runs clusterAndSummarize on each in parallel.
-// Failed chunks fall back to per-article singletons with naive bullets so they
-// still render with at least keyHighlights populated.
-async function clusterAndSummarizeBatched(
-  articles: NewsDataArticle[],
-): Promise<ClusterResult> {
-  const CHUNK_SIZE = 10;
-  const chunks: NewsDataArticle[][] = [];
-  for (let i = 0; i < articles.length; i += CHUNK_SIZE) {
-    chunks.push(articles.slice(i, i + CHUNK_SIZE));
-  }
-  // For each chunk, check the per-chunk cache first; only call Gemini for misses.
-  const chunkHashes = chunks.map((c) => chunkHash(c));
-  let chunkCacheHits = 0;
-  let chunkCacheWrites = 0;
-  const results = await Promise.allSettled(
-    chunks.map(async (chunk, idx) => {
-      const hash = chunkHashes[idx]!;
-      const cached = getCachedChunk(hash);
-      if (cached) {
-        chunkCacheHits += 1;
-        return cached;
-      }
-      const fresh = await clusterAndSummarize(chunk);
-      setCachedChunk(hash, fresh);
-      chunkCacheWrites += 1;
-      return fresh;
-    }),
+function titleTokens(title: string): Set<string> {
+  return new Set(
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !STOPWORDS.has(w)),
   );
-  if (chunkCacheWrites > 0) persistChunkCache();
+}
+
+function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  let intersection = 0;
+  for (const t of a) {
+    if (b.has(t)) intersection++;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+function articleDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+// Cluster articles by title similarity and same-domain proximity.
+// Returns a ClusterResult matching the same shape buildStoryCards expects.
+function deterministicCluster(articles: NewsDataArticle[]): ClusterResult {
+  const tokenSets = articles.map((a) => titleTokens(a.title ?? ""));
+  const assigned = new Array<number>(articles.length).fill(-1);
+  const clusters: ClusterResult["clusters"] = [];
+
+  for (let i = 0; i < articles.length; i++) {
+    if (assigned[i] !== -1) continue;
+    const clusterIdx = clusters.length;
+    assigned[i] = clusterIdx;
+    const members: number[] = [i];
+
+    for (let j = i + 1; j < articles.length; j++) {
+      if (assigned[j] !== -1) continue;
+      if (members.length >= 8) break;
+      const sim = jaccardSimilarity(tokenSets[i]!, tokenSets[j]!);
+      if (sim >= 0.25) {
+        assigned[j] = clusterIdx;
+        members.push(j);
+        continue;
+      }
+      // Same domain + published within 3 hours → cluster regardless of title.
+      const domA = articleDomain(articles[i]!.link ?? "");
+      const domB = articleDomain(articles[j]!.link ?? "");
+      if (domA && domA === domB) {
+        const tA = new Date(articles[i]!.pubDate ?? 0).getTime();
+        const tB = new Date(articles[j]!.pubDate ?? 0).getTime();
+        if (Math.abs(tA - tB) < 3 * 60 * 60 * 1000) {
+          assigned[j] = clusterIdx;
+          members.push(j);
+        }
+      }
+    }
+
+    const rep = articles[i]!;
+    const desc = stripHtml(
+      (rep.description ?? rep.content ?? rep.title ?? "").trim(),
+    );
+    const summary = naiveParagraph(desc);
+
+    clusters.push({
+      headline: rep.title ?? "Untitled",
+      category: pickCategory(rep),
+      article_indexes: members,
+      fiveWs: naiveFiveWs(desc),
+      eli5: summary,
+      keyHighlights: summary,
+      source_types: members.map((idx) =>
+        classifySource(articles[idx]!.link ?? "", articles[idx]!.source_name ?? ""),
+      ),
+    });
+  }
+
   // eslint-disable-next-line no-console
   console.log(
-    `[clustering] chunks=${chunks.length} cacheHits=${chunkCacheHits} fresh=${chunkCacheWrites}`,
+    `[clustering] deterministic: ${articles.length} articles → ${clusters.length} clusters`,
   );
-  const merged: ClusterResult = { clusters: [] };
-  let offset = 0;
-  let okChunks = 0;
-  results.forEach((r, idx) => {
-    const chunkLen = chunks[idx]!.length;
-    if (r.status === "fulfilled") {
-      okChunks += 1;
-      r.value.clusters.forEach((c) => {
-        merged.clusters.push({
-          ...c,
-          article_indexes: c.article_indexes.map((i) => i + offset),
-        });
-      });
-    } else {
-      // Chunk failed: emit singleton clusters with naive paragraphs so the
-      // cards still show 5Ws/ELI5/keyHighlights derived from the description.
-      for (let i = 0; i < chunkLen; i++) {
-        const a = articles[offset + i]!;
-        const desc = a.description ?? a.content ?? "";
-        merged.clusters.push({
-          headline: a.title ?? "Untitled",
-          category: "Technology",
-          article_indexes: [offset + i],
-          fiveWs: naiveFiveWs(desc),
-          eli5: naiveParagraph(desc),
-          keyHighlights: naiveParagraph(desc),
-          source_types: [
-            classifySource(a.link ?? "", a.source_name ?? "") as
-              | "mainstream"
-              | "tech"
-              | "niche",
-          ],
-        });
-      }
-    }
-    offset += chunkLen;
-  });
-  if (okChunks === 0) {
-    throw new Error("All Gemini chunks failed");
-  }
-  return merged;
+  return { clusters };
 }
 
 const MAINSTREAM_HOSTS = [
@@ -819,12 +717,8 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
       ? await fetchTechRss()
       : await fetchNewsData(topic);
   if (articles.length === 0) return [];
-  try {
-    const clusters = await clusterAndSummarizeBatched(articles);
-    return buildStoryCards(articles, clusters);
-  } catch {
-    return buildFallbackStories(articles);
-  }
+  const clusters = deterministicCluster(articles);
+  return buildStoryCards(articles, clusters);
 }
 
 const inflightFeed = new Map<string, Promise<StoryCard[]>>();
@@ -1025,10 +919,9 @@ async function notifyOnNewClusters(
 // `?refresh=1`) or when the disk cache is empty/stale at request time. This
 // keeps Gemini and NewsData spend bounded by actual user activity.
 loadFeedCacheFromDisk();
-loadChunkCacheFromDisk();
 // eslint-disable-next-line no-console
 console.log(
-  `[boot] feedCache=${cache.size} topics, chunkCache=${chunkCache.size} entries (no background prewarm)`,
+  `[boot] feedCache=${cache.size} topics (no background prewarm)`,
 );
 
 // Filter clusters down to those that include at least one source matching the
@@ -1151,12 +1044,6 @@ const ARTICLE_CACHE_MAX_ENTRIES = 300;
 const ARTICLE_DISK_CACHE_PATH = "/tmp/particle-news-article-cache.json";
 const inflightArticle = new Map<string, Promise<ArticleResult>>();
 
-// ----- Dedup cache (AI-cleaned article bodies) -----
-const dedupCache = new Map<string, { at: number; data: ArticleResult }>();
-const DEDUP_TTL_MS = 6 * 60 * 60 * 1000;
-const DEDUP_CACHE_MAX_ENTRIES = 300;
-const DEDUP_DISK_CACHE_PATH = "/tmp/particle-news-dedup-cache.json";
-const inflightDedup = new Map<string, Promise<ArticleResult>>();
 
 function persistArticleCache(): void {
   const snapshot: Record<string, { at: number; data: ArticleResult }> = {};
@@ -1497,238 +1384,26 @@ loadArticleCacheFromDisk();
 // eslint-disable-next-line no-console
 console.log(`[boot] articleCache=${articleCache.size} entries (from disk)`);
 
-// ----- Dedup cache plumbing -----
-
-function persistDedupCache(): void {
-  const snapshot: Record<string, { at: number; data: ArticleResult }> = {};
-  for (const [url, entry] of dedupCache.entries()) {
-    snapshot[url] = entry;
-  }
-  safeWriteJson(DEDUP_DISK_CACHE_PATH, snapshot);
-}
-
-function loadDedupCacheFromDisk(): void {
-  const snapshot = safeReadJson<Record<string, { at: number; data: ArticleResult }>>(
-    DEDUP_DISK_CACHE_PATH,
-  );
-  if (!snapshot) return;
-  const now = Date.now();
-  for (const [url, entry] of Object.entries(snapshot)) {
-    if (entry?.data && now - entry.at < DEDUP_TTL_MS) {
-      dedupCache.set(url, entry);
-    }
-  }
-}
-
-function trimDedupCacheIfNeeded(): void {
-  if (dedupCache.size <= DEDUP_CACHE_MAX_ENTRIES) return;
-  const oldestKey = dedupCache.keys().next().value;
-  if (oldestKey) dedupCache.delete(oldestKey);
-}
-
-// Hard timeout for the Gemini dedup call. If the model stalls, we return the
-// raw paragraphs so the reader never hangs indefinitely.
-const DEDUP_TIMEOUT_MS = 20_000;
-
-// Result shape for the dedup pass: includes whether the cleaned output is
-// trustworthy enough to display in place of the raw paragraphs.
-type DedupOutcome = { paragraphs: string[]; deduped: boolean };
-
-// Strips punctuation and lowercases — used to measure how much of the cleaned
-// text overlaps with the source. Cheap proxy for "did Gemini hallucinate?".
-function normalizeForFidelity(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-
-// With the index-based dedup, kept text is byte-identical to source by
-// construction. We only need a count-floor guard so the model can't aggressively
-// compress the article into something resembling a summary. Floor of 0.70 means
-// at least 70% of the source paragraphs must survive — well above what any
-// reasonable summary would keep, while still allowing real duplicate/boilerplate
-// removal on the noisiest sources.
-const KEPT_PARAGRAPH_FLOOR = 0.7;
-
-function passesIndexDedupFidelityCheck(
-  sourceCount: number,
-  keptCount: number,
-): boolean {
-  if (keptCount === 0) return false;
-  if (keptCount > sourceCount) return false;
-  return keptCount / sourceCount >= KEPT_PARAGRAPH_FLOOR;
-}
-
-// Calls Gemini 2.5 Flash to identify redundant paragraphs in a news article.
-// Crucially, Gemini only returns INDICES of paragraphs to keep — it never
-// returns text. The server reconstructs the deduped article by copying those
-// paragraphs verbatim from the source. This makes summarisation, paraphrase,
-// and quote-tampering impossible by construction (not by trust).
-async function dedupParagraphs(paragraphs: string[]): Promise<DedupOutcome> {
-  if (paragraphs.length <= 2) return { paragraphs, deduped: false };
-  const numbered = paragraphs.map((p, i) => `[${i}] ${p}`).join("\n\n");
-  const prompt = `You are reviewing the body of a news article that has been split into numbered paragraphs. The reader wants the WHOLE article preserved word-for-word. Your only job is to identify which paragraphs to DROP because they are redundant.
-
-DROP a paragraph ONLY if it is one of:
-1. An exact or near-exact duplicate of an earlier paragraph (same facts, same quotes, same conclusions, just restated).
-2. Pure boilerplate that is not part of the article's reporting: newsletter signup prompts, "follow us on social media", "this story originally appeared in…", author/byline bios, "related reading" link lists, advertising copy, podcast plugs, affiliate-link disclaimers, "subscribe for more" calls to action.
-
-KEEP everything else, including:
-- Paragraphs that feel less important — relevance is not your call.
-- Paragraphs that elaborate, give context, quote a source, give an example, or add nuance.
-- Paragraphs whose ideas are touched on elsewhere but in different words.
-- Short paragraphs, transitional sentences, scene-setting.
-
-You are NOT summarising. You are NOT rewriting. You are NOT condensing. You return only a list of paragraph indices to KEEP, in ascending order. The server will reconstruct the article by copying your kept paragraphs verbatim. If there are no duplicates and no boilerplate, return every index. Expect to keep 80-100% of paragraphs in most articles.
-
-Return ONLY JSON in this exact shape:
-{
-  "keep": [0, 1, 2, ...]
-}
-
-Article paragraphs (${paragraphs.length} total, indices 0-${paragraphs.length - 1}):
-${numbered}`;
-
-  // Race the Gemini call against a hard timeout.
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(
-      () => reject(new Error(`dedup timeout after ${DEDUP_TIMEOUT_MS}ms`)),
-      DEDUP_TIMEOUT_MS,
-    );
-  });
-
-  try {
-    const response = await Promise.race([
-      ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: {
-          maxOutputTokens: 4096,
-          responseMimeType: "application/json",
-        },
-      }),
-      timeoutPromise,
-    ]);
-    const text = response.text ?? "{}";
-    const cleaned = text
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/```\s*$/i, "")
-      .replace(/,(\s*[\]}])/g, "$1");
-    let parsed: { keep?: unknown };
-    try {
-      parsed = JSON.parse(cleaned) as { keep?: unknown };
-    } catch {
-      const start = cleaned.indexOf("{");
-      const end = cleaned.lastIndexOf("}");
-      if (start === -1 || end === -1) return { paragraphs, deduped: false };
-      parsed = JSON.parse(cleaned.slice(start, end + 1)) as { keep?: unknown };
-    }
-    if (!Array.isArray(parsed.keep)) {
-      return { paragraphs, deduped: false };
-    }
-    // Validate indices: integers, in range, unique. Sort ascending so output
-    // order matches source order even if Gemini shuffled them.
-    const seen = new Set<number>();
-    const keep: number[] = [];
-    for (const v of parsed.keep) {
-      const n = typeof v === "number" ? v : Number(v);
-      if (!Number.isInteger(n)) continue;
-      if (n < 0 || n >= paragraphs.length) continue;
-      if (seen.has(n)) continue;
-      seen.add(n);
-      keep.push(n);
-    }
-    keep.sort((a, b) => a - b);
-    if (!passesIndexDedupFidelityCheck(paragraphs.length, keep.length)) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[dedup] fidelity floor failed (src=${paragraphs.length}p, kept=${keep.length}p) — keeping raw`,
-      );
-      return { paragraphs, deduped: false };
-    }
-    // Reconstruct the deduped article by copying source paragraphs verbatim.
-    // This is the key guarantee: it is byte-identical to the source, just with
-    // some paragraphs missing. Summarisation is impossible here.
-    const out = keep.map((i) => paragraphs[i]).filter((p): p is string => typeof p === "string");
-    const meaningfulChange = out.length !== paragraphs.length;
-    return { paragraphs: out, deduped: meaningfulChange };
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[dedup] gemini failed, returning raw: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return { paragraphs, deduped: false };
-  }
-}
-
-async function getOrFetchDedupedArticle(url: string): Promise<ArticleResult> {
-  const cached = dedupCache.get(url);
-  if (cached && Date.now() - cached.at < DEDUP_TTL_MS) {
-    // True LRU: refresh recency on hit by re-inserting the key.
-    dedupCache.delete(url);
-    dedupCache.set(url, cached);
-    return cached.data;
-  }
-  const inflight = inflightDedup.get(url);
-  if (inflight) return inflight;
-
-  const p = (async () => {
-    const raw = await getOrFetchArticle(url);
-    if (!raw.paragraphs.length) {
-      // Nothing to dedup — cache the empty result so we don't keep retrying.
-      const data: ArticleResult = {
-        ...raw,
-        originalParagraphs: raw.paragraphs,
-        deduped: false,
-      };
-      dedupCache.set(url, { at: Date.now(), data });
-      trimDedupCacheIfNeeded();
-      Promise.resolve().then(() => persistDedupCache());
-      return data;
-    }
-    const outcome = await dedupParagraphs(raw.paragraphs);
-    const data: ArticleResult = {
-      ...raw,
-      paragraphs: outcome.paragraphs,
-      // Always preserve the raw extraction for the reader's "Original" tab.
-      originalParagraphs: raw.paragraphs,
-      deduped: outcome.deduped,
-    };
-    dedupCache.set(url, { at: Date.now(), data });
-    trimDedupCacheIfNeeded();
-    Promise.resolve().then(() => persistDedupCache());
-    return data;
-  })().finally(() => {
-    inflightDedup.delete(url);
-  });
-  inflightDedup.set(url, p);
-  return p;
-}
-
-// Hydrate the dedup cache from disk on boot.
-loadDedupCacheFromDisk();
-// eslint-disable-next-line no-console
-console.log(`[boot] dedupCache=${dedupCache.size} entries (from disk)`);
-
 router.get("/article", async (req, res) => {
   const url = String(req.query["url"] ?? "");
   if (!url || !/^https?:\/\//i.test(url)) {
     res.status(400).json({ error: "Invalid url" });
     return;
   }
-  // Fastest path: AI-deduped version cached.
-  const dedupHit = dedupCache.get(url);
-  if (dedupHit && Date.now() - dedupHit.at < DEDUP_TTL_MS) {
-    res.json({ ...dedupHit.data, cached: true });
-    return;
-  }
   try {
-    const data = await getOrFetchDedupedArticle(url);
+    const data = await getOrFetchArticle(url);
     if (!data.paragraphs.length) {
       res.status(502).json({ error: "Couldn't extract article body" });
       return;
     }
-    res.json({ ...data, cached: false });
+    // No AI dedup — return raw extraction. paragraphs and originalParagraphs
+    // are the same; keeping both fields for backwards compat with older clients.
+    res.json({
+      ...data,
+      originalParagraphs: data.paragraphs,
+      deduped: false,
+      cached: true,
+    });
   } catch (err) {
     req.log.error({ err }, "article extract failed");
     res.status(502).json({
@@ -1737,24 +1412,73 @@ router.get("/article", async (req, res) => {
   }
 });
 
-// Lightweight prefetch endpoint: warms BOTH the raw extraction cache and the
-// AI-deduped cache without forcing the client to wait. Returns 204 immediately
-// and continues working in the background. Used by the feed to prefetch the
-// first source for visible cards so taps feel instant.
+// Lightweight prefetch: warms the article cache without blocking the caller.
 router.get("/article/prefetch", (req, res) => {
   const url = String(req.query["url"] ?? "");
   if (!url || !/^https?:\/\//i.test(url)) {
     res.status(400).end();
     return;
   }
-  const dedupHit = dedupCache.get(url);
-  if (dedupHit && Date.now() - dedupHit.at < DEDUP_TTL_MS) {
-    res.status(204).end();
+  getOrFetchArticle(url).catch(() => {});
+  res.status(204).end();
+});
+
+// ----- On-demand AI summary -----
+// Called only when the user explicitly taps "AI Summary" in the reader.
+// Accepts the first N paragraphs of the already-extracted article so we don't
+// need to re-fetch the HTML. Cached for 24 h so repeat taps are instant.
+type AiSummaryEntry = { at: number; bullets: string[]; summary: string };
+const aiSummaryCache = new Map<string, AiSummaryEntry>();
+const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
+
+router.post("/ai-summary", async (req, res) => {
+  const { url, paragraphs } = req.body as {
+    url?: string;
+    paragraphs?: string[];
+  };
+  if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
+    res.status(400).json({ error: "url and paragraphs required" });
     return;
   }
-  // Fire-and-forget; dedupe via getOrFetchDedupedArticle's inflight map.
-  getOrFetchDedupedArticle(url).catch(() => {});
-  res.status(204).end();
+
+  const cached = aiSummaryCache.get(url);
+  if (cached && Date.now() - cached.at < AI_SUMMARY_TTL_MS) {
+    res.json({ bullets: cached.bullets, summary: cached.summary, cached: true });
+    return;
+  }
+
+  try {
+    // Truncate input: max 20 paragraphs, max 2 500 chars total.
+    const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
+    const prompt = `Summarize this news article. Return ONLY JSON with this shape:
+{"bullets":["<20 words>","<20 words>","<20 words>"],"summary":"<60 words max>"}
+Rules: exactly 3 bullets, each under 20 words; summary under 60 words; neutral tone; no filler phrases.
+Article: ${text}`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: { maxOutputTokens: 350, responseMimeType: "application/json" },
+    });
+
+    let parsed: { bullets?: string[]; summary?: string } = {};
+    try {
+      parsed = JSON.parse(response.text ?? "{}") as typeof parsed;
+    } catch {
+      /* ignore — return empty */
+    }
+
+    const result: AiSummaryEntry = {
+      at: Date.now(),
+      bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 3) : [],
+      summary: typeof parsed.summary === "string" ? parsed.summary : "",
+    };
+    aiSummaryCache.set(url, result);
+    res.json({ bullets: result.bullets, summary: result.summary, cached: false });
+  } catch (err) {
+    req.log.error({ err }, "ai-summary failed");
+    res.status(502).json({ error: "AI summary unavailable" });
+  }
 });
 
 router.get("/image", async (req, res) => {

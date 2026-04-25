@@ -153,26 +153,22 @@ export default function ReaderScreen() {
     retry: 1,
   });
 
-  const [tab, setTab] = React.useState<"key" | "original">("key");
-
   const topPad = Platform.OS === "web" ? Math.max(insets.top, 12) : insets.top;
   const title = article.data?.title || headline;
   const timeAgo = publishedAt ? formatTimeAgo(publishedAt) : "";
 
-  // Choose which paragraphs to render based on active tab. The Original tab
-  // falls back to the deduped paragraphs only if the server didn't send the
-  // raw extraction (older cache entries from before this field existed).
-  const keyParagraphs = article.data?.paragraphs ?? [];
-  const originalParagraphs =
+  // Always render the publisher's original article. Older cached entries that
+  // only have the deduped `paragraphs` field still render via the fallback.
+  const visibleParagraphs =
     article.data?.originalParagraphs ?? article.data?.paragraphs ?? [];
-  const visibleParagraphs = tab === "key" ? keyParagraphs : originalParagraphs;
-  const selectTab = (next: "key" | "original") => {
-    if (tab === next) return;
-    if (Platform.OS !== "web") {
-      Haptics.selectionAsync().catch(() => {});
-    }
-    setTab(next);
-  };
+  // Treat a successful response with zero paragraphs as an extraction failure
+  // (e.g. Cloudflare-blocked publishers) so the user gets the same friendly
+  // "Open in Browser" prompt as a hard fetch error.
+  const extractionEmpty =
+    !article.isLoading &&
+    !article.isError &&
+    Boolean(article.data) &&
+    visibleParagraphs.length === 0;
 
   const openOriginal = () => {
     if (!url) return;
@@ -301,20 +297,6 @@ export default function ReaderScreen() {
           </Text>
         ) : null}
 
-        {/* Tab strip */}
-        <View style={styles.tabStrip}>
-          <Tab
-            label="Key Information"
-            active={tab === "key"}
-            onPress={() => selectTab("key")}
-          />
-          <Tab
-            label="Original"
-            active={tab === "original"}
-            onPress={() => selectTab("original")}
-          />
-        </View>
-
         {/* Content card */}
         <View
           style={[
@@ -335,12 +317,10 @@ export default function ReaderScreen() {
             <View style={styles.loadingBlock}>
               <ActivityIndicator color={accentText} />
               <Text style={[styles.loadingText, { color: subtleText }]}>
-                {tab === "key"
-                  ? "Cleaning up the article…"
-                  : "Fetching the original article…"}
+                Fetching the article…
               </Text>
             </View>
-          ) : article.isError ? (
+          ) : article.isError || extractionEmpty ? (
             <View style={styles.errorBlock}>
               <Feather name="alert-circle" size={24} color={subtleText} />
               <Text style={[styles.errorTitle, { color: "#FFFFFF" }]}>
@@ -372,18 +352,13 @@ export default function ReaderScreen() {
             <View style={styles.articleBody}>
               {visibleParagraphs.map((p, i) => (
                 <Animated.Text
-                  key={`${tab}-${i}`}
+                  key={`p-${i}`}
                   entering={FadeInDown.delay(Math.min(i, 8) * 30).duration(280)}
                   style={[styles.paragraph, { color: "#F2F2F4" }]}
                 >
                   {p}
                 </Animated.Text>
               ))}
-              {visibleParagraphs.length === 0 ? (
-                <Text style={[styles.paragraph, { color: subtleText }]}>
-                  No article body available.
-                </Text>
-              ) : null}
             </View>
           )}
         </View>
@@ -452,45 +427,6 @@ function GlassButton({
       ]}
     >
       {children}
-    </Pressable>
-  );
-}
-
-function Tab({
-  label,
-  active,
-  onPress,
-}: {
-  label: string;
-  active?: boolean;
-  onPress?: () => void;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={!onPress && active}
-      style={({ pressed }) => [
-        styles.tab,
-        { opacity: pressed && onPress ? 0.7 : 1 },
-      ]}
-    >
-      <Text
-        style={[
-          styles.tabText,
-          {
-            color: active ? "#FFFFFF" : "rgba(255,255,255,0.55)",
-            fontFamily: active ? "Inter_700Bold" : "Inter_500Medium",
-          },
-        ]}
-      >
-        {label}
-      </Text>
-      <View
-        style={[
-          styles.tabUnderline,
-          { backgroundColor: active ? "#FFFFFF" : "transparent" },
-        ]}
-      />
     </Pressable>
   );
 }
@@ -589,29 +525,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 21,
   },
-  tabStrip: {
-    paddingHorizontal: 22,
-    paddingTop: 22,
-    paddingBottom: 14,
-    flexDirection: "row",
-    gap: 24,
-  },
-  tab: {
-    paddingVertical: 4,
-    alignItems: "flex-start",
-  },
-  tabText: {
-    fontSize: 14,
-    letterSpacing: 0.1,
-  },
-  tabUnderline: {
-    height: 2,
-    width: 26,
-    marginTop: 8,
-    borderRadius: 1,
-  },
   contentCard: {
     marginHorizontal: 16,
+    marginTop: 22,
     borderRadius: 22,
     padding: 18,
     shadowOffset: { width: 0, height: 14 },

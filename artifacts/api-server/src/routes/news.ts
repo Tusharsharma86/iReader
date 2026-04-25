@@ -1293,15 +1293,24 @@ function extractArticleBody(html: string): {
   return { bodyHtml: html, title };
 }
 
-async function fetchArticleHtml(url: string): Promise<string> {
+// Tried in order. Some publishers (Ars Technica, etc.) block generic browser
+// User-Agents from datacenter IPs (Replit deploys live on GCP) but happily
+// serve Googlebot/Bingbot, since blocking search crawlers would be suicidal
+// for SEO. We retry once with Googlebot if the first fetch fails or returns
+// a Cloudflare challenge page.
+const FETCH_USER_AGENTS = [
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+  "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+];
+
+async function fetchHtmlWithUA(url: string, ua: string): Promise<string> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 9_000);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "User-Agent": ua,
         Accept: "text/html,application/xhtml+xml",
         "Accept-Language": "en-US,en;q=0.9",
       },
@@ -1313,6 +1322,10 @@ async function fetchArticleHtml(url: string): Promise<string> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchArticleHtml(url: string): Promise<string> {
+  return fetchHtmlWithUA(url, FETCH_USER_AGENTS[0]!);
 }
 
 // Publishers known to expose the full article body via the WordPress REST API
@@ -1424,23 +1437,29 @@ async function extractArticle(url: string): Promise<ArticleResult> {
       paragraphs: wp.paragraphs,
     };
   }
-  const html = await fetchArticleHtml(url);
-  const { bodyHtml, title } = extractArticleBody(html);
-  const paragraphs = htmlToParagraphs(bodyHtml);
-  if (paragraphs.length === 0) {
-    // Last-resort: try the whole document.
-    const fallback = htmlToParagraphs(html);
-    return {
-      title,
-      summaryBullets: [],
-      paragraphs: fallback,
-    };
+  // First attempt with a desktop browser UA. If extraction yields nothing
+  // (often a Cloudflare interstitial on datacenter IPs), retry with a Googlebot
+  // UA which most publishers whitelist for SEO.
+  for (let i = 0; i < FETCH_USER_AGENTS.length; i++) {
+    let html: string;
+    try {
+      html = await fetchHtmlWithUA(url, FETCH_USER_AGENTS[i]!);
+    } catch (err) {
+      // Network/HTTP error on this UA — try the next one if we have any.
+      if (i === FETCH_USER_AGENTS.length - 1) throw err;
+      continue;
+    }
+    const { bodyHtml, title } = extractArticleBody(html);
+    let paragraphs = htmlToParagraphs(bodyHtml);
+    if (paragraphs.length === 0) {
+      // Last-resort within this UA: try the whole document.
+      paragraphs = htmlToParagraphs(html);
+    }
+    if (paragraphs.length > 0 || i === FETCH_USER_AGENTS.length - 1) {
+      return { title, summaryBullets: [], paragraphs };
+    }
   }
-  return {
-    title,
-    summaryBullets: [],
-    paragraphs,
-  };
+  return { summaryBullets: [], paragraphs: [] };
 }
 
 function trimArticleCacheIfNeeded(): void {

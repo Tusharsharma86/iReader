@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { XMLParser } from "fast-xml-parser";
-import { ai } from "@workspace/integrations-gemini-ai";
+//import { ai } from "@workspace/integrations-gemini-ai";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
@@ -1444,6 +1444,8 @@ type AiSummaryEntry = { at: number; bullets: string[]; summary: string };
 const aiSummaryCache = new Map<string, AiSummaryEntry>();
 const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
 
+////// From Claude 
+// ADD THIS instead — direct Claude API, no proxy
 router.post("/ai-summary", async (req, res) => {
   const { url, paragraphs } = req.body as {
     url?: string;
@@ -1454,39 +1456,76 @@ router.post("/ai-summary", async (req, res) => {
     return;
   }
 
+  // Check in-memory cache first
   const cached = aiSummaryCache.get(url);
   if (cached && Date.now() - cached.at < AI_SUMMARY_TTL_MS) {
     res.json({ bullets: cached.bullets, summary: cached.summary, cached: true });
     return;
   }
 
-  try {
-    // Truncate input: max 20 paragraphs, max 2 500 chars total.
-    const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
-    const prompt = `Summarize this news article. Return ONLY JSON with this shape:
-{"bullets":["<20 words>","<20 words>","<20 words>"],"summary":"<60 words max>"}
-Rules: exactly 3 bullets, each under 20 words; summary under 60 words; neutral tone; no filler phrases.
-Article: ${text}`;
+  // Check disk cache (survives restarts — unlike old in-memory only)
+  const diskCached = safeReadJson<AiSummaryEntry>(
+    `/tmp/ai-summary-${createHash("md5").update(url).digest("hex")}.json`
+  );
+  if (diskCached && Date.now() - diskCached.at < AI_SUMMARY_TTL_MS) {
+    aiSummaryCache.set(url, diskCached); // warm memory cache too
+    res.json({ bullets: diskCached.bullets, summary: diskCached.summary, cached: true });
+    return;
+  }
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: { maxOutputTokens: 350, responseMimeType: "application/json" },
+  const apiKey = process.env["ANTHROPIC_API_KEY"];
+  if (!apiKey) {
+    res.status(502).json({ error: "AI not configured" });
+    return;
+  }
+
+  try {
+    const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
+    
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001", // cheapest + fastest
+        max_tokens: 350,
+        messages: [{
+          role: "user",
+          content: `Summarize this news article. Return ONLY valid JSON:
+{"bullets":["<20 words>","<20 words>","<20 words>"],"summary":"<60 words max>"}
+Rules: exactly 3 bullets under 20 words each; summary under 60 words; neutral tone.
+Article: ${text}`
+        }]
+      })
     });
 
+    if (!response.ok) throw new Error(`Claude API ${response.status}`);
+    
+    const data = await response.json() as { 
+      content: Array<{ type: string; text: string }> 
+    };
+    const raw = data.content.find(c => c.type === "text")?.text ?? "{}";
+    
     let parsed: { bullets?: string[]; summary?: string } = {};
-    try {
-      parsed = JSON.parse(response.text ?? "{}") as typeof parsed;
-    } catch {
-      /* ignore — return empty */
-    }
+    try { parsed = JSON.parse(raw.replace(/```json|```/g, "").trim()); } 
+    catch { /* ignore */ }
 
     const result: AiSummaryEntry = {
       at: Date.now(),
       bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 3) : [],
       summary: typeof parsed.summary === "string" ? parsed.summary : "",
     };
+    
+    // Save to BOTH memory and disk — survives restarts now
     aiSummaryCache.set(url, result);
+    safeWriteJson(
+      `/tmp/ai-summary-${createHash("md5").update(url).digest("hex")}.json`,
+      result
+    );
+    
     res.json({ bullets: result.bullets, summary: result.summary, cached: false });
   } catch (err) {
     req.log.error({ err }, "ai-summary failed");

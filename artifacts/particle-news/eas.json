@@ -12,17 +12,14 @@
       }
     },
     "preview": {
-  "distribution": "internal",
-  "channel": "preview",
-  "android": {
-    "buildType": "apk"
-  },
-  "env": {
-    "EXPO_PUBLIC_API_URL": "https://ireader.onrender.com"
-  },
-  "buildArtifactPaths": ["android/app/build/outputs/**/*.apk"],
-  "prebuildCommand": "pnpm install --no-frozen-lockfile"
-}
+      "distribution": "internal",
+      "channel": "preview",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://ireader.onrender.com"
+      }
     },
     "production": {
       "channel": "production",

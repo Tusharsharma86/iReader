@@ -1,15 +1,15 @@
 {
   "expo": {
-    "name": "iReader",
+    "name": "iReader Pro",
     "slug": "claude-ireader",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/images/icon-pro.png",
     "scheme": "ireader",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/images/icon.png",
+      "image": "./assets/images/icon-pro.png",
       "resizeMode": "contain",
       "backgroundColor": "#0A0A0A"
     },
@@ -18,7 +18,7 @@
       "bundleIdentifier": "com.ireader.app"
     },
     "android": {
-      "package": "com.ireader.app"
+      "package": "com.tushar.ireaderpro"
     },
     "web": {
       "favicon": "./assets/images/icon.png",

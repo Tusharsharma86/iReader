@@ -19,7 +19,9 @@
       },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://ireader.onrender.com"
-      }
+      },
+      "node": "20.18.0",
+      "pnpm": "10.32.1"
     },
     "production": {
       "channel": "production",
@@ -29,7 +31,9 @@
       },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://ireader.onrender.com"
-      }
+      },
+      "node": "20.18.0",
+      "pnpm": "10.32.1"
     }
   },
   "submit": {

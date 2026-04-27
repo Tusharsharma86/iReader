@@ -62,5 +62,6 @@
     "expo-updates": "~29.0.16",
     "react-native-image-colors": "^2.6.0",
     "react-native-webview": "13.15.0"
-  }
+  },
+  "packageManager": "pnpm@10.32.1"
 }

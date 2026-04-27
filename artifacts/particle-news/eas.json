@@ -15,7 +15,9 @@
       "distribution": "internal",
       "channel": "preview",
       "android": {
-        "buildType": "apk"
+        "buildType": "apk",
+        "image": "latest",
+        "ndk": "27.1.12297006"
       },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://ireader.onrender.com"
@@ -27,7 +29,8 @@
       "channel": "production",
       "autoIncrement": true,
       "android": {
-        "buildType": "app-bundle"
+        "buildType": "app-bundle",
+        "image": "latest"
       },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://ireader.onrender.com"

@@ -1,15 +1,16 @@
 {
-  "name": "workspace",
-  "version": "0.0.0",
-  "license": "MIT",
-  "scripts": {
-  "build": "npm run typecheck",
-  "typecheck:libs": "tsc --build",
-  "typecheck": "npm run typecheck:libs"
-},
+  "name": "ireader",
+  "version": "1.0.0",
   "private": true,
-  "devDependencies": {
-    "typescript": "~5.9.2",
-    "prettier": "^3.8.1"
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "build": "expo export"
+  },
+  "dependencies": {
+    "expo": "~51.0.0",
+    "react": "18.2.0",
+    "react-native": "0.74.0"
   }
 }

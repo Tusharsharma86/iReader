@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon-pro.png",
     "scheme": "ireader",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "splash": {
       "image": "./assets/images/icon-pro.png",
       "resizeMode": "contain",
@@ -18,7 +18,11 @@
       "bundleIdentifier": "com.ireader.app"
     },
     "android": {
-      "package": "com.tushar.ireaderpro"
+      "package": "com.tushar.ireaderpro",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/icon-pro.png",
+        "backgroundColor": "#0A0A0A"
+      }
     },
     "web": {
       "favicon": "./assets/images/icon.png",

@@ -7,7 +7,7 @@
     "icon": "./assets/images/icon-pro.png",
     "scheme": "ireader",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/images/icon-pro.png",
       "resizeMode": "contain",
@@ -31,8 +31,7 @@
       "@react-native-community/datetimepicker"
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     },
     "extra": {
       "eas": {

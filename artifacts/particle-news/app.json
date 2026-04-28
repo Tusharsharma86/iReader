@@ -25,12 +25,7 @@
       "backgroundColor": "#0A0A0A"
     },
     "plugins": [
-      [
-        "expo-router",
-        {
-          "origin": "https://replit.com/"
-        }
-      ],
+      "expo-router",
       "expo-font",
       "expo-web-browser",
       "@react-native-community/datetimepicker"
@@ -48,6 +43,8 @@
       "policy": "appVersion"
     },
     "updates": {
+      "checkAutomatically": "NEVER",
+      "fallbackToCacheTimeout": 0,
       "url": "https://u.expo.dev/c7a7489b-8a06-4a9e-8872-28f17c7ac4b7"
     }
   }

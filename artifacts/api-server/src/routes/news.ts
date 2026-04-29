@@ -396,6 +396,9 @@ async function getOgImageCached(articleUrl: string): Promise<string | null> {
   return url;
 }
 
+const PREFERRED_SOURCES = new Set(["techcrunch", "theverge"]);
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
+
 async function fetchTechRss(): Promise<NewsDataArticle[]> {
   const results = await Promise.allSettled(
     TECH_RSS_SOURCES.map((s) => fetchOneRssFeed(s)),
@@ -404,13 +407,27 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
   for (const r of results) {
     if (r.status === "fulfilled") articles.push(...r.value);
   }
-  // Sort newest first, cap at 24 to keep clustering input lean
-  articles.sort((a, b) => {
+
+  // Filter to last 24 hours only
+  const cutoff = Date.now() - TWENTY_FOUR_HOURS_MS;
+  const recent = articles.filter((a) => {
+    const t = a.pubDate ? Date.parse(a.pubDate) : 0;
+    return t > cutoff;
+  });
+
+  // Sort: preferred sources first within each time bucket, then newest first
+  recent.sort((a, b) => {
     const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
+    const prefA = PREFERRED_SOURCES.has(a.source_id ?? "") ? 1 : 0;
+    const prefB = PREFERRED_SOURCES.has(b.source_id ?? "") ? 1 : 0;
+    // Primary: prefer TechCrunch/Verge; secondary: newest first
+    if (prefB !== prefA) return prefB - prefA;
     return tb - ta;
   });
-  const top = articles.slice(0, 80);
+
+  // No hard cap — take all 24h articles (RSS feeds are naturally bounded ~20-30/source)
+  const top = recent.slice(0, 300);
 
   // Enrich items missing image_url by scraping og:image (parallel, time-boxed).
   const needs = top

@@ -1441,39 +1441,69 @@ router.get("/article/prefetch", (req, res) => {
 });
 
 // ----- On-demand AI summary -----
-// Called only when the user explicitly taps "AI Summary" in the reader.
-// Accepts the first N paragraphs of the already-extracted article so we don't
-// need to re-fetch the HTML. Cached for 24 h so repeat taps are instant.
-type AiSummaryEntry = { at: number; bullets: string[]; summary: string };
+// Accepts paragraphs + optional type ("summary" | "fiveWs" | "eli5").
+// Cached 24 h per url+type so repeat taps are instant.
+type AiSummaryEntry = { at: number; bullets: string[]; summary: string; fiveWs: string[]; eli5: string };
 const aiSummaryCache = new Map<string, AiSummaryEntry>();
 const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
 
-////// From Claude 
-// ADD THIS instead — direct Claude API, no proxy
+type AiSummaryType = "summary" | "fiveWs" | "eli5";
+
+function aiPrompt(type: AiSummaryType, text: string): { prompt: string; maxTokens: number } {
+  switch (type) {
+    case "fiveWs":
+      return {
+        maxTokens: 400,
+        prompt: `Analyze this news article and return ONLY valid JSON with exactly 5 strings:
+{"fiveWs":["WHO: <who is involved>","WHAT: <what happened>","WHEN: <when it happened>","WHERE: <where it happened>","WHY: <why it matters>"]}
+Each string must start with the label. Be concise, under 25 words each.
+Article: ${text}`,
+      };
+    case "eli5":
+      return {
+        maxTokens: 200,
+        prompt: `Explain this news article simply, like to a 10-year-old. Return ONLY valid JSON:
+{"eli5":"<explanation in 50 words max, simple language, no jargon>"}
+Article: ${text}`,
+      };
+    default:
+      return {
+        maxTokens: 350,
+        prompt: `Summarize this news article. Return ONLY valid JSON:
+{"bullets":["<key point under 20 words>","<key point under 20 words>","<key point under 20 words>"],"summary":"<60 words max>"}
+Rules: exactly 3 bullets; summary under 60 words; neutral tone.
+Article: ${text}`,
+      };
+  }
+}
+
 router.post("/ai-summary", async (req, res) => {
-  const { url, paragraphs } = req.body as {
+  const { url, paragraphs, type = "summary" } = req.body as {
     url?: string;
     paragraphs?: string[];
+    type?: AiSummaryType;
   };
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
     return;
   }
 
-  // Check in-memory cache first
-  const cached = aiSummaryCache.get(url);
+  const cacheKey = `${url}:${type}`;
+  const hashKey = createHash("md5").update(cacheKey).digest("hex");
+  const diskPath = `/tmp/ai-summary-${hashKey}.json`;
+
+  // Check in-memory cache
+  const cached = aiSummaryCache.get(cacheKey);
   if (cached && Date.now() - cached.at < AI_SUMMARY_TTL_MS) {
-    res.json({ bullets: cached.bullets, summary: cached.summary, cached: true });
+    res.json({ ...cached, cached: true });
     return;
   }
 
-  // Check disk cache (survives restarts — unlike old in-memory only)
-  const diskCached = safeReadJson<AiSummaryEntry>(
-    `/tmp/ai-summary-${createHash("md5").update(url).digest("hex")}.json`
-  );
+  // Check disk cache
+  const diskCached = safeReadJson<AiSummaryEntry>(diskPath);
   if (diskCached && Date.now() - diskCached.at < AI_SUMMARY_TTL_MS) {
-    aiSummaryCache.set(url, diskCached); // warm memory cache too
-    res.json({ bullets: diskCached.bullets, summary: diskCached.summary, cached: true });
+    aiSummaryCache.set(cacheKey, diskCached);
+    res.json({ ...diskCached, cached: true });
     return;
   }
 
@@ -1485,7 +1515,8 @@ router.post("/ai-summary", async (req, res) => {
 
   try {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
-    
+    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text);
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -1494,43 +1525,33 @@ router.post("/ai-summary", async (req, res) => {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001", // cheapest + fastest
-        max_tokens: 350,
-        messages: [{
-          role: "user",
-          content: `Summarize this news article. Return ONLY valid JSON:
-{"bullets":["<20 words>","<20 words>","<20 words>"],"summary":"<60 words max>"}
-Rules: exactly 3 bullets under 20 words each; summary under 60 words; neutral tone.
-Article: ${text}`
-        }]
-      })
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: maxTokens,
+        messages: [{ role: "user", content: prompt }],
+      }),
     });
 
     if (!response.ok) throw new Error(`Claude API ${response.status}`);
-    
-    const data = await response.json() as { 
-      content: Array<{ type: string; text: string }> 
-    };
+
+    const data = await response.json() as { content: Array<{ type: string; text: string }> };
     const raw = data.content.find(c => c.type === "text")?.text ?? "{}";
-    
-    let parsed: { bullets?: string[]; summary?: string } = {};
-    try { parsed = JSON.parse(raw.replace(/```json|```/g, "").trim()); } 
+
+    let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
+    try { parsed = JSON.parse(raw.replace(/```json|```/g, "").trim()); }
     catch { /* ignore */ }
 
     const result: AiSummaryEntry = {
       at: Date.now(),
       bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 3) : [],
       summary: typeof parsed.summary === "string" ? parsed.summary : "",
+      fiveWs: Array.isArray(parsed.fiveWs) ? parsed.fiveWs.slice(0, 5) : [],
+      eli5: typeof parsed.eli5 === "string" ? parsed.eli5 : "",
     };
-    
-    // Save to BOTH memory and disk — survives restarts now
-    aiSummaryCache.set(url, result);
-    safeWriteJson(
-      `/tmp/ai-summary-${createHash("md5").update(url).digest("hex")}.json`,
-      result
-    );
-    
-    res.json({ bullets: result.bullets, summary: result.summary, cached: false });
+
+    aiSummaryCache.set(cacheKey, result);
+    safeWriteJson(diskPath, result);
+
+    res.json({ ...result, cached: false });
   } catch (err) {
     req.log.error({ err }, "ai-summary failed");
     res.status(502).json({ error: "AI summary unavailable" });

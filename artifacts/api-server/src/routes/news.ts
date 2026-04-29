@@ -609,11 +609,13 @@ function pickCategory(article: NewsDataArticle): string {
 
 function naiveBullets(text: string, count: number): string[] {
   if (!text) return [];
+  // Skip descriptions that are just a URL (common in HN/aggregator feeds)
+  if (/^https?:\/\/\S+$/.test(text.trim())) return [];
   const sentences = text
     .replace(/\s+/g, " ")
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
-    .filter((s) => s.length >= 12);
+    .filter((s) => s.length >= 12 && !/^https?:\/\//i.test(s));
   return sentences.slice(0, count);
 }
 
@@ -628,6 +630,8 @@ function naiveFiveWs(text: string): string[] {
 // last-resort fallback when AI summarization fails.
 function naiveParagraph(text: string): string {
   if (!text) return "";
+  // Skip URL-only descriptions
+  if (/^https?:\/\/\S+$/.test(text.trim())) return "";
   const compact = text
     .replace(/\s+/g, " ")
     .trim();

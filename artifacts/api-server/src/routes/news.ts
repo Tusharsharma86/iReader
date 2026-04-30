@@ -396,8 +396,8 @@ async function getOgImageCached(articleUrl: string): Promise<string | null> {
   return url;
 }
 
-const PREFERRED_SOURCES = new Set(["techcrunch", "theverge", "arstechnica"]);
-const THIRTY_SIX_HOURS_MS = 36 * 60 * 60 * 1000;
+const PREFERRED_SOURCES = new Set(["techcrunch", "theverge"]);
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
 async function fetchTechRss(): Promise<NewsDataArticle[]> {
   const results = await Promise.allSettled(
@@ -408,8 +408,8 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
     if (r.status === "fulfilled") articles.push(...r.value);
   }
 
-  // Filter to last 36 hours only
-  const cutoff = Date.now() - THIRTY_SIX_HOURS_MS;
+  // Filter to last 24 hours only
+  const cutoff = Date.now() - TWENTY_FOUR_HOURS_MS;
   const recent = articles.filter((a) => {
     const t = a.pubDate ? Date.parse(a.pubDate) : 0;
     return t > cutoff;

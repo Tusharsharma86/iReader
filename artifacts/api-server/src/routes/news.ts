@@ -396,7 +396,7 @@ async function getOgImageCached(articleUrl: string): Promise<string | null> {
   return url;
 }
 
-const PREFERRED_SOURCES = new Set(["techcrunch", "theverge"]);
+const PREFERRED_SOURCES = new Set(["techcrunch", "theverge", "arstechnica"]);
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 
 async function fetchTechRss(): Promise<NewsDataArticle[]> {

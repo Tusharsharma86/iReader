@@ -566,6 +566,17 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   return union === 0 ? 0 : intersection / union;
 }
 
+// What fraction of the smaller headline's tokens appear in the larger one.
+// Better than Jaccard for same-story detection across headlines of different lengths.
+function overlapCoefficient(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const t of a) {
+    if (b.has(t)) intersection++;
+  }
+  return intersection / Math.min(a.size, b.size);
+}
+
 function articleDomain(url: string): string {
   try {
     return new URL(url).hostname.replace(/^www\./, "");
@@ -590,22 +601,15 @@ function deterministicCluster(articles: NewsDataArticle[]): ClusterResult {
     for (let j = i + 1; j < articles.length; j++) {
       if (assigned[j] !== -1) continue;
       if (members.length >= 8) break;
-      const sim = jaccardSimilarity(tokenSets[i]!, tokenSets[j]!);
-      if (sim >= 0.25) {
-        assigned[j] = clusterIdx;
-        members.push(j);
-        continue;
-      }
-      // Same domain + published within 3 hours → cluster regardless of title.
+      // Only cluster if different sources cover the same story (70%+ token overlap).
+      // Never cluster just because same domain/publisher.
       const domA = articleDomain(articles[i]!.link ?? "");
       const domB = articleDomain(articles[j]!.link ?? "");
-      if (domA && domA === domB) {
-        const tA = new Date(articles[i]!.pubDate ?? 0).getTime();
-        const tB = new Date(articles[j]!.pubDate ?? 0).getTime();
-        if (Math.abs(tA - tB) < 3 * 60 * 60 * 1000) {
-          assigned[j] = clusterIdx;
-          members.push(j);
-        }
+      if (domA && domA === domB) continue;
+      const overlap = overlapCoefficient(tokenSets[i]!, tokenSets[j]!);
+      if (overlap >= 0.7) {
+        assigned[j] = clusterIdx;
+        members.push(j);
       }
     }
 

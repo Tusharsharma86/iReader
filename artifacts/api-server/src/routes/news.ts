@@ -141,6 +141,34 @@ const TECH_RSS_SOURCES: RssSource[] = [
   },
 ];
 
+const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
+  { id: "ndtv", name: "NDTV", url: "https://feeds.feedburner.com/ndtvnews-india-news" },
+  { id: "toi", name: "Times of India", url: "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms" },
+  { id: "thehindu", name: "The Hindu", url: "https://www.thehindu.com/news/national/feeder/default.rss" },
+  { id: "indianexpress", name: "Indian Express", url: "https://indianexpress.com/section/india/feed/" },
+];
+
+const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
+  { id: "bbcworld", name: "BBC World", url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
+  { id: "nytworld", name: "NYT World", url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
+  { id: "foreignpolicy", name: "Foreign Policy", url: "https://foreignpolicy.com/feed/" },
+  { id: "aljazeera", name: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml" },
+];
+
+const MARKETS_RSS_SOURCES: RssSource[] = [
+  { id: "bloomberg", name: "Bloomberg", url: "https://feeds.bloomberg.com/markets/news.rss" },
+  { id: "cnbc", name: "CNBC", url: "https://www.cnbc.com/id/10000664/device/rss/rss.html" },
+  { id: "reuters-biz", name: "Reuters", url: "https://feeds.reuters.com/reuters/businessNews" },
+  { id: "economictimes", name: "Economic Times", url: "https://economictimes.indiatimes.com/markets/rss.cms" },
+];
+
+const BUSINESS_RSS_SOURCES: RssSource[] = [
+  { id: "entrepreneur", name: "Entrepreneur", url: "https://feeds.feedburner.com/entrepreneur/latest" },
+  { id: "forbes", name: "Forbes", url: "https://www.forbes.com/innovation/feed/" },
+  { id: "hbr", name: "HBR", url: "https://hbr.org/feed/topic/business" },
+  { id: "reuters-co", name: "Reuters", url: "https://feeds.reuters.com/reuters/companyNews" },
+];
+
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "@_",
@@ -258,6 +286,7 @@ async function fetchOgImage(url: string): Promise<string | null> {
 function parseRssFeed(
   xml: string,
   source: RssSource,
+  category = "technology",
 ): NewsDataArticle[] {
   const parsed = xmlParser.parse(xml) as Record<string, unknown>;
 
@@ -312,7 +341,7 @@ function parseRssFeed(
         source_url: source.url,
         pubDate: pubDate ? new Date(pubDate).toISOString() : undefined,
         image_url: imageUrl,
-        category: ["technology"],
+        category: [category],
       };
     });
   }
@@ -361,7 +390,7 @@ function parseRssFeed(
   return [];
 }
 
-async function fetchOneRssFeed(source: RssSource): Promise<NewsDataArticle[]> {
+async function fetchOneRssFeed(source: RssSource, category = "technology"): Promise<NewsDataArticle[]> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 12_000);
   try {
@@ -377,10 +406,34 @@ async function fetchOneRssFeed(source: RssSource): Promise<NewsDataArticle[]> {
       throw new Error(`${source.name} ${res.status}`);
     }
     const xml = await res.text();
-    return parseRssFeed(xml, source);
+    return parseRssFeed(xml, source, category);
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchCategoryRss(
+  sources: RssSource[],
+  category: string,
+): Promise<NewsDataArticle[]> {
+  const results = await Promise.allSettled(
+    sources.map((s) => fetchOneRssFeed(s, category)),
+  );
+  const articles: NewsDataArticle[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") articles.push(...r.value);
+  }
+  const cutoff = Date.now() - FORTY_HOURS_MS;
+  const recent = articles.filter((a) => {
+    const t = a.pubDate ? Date.parse(a.pubDate) : 0;
+    return t > cutoff;
+  });
+  recent.sort((a, b) => {
+    const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
+    const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
+    return tb - ta;
+  });
+  return recent.slice(0, 300);
 }
 
 const ogImageCache = new Map<string, { url: string | null; ts: number }>();
@@ -746,10 +799,26 @@ function buildStoryCards(
 }
 
 async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
-  const articles =
-    topic === "technology"
-      ? await fetchTechRss()
-      : await fetchNewsData(topic);
+  let articles: NewsDataArticle[];
+  switch (topic) {
+    case "technology":
+      articles = await fetchTechRss();
+      break;
+    case "india-politics":
+      articles = await fetchCategoryRss(INDIA_POLITICS_RSS_SOURCES, "india-politics");
+      break;
+    case "geopolitics":
+      articles = await fetchCategoryRss(GEOPOLITICS_RSS_SOURCES, "geopolitics");
+      break;
+    case "markets":
+      articles = await fetchCategoryRss(MARKETS_RSS_SOURCES, "markets");
+      break;
+    case "business":
+      articles = await fetchCategoryRss(BUSINESS_RSS_SOURCES, "business");
+      break;
+    default:
+      articles = await fetchNewsData(topic);
+  }
   if (articles.length === 0) return [];
   const clusters = deterministicCluster(articles);
   return buildStoryCards(articles, clusters).slice(0, 40);

@@ -397,7 +397,7 @@ async function getOgImageCached(articleUrl: string): Promise<string | null> {
 }
 
 const PREFERRED_SOURCES = new Set(["techcrunch", "theverge", "arstechnica"]);
-const THIRTY_SIX_HOURS_MS = 36 * 60 * 60 * 1000;
+const FORTY_HOURS_MS = 40 * 60 * 60 * 1000;
 
 async function fetchTechRss(): Promise<NewsDataArticle[]> {
   const results = await Promise.allSettled(
@@ -408,8 +408,8 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
     if (r.status === "fulfilled") articles.push(...r.value);
   }
 
-  // Filter to last 36 hours only
-  const cutoff = Date.now() - THIRTY_SIX_HOURS_MS;
+  // Filter to last 40 hours only
+  const cutoff = Date.now() - FORTY_HOURS_MS;
   const recent = articles.filter((a) => {
     const t = a.pubDate ? Date.parse(a.pubDate) : 0;
     return t > cutoff;
@@ -752,7 +752,7 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
       : await fetchNewsData(topic);
   if (articles.length === 0) return [];
   const clusters = deterministicCluster(articles);
-  return buildStoryCards(articles, clusters);
+  return buildStoryCards(articles, clusters).slice(0, 40);
 }
 
 const inflightFeed = new Map<string, Promise<StoryCard[]>>();

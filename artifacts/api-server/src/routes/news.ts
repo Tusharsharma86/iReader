@@ -119,45 +119,52 @@ type RssSource = {
 };
 
 const TECH_RSS_SOURCES: RssSource[] = [
-  { id: "techcrunch", name: "TechCrunch", url: "https://techcrunch.com/feed/" },
-  { id: "theverge", name: "The Verge", url: "https://www.theverge.com/rss/index.xml" },
-  {
-    id: "arstechnica",
-    name: "Ars Technica",
-    url: "https://feeds.arstechnica.com/arstechnica/index",
-  },
-  { id: "gizmodo", name: "Gizmodo", url: "https://gizmodo.com/rss" },
-  { id: "engadget", name: "Engadget", url: "https://www.engadget.com/rss.xml" },
-  { id: "wired", name: "Wired", url: "https://www.wired.com/feed/rss" },
-  { id: "9to5mac", name: "9to5Mac", url: "https://9to5mac.com/feed/" },
-  { id: "9to5google", name: "9to5Google", url: "https://9to5google.com/feed/" },
-  { id: "venturebeat", name: "VentureBeat", url: "https://venturebeat.com/feed/" },
-  { id: "thenextweb", name: "The Next Web", url: "https://thenextweb.com/feed/" },
-  { id: "hackernews", name: "Hacker News", url: "https://hnrss.org/frontpage" },
-  {
-    id: "mittech",
-    name: "MIT Tech Review",
-    url: "https://www.technologyreview.com/feed/",
-  },
+  { id: "techcrunch",   name: "TechCrunch",       url: "https://techcrunch.com/feed/" },
+  { id: "theverge",     name: "The Verge",         url: "https://www.theverge.com/rss/index.xml" },
+  { id: "arstechnica",  name: "Ars Technica",      url: "https://feeds.arstechnica.com/arstechnica/index" },
+  { id: "wired",        name: "Wired",             url: "https://www.wired.com/feed/rss" },
+  { id: "9to5google",   name: "9to5Google",        url: "https://9to5google.com/feed/" },
+  { id: "9to5mac",      name: "9to5Mac",           url: "https://9to5mac.com/feed/" },
+  { id: "engadget",     name: "Engadget",          url: "https://www.engadget.com/rss.xml" },
+  { id: "venturebeat",  name: "VentureBeat",       url: "https://venturebeat.com/feed/" },
+  { id: "thenextweb",   name: "The Next Web",      url: "https://thenextweb.com/feed/" },
+  { id: "hackernews",   name: "Hacker News",       url: "https://hnrss.org/frontpage" },
+  { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
+  { id: "thequint-tech",name: "The Quint Tech",    url: "https://www.thequint.com/tech/feed" },
+  { id: "ie-tech",      name: "Indian Express Tech",url: "https://indianexpress.com/section/technology/feed/" },
+  { id: "hindu-tech",   name: "The Hindu Tech",    url: "https://www.thehindu.com/sci-tech/technology/feeder/default.rss" },
 ];
 
-// All Indian news feeds shared across non-tech topics
-const INDIAN_RSS_SOURCES: RssSource[] = [
-  { id: "toi-top",      name: "Times of India", url: "https://timesofindia.indiatimes.com/rssfeedstopstories.cms" },
-  { id: "zeenews",      name: "Zee News",        url: "https://zeenews.india.com/rss/india-national-news.xml" },
-  { id: "ani-nat",      name: "ANI News",        url: "https://www.aninews.in/rss/national.xml" },
-  { id: "republic",     name: "Republic World",  url: "https://www.republicworld.com/feeds/rssfeed.xml" },
-  { id: "et-top",       name: "Economic Times",  url: "https://economictimes.indiatimes.com/rssfeedstopstories.cms" },
-  { id: "ndtv-top",     name: "NDTV",            url: "https://feeds.feedburner.com/ndtvnews-top-stories" },
-  { id: "moneycontrol", name: "MoneyControl",    url: "https://www.moneycontrol.com/rss/latestnews.xml" },
-  { id: "ht-india",     name: "Hindustan Times", url: "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml" },
+// Topic-specific Indian source lists
+const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
+  { id: "ndtv-india",   name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-india-news" },
+  { id: "toi-india",    name: "Times of India",   url: "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms" },
+  { id: "thehindu",     name: "The Hindu",        url: "https://www.thehindu.com/news/national/feeder/default.rss" },
+  { id: "ie-india",     name: "Indian Express",   url: "https://indianexpress.com/section/india/feed/" },
+  { id: "thequint-ind", name: "The Quint",        url: "https://www.thequint.com/india/feed" },
+  { id: "ani-nat",      name: "ANI News",         url: "https://www.aninews.in/rss/national.xml" },
+  { id: "ht-india",     name: "Hindustan Times",  url: "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml" },
+];
+
+const MARKETS_RSS_SOURCES: RssSource[] = [
+  { id: "et-markets",   name: "Economic Times",   url: "https://economictimes.indiatimes.com/markets/rss.cms" },
+  { id: "mc-markets",   name: "MoneyControl",     url: "https://www.moneycontrol.com/rss/marketreports.xml" },
+  { id: "ndtv-profit",  name: "NDTV Profit",      url: "https://feeds.feedburner.com/ndtvprofit-latest" },
+  { id: "livemint",     name: "Livemint",         url: "https://www.livemint.com/rss/markets" },
+];
+
+const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
+  { id: "bbc-world",    name: "BBC World",        url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
+  { id: "nyt-world",    name: "NYT World",        url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
+  { id: "aljazeera",    name: "Al Jazeera",       url: "https://www.aljazeera.com/xml/rss/all.xml" },
+  { id: "reuters-world",name: "Reuters",          url: "https://feeds.reuters.com/reuters/worldNews" },
 ];
 
 const TOPIC_KEYWORDS: Record<string, string[]> = {
-  "india-politics": ["parliament", "modi", "bjp", "congress", "election", "minister", "india", "government", "pm", "lok sabha", "rajya", "political", "opposition", "party", "vote", "policy", "scheme", "cabinet", "chief minister", "central government", "state government", "legislative", "mla", "mp ", "governor", "president", "supreme court"],
-  "geopolitics":    ["pakistan", "china", "border", "war", "diplomacy", "foreign", "global", "international", "military", "united nations", "nato", "russia", "ukraine", "israel", "gaza", "bilateral", "treaty", "sanctions", "geopolit", "defence", "defense", "army", "navy", "air force", "missile", "nuclear", "ceasefire", "conflict"],
-  "markets":        ["sensex", "nifty", "rupee", "rbi", "stock", "market", "economy", "inflation", "gdp", "rate", "ipo", "sebi", "share", "trade", "fiscal", "financial", "fund", "invest", "bank", "quarter", "crore", "billion", "trillion", "interest rate", "repo", "forex", "bse", "nse", "mutual fund", "commodity"],
-  "business":       ["company", "startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "ipo", "industry", "crore", "billion", "million", "corporate", "enterprise", "deal", "launch", "product", "brand", "business", "retail", "ecommerce", "tech company", "valuation", "unicorn"],
+  "india-politics": ["parliament", "modi", "bjp", "congress", "election", "minister", "india", "government", "pm", "lok sabha", "rajya sabha", "political", "opposition", "party", "vote", "policy", "cabinet", "chief minister", "mla", "mp", "governor", "supreme court", "delhi", "mumbai", "state"],
+  "geopolitics":    ["war", "conflict", "treaty", "nato", "sanction", "diplomacy", "foreign", "international", "global", "china", "russia", "pakistan", "ukraine", "israel", "gaza", "border", "military", "nuclear", "ceasefire", "united nations", "un security"],
+  "markets":        ["sensex", "nifty", "stock", "shares", "bse", "nse", "rupee", "rbi", "equity", "ipo", "mutual fund", "trading", "rate cut", "repo", "inflation", "sebi", "market cap", "rally", "selloff"],
+  "business":       ["company", "startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "industry", "crore", "billion", "corporate", "deal", "launch", "brand", "valuation", "unicorn", "quarter"],
 };
 
 const SPORTS_ENTERTAINMENT_RE = /\b(cricket|ipl|bcci|test match|odi|t20i?|football|fifa|tennis|wimbledon|formula[- ]1|f1 race|chess|olympics|hockey|badminton|icc|world cup final|bollywood|movie release|film|actor|actress|celebrity|box office|trailer launch|oscar|grammy|award show|web series|ott)\b/i;
@@ -174,9 +181,19 @@ function matchesTopic(article: NewsDataArticle, topic: string): boolean {
   return kws.some(kw => text.includes(kw));
 }
 
+function sourcesForTopic(topic: string): RssSource[] {
+  switch (topic) {
+    case "india-politics": return INDIA_POLITICS_RSS_SOURCES;
+    case "markets":        return MARKETS_RSS_SOURCES;
+    case "geopolitics":    return GEOPOLITICS_RSS_SOURCES;
+    default:               return INDIA_POLITICS_RSS_SOURCES; // business falls back to india news
+  }
+}
+
 async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
+  const sources = sourcesForTopic(topic);
   const results = await Promise.allSettled(
-    INDIAN_RSS_SOURCES.map(s => fetchOneRssFeed(s, topic)),
+    sources.map(s => fetchOneRssFeed(s, topic)),
   );
   const articles: NewsDataArticle[] = [];
   for (const r of results) {
@@ -838,8 +855,17 @@ const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 async function buildBreakingFeed(): Promise<StoryCard[]> {
   const cutoff = Date.now() - EIGHT_HOURS_MS;
 
-  // All sources: tech + Indian feeds (already deduplicated by distinct ids)
-  const uniqueSources = [...TECH_RSS_SOURCES, ...INDIAN_RSS_SOURCES];
+  // All sources: tech + all topic-specific feeds, deduped by id
+  const seen = new Set<string>();
+  const uniqueSources: RssSource[] = [];
+  for (const s of [
+    ...TECH_RSS_SOURCES,
+    ...INDIA_POLITICS_RSS_SOURCES,
+    ...MARKETS_RSS_SOURCES,
+    ...GEOPOLITICS_RSS_SOURCES,
+  ]) {
+    if (!seen.has(s.id)) { seen.add(s.id); uniqueSources.push(s); }
+  }
 
   const results = await Promise.allSettled(
     uniqueSources.map(s => fetchOneRssFeed(s, "breaking")),
@@ -1139,6 +1165,10 @@ router.get("/feed", async (req, res) => {
     typeof req.query["source"] === "string" && req.query["source"].length > 0
       ? String(req.query["source"]).toLowerCase()
       : null;
+  const page = Math.max(1, parseInt(String(req.query["page"] ?? "1"), 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query["limit"] ?? "20"), 10) || 20));
+  const offset = (page - 1) * limit;
+
   const cached = cache.get(topic);
   const isFresh = cached && Date.now() - cached.at < ttlFor(topic);
 
@@ -1146,10 +1176,10 @@ router.get("/feed", async (req, res) => {
     stories: StoryCard[],
     extra: Record<string, unknown> = {},
   ) => {
-    const filtered = sourceFilter
-      ? filterStoriesBySource(stories, sourceFilter)
-      : stories;
-    res.json({ stories: filtered, ...extra });
+    let result = sourceFilter ? filterStoriesBySource(stories, sourceFilter) : stories;
+    const total = result.length;
+    result = result.slice(offset, offset + limit);
+    res.json({ stories: result, total, page, limit, ...extra });
   };
 
   // Fast path: return cached data if fresh.

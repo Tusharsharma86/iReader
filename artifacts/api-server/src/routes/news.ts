@@ -199,20 +199,15 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
   for (const r of results) {
     if (r.status === "fulfilled") articles.push(...r.value);
   }
-  const cutoff = Date.now() - SIXTY_HOURS_MS;
-  const recent = articles
-    .filter(a => {
-      const t = a.pubDate ? Date.parse(a.pubDate) : 0;
-      return t > cutoff;
-    })
+  const filtered = articles
     .filter(a => !isSportsOrEntertainment(a))
     .filter(a => matchesTopic(a, topic));
-  recent.sort((a, b) => {
+  filtered.sort((a, b) => {
     const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
-  return recent;
+  return filtered;
 }
 
 
@@ -509,12 +504,8 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
     if (r.status === "fulfilled") articles.push(...r.value);
   }
 
-  // Filter to last 40 hours only
-  const cutoff = Date.now() - FORTY_HOURS_MS;
-  const recent = articles.filter((a) => {
-    const t = a.pubDate ? Date.parse(a.pubDate) : 0;
-    return t > cutoff;
-  });
+  // No time cutoff — take all articles the RSS feeds provide, sorted newest first
+  const recent = [...articles];
 
   // Sort: preferred sources first within each time bucket, then newest first
   recent.sort((a, b) => {
@@ -816,13 +807,21 @@ function buildStoryCards(
       .map((i) => articles[i])
       .filter((a): a is NewsDataArticle => Boolean(a));
 
-    const sources: Source[] = clusterArticles.map((a, i) => ({
-      name: a.source_name ?? a.source_id ?? "Unknown",
-      url: a.link ?? "",
-      type: cluster.source_types?.[i] ?? "niche",
-      imageUrl: a.image_url ?? null,
-      publishedAt: a.pubDate ?? undefined,
-    }));
+    // Deduplicate by domain — one entry per publisher
+    const seenDomains = new Set<string>();
+    const sources: Source[] = clusterArticles.reduce<Source[]>((acc, a, i) => {
+      const domain = articleDomain(a.link ?? "");
+      if (domain && seenDomains.has(domain)) return acc;
+      if (domain) seenDomains.add(domain);
+      acc.push({
+        name: a.source_name ?? a.source_id ?? "Unknown",
+        url: a.link ?? "",
+        type: cluster.source_types?.[i] ?? "niche",
+        imageUrl: a.image_url ?? null,
+        publishedAt: a.pubDate ?? undefined,
+      });
+      return acc;
+    }, []);
 
     const firstWithImage = clusterArticles.find((a) => a.image_url);
     const firstArticle = clusterArticles[0];
@@ -1647,10 +1646,10 @@ Article: ${text}`,
       };
     default:
       return {
-        maxTokens: 350,
+        maxTokens: 600,
         prompt: `Summarize this news article. Return ONLY valid JSON:
-{"bullets":["<key point under 20 words>","<key point under 20 words>","<key point under 20 words>"],"summary":"<60 words max>"}
-Rules: exactly 3 bullets; summary under 60 words; neutral tone.
+{"bullets":["<key point under 25 words>","<key point under 25 words>","<key point under 25 words>"],"summary":"<150 words max, detailed and informative>"}
+Rules: exactly 3 bullets; summary under 150 words; neutral tone; include key facts, names, numbers.
 Article: ${text}`,
       };
   }

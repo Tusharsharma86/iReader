@@ -141,37 +141,54 @@ const TECH_RSS_SOURCES: RssSource[] = [
   },
 ];
 
-const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "ndtv", name: "NDTV", url: "https://feeds.feedburner.com/ndtvnews-india-news" },
-  { id: "toi", name: "Times of India", url: "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms" },
-  { id: "thehindu", name: "The Hindu", url: "https://www.thehindu.com/news/national/feeder/default.rss" },
-  { id: "indianexpress", name: "Indian Express", url: "https://indianexpress.com/section/india/feed/" },
+// All Indian news feeds shared across non-tech topics
+const INDIAN_RSS_SOURCES: RssSource[] = [
+  { id: "toi-top", name: "Times of India", url: "https://timesofindia.indiatimes.com/rssfeedstopstories.cms" },
+  { id: "zeenews", name: "Zee News", url: "https://zeenews.india.com/rss/india-national-news.xml" },
+  { id: "ani-nat", name: "ANI News", url: "https://www.aninews.in/rss/national.xml" },
   { id: "republic", name: "Republic World", url: "https://www.republicworld.com/feeds/rssfeed.xml" },
-  { id: "ani", name: "ANI News", url: "https://www.aninews.in/rss/world.xml" },
+  { id: "indiatoday", name: "India Today", url: "https://www.indiatoday.in/rss/home" },
+  { id: "et-top", name: "Economic Times", url: "https://economictimes.indiatimes.com/rssfeedstopstories.cms" },
+  { id: "ndtv-top", name: "NDTV", url: "https://feeds.feedburner.com/ndtvnews-top-stories" },
 ];
 
-const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "bbcworld", name: "BBC World", url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
-  { id: "nytworld", name: "NYT World", url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
-  { id: "foreignpolicy", name: "Foreign Policy", url: "https://foreignpolicy.com/feed/" },
-  { id: "aljazeera", name: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml" },
-  { id: "republic-geo", name: "Republic World", url: "https://www.republicworld.com/feeds/rssfeed.xml" },
-  { id: "ani-geo", name: "ANI News", url: "https://www.aninews.in/rss/world.xml" },
-];
+const TOPIC_KEYWORDS: Record<string, string[]> = {
+  "india-politics": ["parliament", "modi", "bjp", "congress", "election", "minister", "india", "government", "pm", "lok sabha", "rajya"],
+  "geopolitics":    ["pakistan", "china", "border", "war", "diplomacy", "foreign", "global", "international", "military", "un ", "nato"],
+  "markets":        ["sensex", "nifty", "rupee", "rbi", "stock", "market", "economy", "inflation", "gdp", "rate", "ipo", "sebi"],
+  "business":       ["company", "startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "ipo", "industry"],
+};
 
-const MARKETS_RSS_SOURCES: RssSource[] = [
-  { id: "bloomberg", name: "Bloomberg", url: "https://feeds.bloomberg.com/markets/news.rss" },
-  { id: "cnbc", name: "CNBC", url: "https://www.cnbc.com/id/10000664/device/rss/rss.html" },
-  { id: "reuters-biz", name: "Reuters", url: "https://feeds.reuters.com/reuters/businessNews" },
-  { id: "economictimes", name: "Economic Times", url: "https://economictimes.indiatimes.com/markets/rss.cms" },
-];
+function matchesTopic(article: NewsDataArticle, topic: string): boolean {
+  const kws = TOPIC_KEYWORDS[topic];
+  if (!kws) return true;
+  const text = `${article.title ?? ""} ${article.description ?? ""}`.toLowerCase();
+  return kws.some(kw => text.includes(kw));
+}
 
-const BUSINESS_RSS_SOURCES: RssSource[] = [
-  { id: "entrepreneur", name: "Entrepreneur", url: "https://feeds.feedburner.com/entrepreneur/latest" },
-  { id: "forbes", name: "Forbes", url: "https://www.forbes.com/innovation/feed/" },
-  { id: "hbr", name: "HBR", url: "https://hbr.org/feed/topic/business" },
-  { id: "reuters-co", name: "Reuters", url: "https://feeds.reuters.com/reuters/companyNews" },
-];
+async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
+  const results = await Promise.allSettled(
+    INDIAN_RSS_SOURCES.map(s => fetchOneRssFeed(s, topic)),
+  );
+  const articles: NewsDataArticle[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") articles.push(...r.value);
+  }
+  const cutoff = Date.now() - FORTY_HOURS_MS;
+  const recent = articles
+    .filter(a => {
+      const t = a.pubDate ? Date.parse(a.pubDate) : 0;
+      return t > cutoff;
+    })
+    .filter(a => matchesTopic(a, topic));
+  recent.sort((a, b) => {
+    const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
+    const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
+    return tb - ta;
+  });
+  return recent;
+}
+
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -811,19 +828,8 @@ const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
 async function buildBreakingFeed(): Promise<StoryCard[]> {
   const cutoff = Date.now() - THREE_HOURS_MS;
 
-  // Deduplicate sources by id so ANI/Republic World don't get fetched twice
-  const seen = new Set<string>();
-  const uniqueSources = [
-    ...TECH_RSS_SOURCES,
-    ...INDIA_POLITICS_RSS_SOURCES,
-    ...GEOPOLITICS_RSS_SOURCES,
-    ...MARKETS_RSS_SOURCES,
-    ...BUSINESS_RSS_SOURCES,
-  ].filter(s => {
-    if (seen.has(s.id)) return false;
-    seen.add(s.id);
-    return true;
-  });
+  // All sources: tech + Indian feeds (already deduplicated by distinct ids)
+  const uniqueSources = [...TECH_RSS_SOURCES, ...INDIAN_RSS_SOURCES];
 
   const results = await Promise.allSettled(
     uniqueSources.map(s => fetchOneRssFeed(s, "breaking")),
@@ -855,16 +861,10 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
       articles = await fetchTechRss();
       break;
     case "india-politics":
-      articles = await fetchCategoryRss(INDIA_POLITICS_RSS_SOURCES, "india-politics");
-      break;
     case "geopolitics":
-      articles = await fetchCategoryRss(GEOPOLITICS_RSS_SOURCES, "geopolitics");
-      break;
     case "markets":
-      articles = await fetchCategoryRss(MARKETS_RSS_SOURCES, "markets");
-      break;
     case "business":
-      articles = await fetchCategoryRss(BUSINESS_RSS_SOURCES, "business");
+      articles = await fetchIndianFeeds(topic);
       break;
     default:
       articles = await fetchNewsData(topic);

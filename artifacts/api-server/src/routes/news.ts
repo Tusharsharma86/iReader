@@ -146,6 +146,8 @@ const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
   { id: "toi", name: "Times of India", url: "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms" },
   { id: "thehindu", name: "The Hindu", url: "https://www.thehindu.com/news/national/feeder/default.rss" },
   { id: "indianexpress", name: "Indian Express", url: "https://indianexpress.com/section/india/feed/" },
+  { id: "republic", name: "Republic World", url: "https://www.republicworld.com/feeds/rssfeed.xml" },
+  { id: "ani", name: "ANI News", url: "https://www.aninews.in/rss/world.xml" },
 ];
 
 const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
@@ -153,6 +155,8 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "nytworld", name: "NYT World", url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
   { id: "foreignpolicy", name: "Foreign Policy", url: "https://foreignpolicy.com/feed/" },
   { id: "aljazeera", name: "Al Jazeera", url: "https://www.aljazeera.com/xml/rss/all.xml" },
+  { id: "republic-geo", name: "Republic World", url: "https://www.republicworld.com/feeds/rssfeed.xml" },
+  { id: "ani-geo", name: "ANI News", url: "https://www.aninews.in/rss/world.xml" },
 ];
 
 const MARKETS_RSS_SOURCES: RssSource[] = [
@@ -433,7 +437,7 @@ async function fetchCategoryRss(
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
-  return recent.slice(0, 300);
+  return recent;
 }
 
 const ogImageCache = new Map<string, { url: string | null; ts: number }>();
@@ -450,7 +454,7 @@ async function getOgImageCached(articleUrl: string): Promise<string | null> {
 }
 
 const PREFERRED_SOURCES = new Set(["techcrunch", "theverge", "arstechnica"]);
-const FORTY_HOURS_MS = 40 * 60 * 60 * 1000;
+const FORTY_HOURS_MS = 48 * 60 * 60 * 1000;
 
 async function fetchTechRss(): Promise<NewsDataArticle[]> {
   const results = await Promise.allSettled(
@@ -802,9 +806,51 @@ function buildStoryCards(
   });
 }
 
+const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+
+async function buildBreakingFeed(): Promise<StoryCard[]> {
+  const cutoff = Date.now() - THREE_HOURS_MS;
+
+  // Deduplicate sources by id so ANI/Republic World don't get fetched twice
+  const seen = new Set<string>();
+  const uniqueSources = [
+    ...TECH_RSS_SOURCES,
+    ...INDIA_POLITICS_RSS_SOURCES,
+    ...GEOPOLITICS_RSS_SOURCES,
+    ...MARKETS_RSS_SOURCES,
+    ...BUSINESS_RSS_SOURCES,
+  ].filter(s => {
+    if (seen.has(s.id)) return false;
+    seen.add(s.id);
+    return true;
+  });
+
+  const results = await Promise.allSettled(
+    uniqueSources.map(s => fetchOneRssFeed(s, "breaking")),
+  );
+  const raw: NewsDataArticle[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") raw.push(...r.value);
+  }
+
+  const recent = raw.filter(a => {
+    const t = a.pubDate ? Date.parse(a.pubDate) : 0;
+    return t > cutoff;
+  });
+  recent.sort((a, b) => {
+    const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
+    const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
+    return tb - ta;
+  });
+
+  return buildFallbackStories(recent.slice(0, 20));
+}
+
 async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
   let articles: NewsDataArticle[];
   switch (topic) {
+    case "breaking":
+      return buildBreakingFeed();
     case "technology":
       articles = await fetchTechRss();
       break;
@@ -825,7 +871,7 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
   }
   if (articles.length === 0) return [];
   const clusters = deterministicCluster(articles);
-  return buildStoryCards(articles, clusters).slice(0, 40);
+  return buildStoryCards(articles, clusters);
 }
 
 const inflightFeed = new Map<string, Promise<StoryCard[]>>();

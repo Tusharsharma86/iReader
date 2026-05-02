@@ -143,21 +143,29 @@ const TECH_RSS_SOURCES: RssSource[] = [
 
 // All Indian news feeds shared across non-tech topics
 const INDIAN_RSS_SOURCES: RssSource[] = [
-  { id: "toi-top", name: "Times of India", url: "https://timesofindia.indiatimes.com/rssfeedstopstories.cms" },
-  { id: "zeenews", name: "Zee News", url: "https://zeenews.india.com/rss/india-national-news.xml" },
-  { id: "ani-nat", name: "ANI News", url: "https://www.aninews.in/rss/national.xml" },
-  { id: "republic", name: "Republic World", url: "https://www.republicworld.com/feeds/rssfeed.xml" },
-  { id: "indiatoday", name: "India Today", url: "https://www.indiatoday.in/rss/home" },
-  { id: "et-top", name: "Economic Times", url: "https://economictimes.indiatimes.com/rssfeedstopstories.cms" },
-  { id: "ndtv-top", name: "NDTV", url: "https://feeds.feedburner.com/ndtvnews-top-stories" },
+  { id: "toi-top",      name: "Times of India", url: "https://timesofindia.indiatimes.com/rssfeedstopstories.cms" },
+  { id: "zeenews",      name: "Zee News",        url: "https://zeenews.india.com/rss/india-national-news.xml" },
+  { id: "ani-nat",      name: "ANI News",        url: "https://www.aninews.in/rss/national.xml" },
+  { id: "republic",     name: "Republic World",  url: "https://www.republicworld.com/feeds/rssfeed.xml" },
+  { id: "et-top",       name: "Economic Times",  url: "https://economictimes.indiatimes.com/rssfeedstopstories.cms" },
+  { id: "ndtv-top",     name: "NDTV",            url: "https://feeds.feedburner.com/ndtvnews-top-stories" },
+  { id: "moneycontrol", name: "MoneyControl",    url: "https://www.moneycontrol.com/rss/latestnews.xml" },
+  { id: "ht-india",     name: "Hindustan Times", url: "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml" },
 ];
 
 const TOPIC_KEYWORDS: Record<string, string[]> = {
-  "india-politics": ["parliament", "modi", "bjp", "congress", "election", "minister", "india", "government", "pm", "lok sabha", "rajya"],
-  "geopolitics":    ["pakistan", "china", "border", "war", "diplomacy", "foreign", "global", "international", "military", "un ", "nato"],
-  "markets":        ["sensex", "nifty", "rupee", "rbi", "stock", "market", "economy", "inflation", "gdp", "rate", "ipo", "sebi"],
-  "business":       ["company", "startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "ipo", "industry"],
+  "india-politics": ["parliament", "modi", "bjp", "congress", "election", "minister", "india", "government", "pm", "lok sabha", "rajya", "political", "opposition", "party", "vote", "policy", "scheme", "cabinet", "chief minister", "central government", "state government", "legislative", "mla", "mp ", "governor", "president", "supreme court"],
+  "geopolitics":    ["pakistan", "china", "border", "war", "diplomacy", "foreign", "global", "international", "military", "united nations", "nato", "russia", "ukraine", "israel", "gaza", "bilateral", "treaty", "sanctions", "geopolit", "defence", "defense", "army", "navy", "air force", "missile", "nuclear", "ceasefire", "conflict"],
+  "markets":        ["sensex", "nifty", "rupee", "rbi", "stock", "market", "economy", "inflation", "gdp", "rate", "ipo", "sebi", "share", "trade", "fiscal", "financial", "fund", "invest", "bank", "quarter", "crore", "billion", "trillion", "interest rate", "repo", "forex", "bse", "nse", "mutual fund", "commodity"],
+  "business":       ["company", "startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "ipo", "industry", "crore", "billion", "million", "corporate", "enterprise", "deal", "launch", "product", "brand", "business", "retail", "ecommerce", "tech company", "valuation", "unicorn"],
 };
+
+const SPORTS_ENTERTAINMENT_RE = /\b(cricket|ipl|bcci|test match|odi|t20i?|football|fifa|tennis|wimbledon|formula[- ]1|f1 race|chess|olympics|hockey|badminton|icc|world cup final|bollywood|movie release|film|actor|actress|celebrity|box office|trailer launch|oscar|grammy|award show|web series|ott)\b/i;
+
+function isSportsOrEntertainment(article: NewsDataArticle): boolean {
+  const text = `${article.title ?? ""} ${article.description ?? ""}`.slice(0, 300);
+  return SPORTS_ENTERTAINMENT_RE.test(text);
+}
 
 function matchesTopic(article: NewsDataArticle, topic: string): boolean {
   const kws = TOPIC_KEYWORDS[topic];
@@ -174,12 +182,13 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
   for (const r of results) {
     if (r.status === "fulfilled") articles.push(...r.value);
   }
-  const cutoff = Date.now() - FORTY_HOURS_MS;
+  const cutoff = Date.now() - SIXTY_HOURS_MS;
   const recent = articles
     .filter(a => {
       const t = a.pubDate ? Date.parse(a.pubDate) : 0;
       return t > cutoff;
     })
+    .filter(a => !isSportsOrEntertainment(a))
     .filter(a => matchesTopic(a, topic));
   recent.sort((a, b) => {
     const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
@@ -471,7 +480,8 @@ async function getOgImageCached(articleUrl: string): Promise<string | null> {
 }
 
 const PREFERRED_SOURCES = new Set(["techcrunch", "theverge", "arstechnica"]);
-const FORTY_HOURS_MS = 48 * 60 * 60 * 1000;
+const SIXTY_HOURS_MS = 60 * 60 * 60 * 1000;
+const FORTY_HOURS_MS = SIXTY_HOURS_MS; // alias kept for tech feed usage
 
 async function fetchTechRss(): Promise<NewsDataArticle[]> {
   const results = await Promise.allSettled(
@@ -823,10 +833,10 @@ function buildStoryCards(
   });
 }
 
-const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 
 async function buildBreakingFeed(): Promise<StoryCard[]> {
-  const cutoff = Date.now() - THREE_HOURS_MS;
+  const cutoff = Date.now() - EIGHT_HOURS_MS;
 
   // All sources: tech + Indian feeds (already deduplicated by distinct ids)
   const uniqueSources = [...TECH_RSS_SOURCES, ...INDIAN_RSS_SOURCES];
@@ -839,17 +849,20 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
     if (r.status === "fulfilled") raw.push(...r.value);
   }
 
-  const recent = raw.filter(a => {
-    const t = a.pubDate ? Date.parse(a.pubDate) : 0;
-    return t > cutoff;
-  });
+  const recent = raw
+    .filter(a => {
+      const t = a.pubDate ? Date.parse(a.pubDate) : 0;
+      return t > cutoff;
+    })
+    .filter(a => !isSportsOrEntertainment(a));
+
   recent.sort((a, b) => {
     const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
 
-  return buildFallbackStories(recent.slice(0, 20));
+  return buildFallbackStories(recent.slice(0, 30));
 }
 
 async function buildFreshFeed(topic: string): Promise<StoryCard[]> {

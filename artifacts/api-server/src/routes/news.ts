@@ -1742,17 +1742,17 @@ Article: ${text}`,
       };
     case "eli5":
       return {
-        maxTokens: 200,
+        maxTokens: 300,
         prompt: `Explain this news article simply, like to a 10-year-old. Return ONLY valid JSON:
-{"eli5":"<explanation in 50 words max, simple language, no jargon>"}
+{"eli5":"<explanation in 80-100 words, simple language, no jargon, conversational tone>"}
 Article: ${text}`,
       };
     default:
       return {
-        maxTokens: 600,
-        prompt: `Summarize this news article. Return ONLY valid JSON:
-{"bullets":["<key point under 25 words>","<key point under 25 words>","<key point under 25 words>"],"summary":"<150 words max, detailed and informative>"}
-Rules: exactly 3 bullets; summary under 150 words; neutral tone; include key facts, names, numbers.
+        maxTokens: 900,
+        prompt: `Summarize this news article thoroughly. Return ONLY valid JSON:
+{"bullets":["<key point under 30 words>","<key point under 30 words>","<key point under 30 words>","<key point under 30 words>","<key point under 30 words>"],"summary":"<minimum 200 words, comprehensive and informative, cover all major facts, people, numbers, context, and implications>"}
+Rules: exactly 5 bullets; summary MUST be at least 200 words; neutral tone; include key facts, names, figures, context.
 Article: ${text}`,
       };
   }
@@ -1823,7 +1823,7 @@ router.post("/ai-summary", async (req, res) => {
 
     const result: AiSummaryEntry = {
       at: Date.now(),
-      bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 3) : [],
+      bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 5) : [],
       summary: typeof parsed.summary === "string" ? parsed.summary : "",
       fiveWs: Array.isArray(parsed.fiveWs) ? parsed.fiveWs.slice(0, 5) : [],
       eli5: typeof parsed.eli5 === "string" ? parsed.eli5 : "",

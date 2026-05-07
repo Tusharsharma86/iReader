@@ -132,6 +132,8 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
   { id: "thequint-tech",name: "The Quint Tech",    url: "https://www.thequint.com/tech/feed" },
   { id: "ie-tech",      name: "Indian Express Tech",url: "https://indianexpress.com/section/technology/feed/" },
+  { id: "news18-tech",  name: "News18",            url: "https://www.news18.com/rss/tech.xml" },
+  { id: "fp-tech",      name: "Firstpost",         url: "https://www.firstpost.com/rss/tech.xml" },
 ];
 
 // Topic-specific Indian source lists
@@ -142,6 +144,8 @@ const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
   { id: "thequint-ind", name: "The Quint",        url: "https://www.thequint.com/india/feed" },
   { id: "ani-nat",      name: "ANI News",         url: "https://www.aninews.in/rss/national.xml" },
   { id: "ht-india",     name: "Hindustan Times",  url: "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml" },
+  { id: "news18-india", name: "News18",           url: "https://www.news18.com/rss/india.xml" },
+  { id: "fp-india",     name: "Firstpost",        url: "https://www.firstpost.com/rss/india.xml" },
 ];
 
 const MARKETS_RSS_SOURCES: RssSource[] = [
@@ -152,6 +156,8 @@ const MARKETS_RSS_SOURCES: RssSource[] = [
   { id: "livemint",     name: "Livemint",         url: "https://www.livemint.com/rss/markets" },
   { id: "bs-markets",   name: "Business Standard",url: "https://www.business-standard.com/rss/markets-106.rss" },
   { id: "cnbctv18",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
+  { id: "news18-biz",   name: "News18",           url: "https://www.news18.com/rss/business.xml" },
+  { id: "fp-biz",       name: "Firstpost",        url: "https://www.firstpost.com/rss/business.xml" },
 ];
 
 // Reuters ended public RSS June 2020. AP News retired /rss/apf-* paths — use hub format.
@@ -163,6 +169,8 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "nyt-world",    name: "NYT World",              url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
   { id: "ie-world",     name: "Indian Express World",   url: "https://indianexpress.com/section/world/feed/" },
   { id: "npr-world",    name: "NPR World",              url: "https://feeds.npr.org/1004/rss.xml" },
+  { id: "news18-world", name: "News18",                 url: "https://www.news18.com/rss/world.xml" },
+  { id: "fp-world",     name: "Firstpost",              url: "https://www.firstpost.com/rss/world.xml" },
 ];
 
 const BUSINESS_RSS_SOURCES: RssSource[] = [
@@ -172,6 +180,8 @@ const BUSINESS_RSS_SOURCES: RssSource[] = [
   { id: "mc-biz",       name: "MoneyControl",     url: "https://www.moneycontrol.com/rss/economy.xml" },
   { id: "inc42",        name: "Inc42",            url: "https://inc42.com/feed/" },
   { id: "ht-biz",       name: "Hindustan Times",  url: "https://www.hindustantimes.com/feeds/rss/business/rssfeed.xml" },
+  { id: "news18-biz",   name: "News18",           url: "https://www.news18.com/rss/business.xml" },
+  { id: "fp-biz",       name: "Firstpost",        url: "https://www.firstpost.com/rss/business.xml" },
 ];
 
 const TOPIC_KEYWORDS: Record<string, string[]> = {

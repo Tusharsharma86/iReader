@@ -166,7 +166,7 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "aljazeera",    name: "Al Jazeera",             url: "https://www.aljazeera.com/xml/rss/all.xml" },
   { id: "nyt-world",    name: "NYT World",              url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
   { id: "npr-world",    name: "NPR World",              url: "https://feeds.npr.org/1004/rss.xml" },
-  { id: "indiatoday-w", name: "India Today",           url: "https://www.indiatoday.in/rss/home" },
+  { id: "theprint-wld", name: "The Print",             url: "https://theprint.in/category/world/feed/" },
   // IE / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 
@@ -227,14 +227,24 @@ function sourcesForTopic(topic: string): RssSource[] {
   }
 }
 
-// Cap articles per source after sorting by date so a single high-volume source
-// (e.g. TOI with 30+ items) doesn't crowd out all others.
+// Cap articles per source publication (by domain of the article link, not
+// source_id) so the same outlet fetched under multiple IDs (e.g. India Today
+// appearing in two source arrays) cannot double its slot allocation.
+// Also deduplicates by canonical URL before applying the cap.
 function capBySource(articles: NewsDataArticle[], max: number): NewsDataArticle[] {
+  const seenUrls = new Set<string>();
   const count: Record<string, number> = {};
   return articles.filter(a => {
-    const src = a.source_id ?? "unknown";
-    count[src] = (count[src] ?? 0) + 1;
-    return count[src] <= max;
+    // URL-level deduplicate — same story fetched under two source IDs
+    const url = a.link ? canonicalizeUrl(a.link) : null;
+    if (url) {
+      if (seenUrls.has(url)) return false;
+      seenUrls.add(url);
+    }
+    // Cap by article domain (publication), not source_id
+    const domain = a.link ? articleDomain(a.link) : (a.source_id ?? "unknown");
+    count[domain] = (count[domain] ?? 0) + 1;
+    return count[domain] <= max;
   });
 }
 

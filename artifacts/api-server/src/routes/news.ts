@@ -132,18 +132,14 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
   { id: "thequint-tech",name: "The Quint Tech",    url: "https://www.thequint.com/tech/feed" },
   { id: "ie-tech",      name: "Indian Express Tech",url: "https://indianexpress.com/section/technology/feed/" },
-  { id: "hindu-tech",   name: "The Hindu Tech",    url: "https://www.thehindu.com/sci-tech/technology/feeder/default.rss" },
 ];
 
 // Topic-specific Indian source lists
 const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
-  // Direct NDTV feed — Feedburner variant was retired
   { id: "ndtv-india",   name: "NDTV",             url: "https://ndtv.com/rss/latest" },
   { id: "toi-india",    name: "Times of India",   url: "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms" },
-  { id: "thehindu",     name: "The Hindu",        url: "https://www.thehindu.com/news/national/feeder/default.rss" },
   { id: "ie-india",     name: "Indian Express",   url: "https://indianexpress.com/section/india/feed/" },
   { id: "thequint-ind", name: "The Quint",        url: "https://www.thequint.com/india/feed" },
-  // ANI provides a WordPress JSON endpoint that is more reliable than the XML feed
   { id: "ani-nat",      name: "ANI News",         url: "https://www.aninews.in/rss/national.xml" },
   { id: "ht-india",     name: "Hindustan Times",  url: "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml" },
 ];
@@ -158,16 +154,15 @@ const MARKETS_RSS_SOURCES: RssSource[] = [
   { id: "cnbctv18",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
 ];
 
-// Reuters ended its public RSS in June 2020. Replaced with AP News (wire service
-// with equivalent authority) plus regional Indian English World coverage.
+// Reuters ended public RSS June 2020. AP News retired /rss/apf-* paths — use hub format.
+// The Guardian and NPR World are reliable open RSS alternatives.
 const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "bbc-world",    name: "BBC World",              url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
-  { id: "ap-world",     name: "AP News",                url: "https://apnews.com/rss/apf-topnews" },
-  { id: "ap-intl",      name: "AP International",       url: "https://apnews.com/rss/apf-intlnews" },
+  { id: "guardian-wld", name: "The Guardian",           url: "https://www.theguardian.com/world/rss" },
   { id: "aljazeera",    name: "Al Jazeera",             url: "https://www.aljazeera.com/xml/rss/all.xml" },
   { id: "nyt-world",    name: "NYT World",              url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
   { id: "ie-world",     name: "Indian Express World",   url: "https://indianexpress.com/section/world/feed/" },
-  { id: "hindu-intl",   name: "The Hindu International",url: "https://www.thehindu.com/news/international/feeder/default.rss" },
+  { id: "npr-world",    name: "NPR World",              url: "https://feeds.npr.org/1004/rss.xml" },
 ];
 
 const BUSINESS_RSS_SOURCES: RssSource[] = [
@@ -210,6 +205,17 @@ function sourcesForTopic(topic: string): RssSource[] {
   }
 }
 
+// Cap articles per source after sorting by date so a single high-volume source
+// (e.g. TOI with 30+ items) doesn't crowd out all others.
+function capBySource(articles: NewsDataArticle[], max: number): NewsDataArticle[] {
+  const count: Record<string, number> = {};
+  return articles.filter(a => {
+    const src = a.source_id ?? "unknown";
+    count[src] = (count[src] ?? 0) + 1;
+    return count[src] <= max;
+  });
+}
+
 async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
   const sources = sourcesForTopic(topic);
   const results = await Promise.allSettled(
@@ -221,13 +227,19 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
   }
   const filtered = articles
     .filter(a => !isSportsOrEntertainment(a))
-    .filter(a => matchesTopic(a, topic));
+    // For geopolitics the sources are already curated world-news feeds — skip
+    // keyword gating so articles about tariffs, elections, summits etc. aren't
+    // silently dropped just because they don't mention "war" or "military".
+    .filter(a => topic === "geopolitics" ? true : matchesTopic(a, topic));
+
   filtered.sort((a, b) => {
     const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
-  return filtered;
+  // Keep the N most recent articles per source — prevents TOI/NDTV from
+  // flooding the feed with 20+ items while smaller sources get zero slots.
+  return capBySource(filtered, 8);
 }
 
 

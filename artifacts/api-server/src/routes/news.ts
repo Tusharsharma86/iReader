@@ -197,10 +197,14 @@ const ALL_GENERAL_RSS_SOURCES: RssSource[] = (() => {
 })();
 
 const TOPIC_KEYWORDS: Record<string, string[]> = {
-  "india-politics": ["parliament", "modi", "bjp", "congress", "election", "minister", "india", "government", "pm", "lok sabha", "rajya sabha", "political", "opposition", "party", "vote", "policy", "cabinet", "chief minister", "mla", "mp", "governor", "supreme court", "delhi", "mumbai", "state"],
-  "geopolitics":    ["war", "conflict", "treaty", "nato", "sanction", "diplomacy", "foreign", "international", "global", "china", "russia", "pakistan", "ukraine", "israel", "gaza", "border", "military", "nuclear", "ceasefire", "united nations", "un security"],
-  "markets":        ["sensex", "nifty", "stock", "shares", "bse", "nse", "rupee", "rbi", "equity", "ipo", "mutual fund", "trading", "rate cut", "repo", "inflation", "sebi", "market cap", "rally", "selloff"],
-  "business":       ["company", "startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "industry", "crore", "billion", "corporate", "deal", "launch", "brand", "valuation", "unicorn", "quarter", "ipo", "shares", "investor", "venture", "series", "founder", "product", "business"],
+  // Specific political terms only — "india"/"government"/"state"/"party" are
+  // too broad and let market/world articles bleed into this tab.
+  "india-politics": ["parliament", "modi", "bjp", "congress", "election", "minister", "lok sabha", "rajya sabha", "political", "opposition", "cabinet", "chief minister", "mla", "governor", "supreme court", "delhi", "kejriwal", "rahul", "amit shah", "yogi", "mamata", "coalition", "bypolls", "constituency", "legislative", "rajnath", "cm ", "mps ", "mlc"],
+  // World-news sources (BBC/Guardian/NYT/AJ/NPR/ThePrint) are already curated;
+  // add enough terms to catch diplomacy, security and trade stories.
+  "geopolitics":    ["war", "conflict", "treaty", "nato", "sanction", "diplomacy", "foreign", "international", "global", "china", "russia", "pakistan", "ukraine", "israel", "gaza", "border", "military", "nuclear", "ceasefire", "united nations", "taiwan", "iran", "pentagon", "kremlin", "white house", "g7", "g20", "imf", "world bank", "trade deal", "tariff"],
+  "markets":        ["sensex", "nifty", "stock", "shares", "bse", "nse", "rupee", "rbi", "equity", "ipo", "mutual fund", "trading", "rate cut", "repo", "inflation", "sebi", "market cap", "rally", "selloff", "futures", "bonds", "yield", "fed ", "interest rate"],
+  "business":       ["startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "crore", "billion", "corporate", "deal", "valuation", "unicorn", "quarter", "investor", "venture", "series", "founder", "layoff", "earnings", "quarterly"],
 };
 
 const SPORTS_ENTERTAINMENT_RE = /\b(cricket|ipl|bcci|test match|odi|t20i?|football|fifa|tennis|wimbledon|formula[- ]1|f1 race|chess|olympics|hockey|badminton|icc|world cup final|bollywood|movie release|film|actor|actress|celebrity|box office|trailer launch|oscar|grammy|award show|web series|ott)\b/i;
@@ -249,10 +253,12 @@ function capBySource(articles: NewsDataArticle[], max: number): NewsDataArticle[
 }
 
 async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
-  // Use ALL general sources so cross-beat publishers (ET for politics, IE for
-  // markets, etc.) contribute articles to every category — filtered below.
+  // Use per-category source lists so each tab only pulls from relevant outlets.
+  // Cross-category pooling caused market/world articles to bleed into India tab
+  // via broad keywords like "india" or "government".
+  const sources = sourcesForTopic(topic);
   const results = await Promise.allSettled(
-    ALL_GENERAL_RSS_SOURCES.map(s => fetchOneRssFeed(s, topic)),
+    sources.map(s => fetchOneRssFeed(s, topic)),
   );
   const articles: NewsDataArticle[] = [];
   for (const r of results) {
@@ -260,17 +266,13 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
   }
   const filtered = articles
     .filter(a => !isSportsOrEntertainment(a))
-    // For geopolitics skip keyword gating — the world-news sources are already
-    // curated and articles about tariffs, summits, etc. may not mention "war".
-    .filter(a => topic === "geopolitics" ? true : matchesTopic(a, topic));
+    .filter(a => matchesTopic(a, topic));
 
   filtered.sort((a, b) => {
     const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
-  // 12 articles per source (up from 8) — more content per category now that
-  // the full cross-category source pool is used.
   return capBySource(filtered, 12);
 }
 

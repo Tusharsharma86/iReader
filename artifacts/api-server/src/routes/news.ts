@@ -133,34 +133,29 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "thenextweb",   name: "The Next Web",      url: "https://thenextweb.com/feed/" },
   { id: "hackernews",   name: "Hacker News",       url: "https://hnrss.org/frontpage" },
   { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
-  { id: "thequint-tech",name: "The Quint Tech",    url: "https://www.thequint.com/tech/feed" },
   { id: "ie-tech",      name: "Indian Express Tech",url: "https://indianexpress.com/section/technology/feed/" },
   { id: "news18-tech",  name: "News18",            url: "https://www.news18.com/rss/tech.xml" },
-  { id: "fp-tech",      name: "Firstpost",         url: "https://www.firstpost.com/rss/tech.xml" },
+  { id: "fp-tech",      name: "Firstpost",         url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/tech.xml" },
+  { id: "scrollin",     name: "Scroll.in",         url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
 ];
 
 // Topic-specific Indian source lists
 const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "ndtv-india",   name: "NDTV",             url: "https://ndtv.com/rss/latest" },
-  { id: "toi-india",    name: "Times of India",   url: "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms" },
   { id: "ie-india",     name: "Indian Express",   url: "https://indianexpress.com/section/india/feed/" },
-  { id: "thequint-ind", name: "The Quint",        url: "https://www.thequint.com/india/feed" },
-  { id: "ani-nat",      name: "ANI News",         url: "https://www.aninews.in/rss/national.xml" },
-  { id: "ht-india",     name: "Hindustan Times",  url: "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml" },
+  { id: "thequint-ind", name: "The Quint",        url: "https://feeds.feedburner.com/thequint" },
   { id: "news18-india", name: "News18",           url: "https://www.news18.com/rss/india.xml" },
-  { id: "fp-india",     name: "Firstpost",        url: "https://www.firstpost.com/rss/india.xml" },
+  { id: "fp-india",     name: "Firstpost",        url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/india.xml" },
+  { id: "cnbctv18-ind", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/india.xml" },
+  { id: "scrollin",     name: "Scroll.in",        url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
 ];
 
 const MARKETS_RSS_SOURCES: RssSource[] = [
-  { id: "et-markets",   name: "Economic Times",   url: "https://economictimes.indiatimes.com/markets/rss.cms" },
+  { id: "et-markets",   name: "Economic Times",   url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
   { id: "mc-markets",   name: "MoneyControl",     url: "https://www.moneycontrol.com/rss/marketreports.xml" },
-  // NDTV Profit — direct RSS (Feedburner variant was retired)
-  { id: "ndtv-profit",  name: "NDTV Profit",      url: "https://www.ndtvprofit.com/rss" },
   { id: "livemint",     name: "Livemint",         url: "https://www.livemint.com/rss/markets" },
-  { id: "bs-markets",   name: "Business Standard",url: "https://www.business-standard.com/rss/markets-106.rss" },
   { id: "cnbctv18",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
   { id: "news18-biz",   name: "News18",           url: "https://www.news18.com/rss/business.xml" },
-  { id: "fp-biz",       name: "Firstpost",        url: "https://www.firstpost.com/rss/business.xml" },
+  { id: "fp-biz",       name: "Firstpost",        url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/business.xml" },
 ];
 
 // Reuters ended public RSS June 2020. AP News retired /rss/apf-* paths — use hub format.
@@ -173,18 +168,17 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "ie-world",     name: "Indian Express World",   url: "https://indianexpress.com/section/world/feed/" },
   { id: "npr-world",    name: "NPR World",              url: "https://feeds.npr.org/1004/rss.xml" },
   { id: "news18-world", name: "News18",                 url: "https://www.news18.com/rss/world.xml" },
-  { id: "fp-world",     name: "Firstpost",              url: "https://www.firstpost.com/rss/world.xml" },
+  { id: "fp-world",     name: "Firstpost",              url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/world.xml" },
 ];
 
 const BUSINESS_RSS_SOURCES: RssSource[] = [
   { id: "livemint-co",  name: "Mint",             url: "https://www.livemint.com/rss/companies" },
-  { id: "bs-biz",       name: "Business Standard",url: "https://www.business-standard.com/rss/home_page_top_stories.rss" },
-  { id: "et-co",        name: "Economic Times",   url: "https://economictimes.indiatimes.com/news/company/rss.cms" },
+  { id: "et-co",        name: "Economic Times",   url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
   { id: "mc-biz",       name: "MoneyControl",     url: "https://www.moneycontrol.com/rss/economy.xml" },
   { id: "inc42",        name: "Inc42",            url: "https://inc42.com/feed/" },
-  { id: "ht-biz",       name: "Hindustan Times",  url: "https://www.hindustantimes.com/feeds/rss/business/rssfeed.xml" },
   { id: "news18-biz",   name: "News18",           url: "https://www.news18.com/rss/business.xml" },
-  { id: "fp-biz",       name: "Firstpost",        url: "https://www.firstpost.com/rss/business.xml" },
+  { id: "fp-biz",       name: "Firstpost",        url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/business.xml" },
+  { id: "cnbctv18-biz", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/business.xml" },
 ];
 
 const TOPIC_KEYWORDS: Record<string, string[]> = {

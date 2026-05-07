@@ -137,11 +137,13 @@ const TECH_RSS_SOURCES: RssSource[] = [
 
 // Topic-specific Indian source lists
 const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "ndtv-india",   name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-india-news" },
+  // Direct NDTV feed — Feedburner variant was retired
+  { id: "ndtv-india",   name: "NDTV",             url: "https://ndtv.com/rss/latest" },
   { id: "toi-india",    name: "Times of India",   url: "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms" },
   { id: "thehindu",     name: "The Hindu",        url: "https://www.thehindu.com/news/national/feeder/default.rss" },
   { id: "ie-india",     name: "Indian Express",   url: "https://indianexpress.com/section/india/feed/" },
   { id: "thequint-ind", name: "The Quint",        url: "https://www.thequint.com/india/feed" },
+  // ANI provides a WordPress JSON endpoint that is more reliable than the XML feed
   { id: "ani-nat",      name: "ANI News",         url: "https://www.aninews.in/rss/national.xml" },
   { id: "ht-india",     name: "Hindustan Times",  url: "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml" },
 ];
@@ -149,22 +151,39 @@ const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
 const MARKETS_RSS_SOURCES: RssSource[] = [
   { id: "et-markets",   name: "Economic Times",   url: "https://economictimes.indiatimes.com/markets/rss.cms" },
   { id: "mc-markets",   name: "MoneyControl",     url: "https://www.moneycontrol.com/rss/marketreports.xml" },
-  { id: "ndtv-profit",  name: "NDTV Profit",      url: "https://feeds.feedburner.com/ndtvprofit-latest" },
+  // NDTV Profit — direct RSS (Feedburner variant was retired)
+  { id: "ndtv-profit",  name: "NDTV Profit",      url: "https://www.ndtvprofit.com/rss" },
   { id: "livemint",     name: "Livemint",         url: "https://www.livemint.com/rss/markets" },
+  { id: "bs-markets",   name: "Business Standard",url: "https://www.business-standard.com/rss/markets-106.rss" },
+  { id: "cnbctv18",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
 ];
 
+// Reuters ended its public RSS in June 2020. Replaced with AP News (wire service
+// with equivalent authority) plus regional Indian English World coverage.
 const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "bbc-world",    name: "BBC World",        url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
-  { id: "nyt-world",    name: "NYT World",        url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
-  { id: "aljazeera",    name: "Al Jazeera",       url: "https://www.aljazeera.com/xml/rss/all.xml" },
-  { id: "reuters-world",name: "Reuters",          url: "https://feeds.reuters.com/reuters/worldNews" },
+  { id: "bbc-world",    name: "BBC World",              url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
+  { id: "ap-world",     name: "AP News",                url: "https://apnews.com/rss/apf-topnews" },
+  { id: "ap-intl",      name: "AP International",       url: "https://apnews.com/rss/apf-intlnews" },
+  { id: "aljazeera",    name: "Al Jazeera",             url: "https://www.aljazeera.com/xml/rss/all.xml" },
+  { id: "nyt-world",    name: "NYT World",              url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
+  { id: "ie-world",     name: "Indian Express World",   url: "https://indianexpress.com/section/world/feed/" },
+  { id: "hindu-intl",   name: "The Hindu International",url: "https://www.thehindu.com/news/international/feeder/default.rss" },
+];
+
+const BUSINESS_RSS_SOURCES: RssSource[] = [
+  { id: "livemint-co",  name: "Mint",             url: "https://www.livemint.com/rss/companies" },
+  { id: "bs-biz",       name: "Business Standard",url: "https://www.business-standard.com/rss/home_page_top_stories.rss" },
+  { id: "et-co",        name: "Economic Times",   url: "https://economictimes.indiatimes.com/news/company/rss.cms" },
+  { id: "mc-biz",       name: "MoneyControl",     url: "https://www.moneycontrol.com/rss/economy.xml" },
+  { id: "inc42",        name: "Inc42",            url: "https://inc42.com/feed/" },
+  { id: "ht-biz",       name: "Hindustan Times",  url: "https://www.hindustantimes.com/feeds/rss/business/rssfeed.xml" },
 ];
 
 const TOPIC_KEYWORDS: Record<string, string[]> = {
   "india-politics": ["parliament", "modi", "bjp", "congress", "election", "minister", "india", "government", "pm", "lok sabha", "rajya sabha", "political", "opposition", "party", "vote", "policy", "cabinet", "chief minister", "mla", "mp", "governor", "supreme court", "delhi", "mumbai", "state"],
   "geopolitics":    ["war", "conflict", "treaty", "nato", "sanction", "diplomacy", "foreign", "international", "global", "china", "russia", "pakistan", "ukraine", "israel", "gaza", "border", "military", "nuclear", "ceasefire", "united nations", "un security"],
   "markets":        ["sensex", "nifty", "stock", "shares", "bse", "nse", "rupee", "rbi", "equity", "ipo", "mutual fund", "trading", "rate cut", "repo", "inflation", "sebi", "market cap", "rally", "selloff"],
-  "business":       ["company", "startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "industry", "crore", "billion", "corporate", "deal", "launch", "brand", "valuation", "unicorn", "quarter"],
+  "business":       ["company", "startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "industry", "crore", "billion", "corporate", "deal", "launch", "brand", "valuation", "unicorn", "quarter", "ipo", "shares", "investor", "venture", "series", "founder", "product", "business"],
 };
 
 const SPORTS_ENTERTAINMENT_RE = /\b(cricket|ipl|bcci|test match|odi|t20i?|football|fifa|tennis|wimbledon|formula[- ]1|f1 race|chess|olympics|hockey|badminton|icc|world cup final|bollywood|movie release|film|actor|actress|celebrity|box office|trailer launch|oscar|grammy|award show|web series|ott)\b/i;
@@ -186,7 +205,8 @@ function sourcesForTopic(topic: string): RssSource[] {
     case "india-politics": return INDIA_POLITICS_RSS_SOURCES;
     case "markets":        return MARKETS_RSS_SOURCES;
     case "geopolitics":    return GEOPOLITICS_RSS_SOURCES;
-    default:               return INDIA_POLITICS_RSS_SOURCES; // business falls back to india news
+    case "business":       return BUSINESS_RSS_SOURCES;
+    default:               return INDIA_POLITICS_RSS_SOURCES;
   }
 }
 
@@ -339,8 +359,10 @@ function parseRssFeed(
     return items.map((raw) => {
       const item = raw as Record<string, unknown>;
       const title = decodeEntities(pickText(item["title"]));
-      const link = pickText(item["link"]);
+      const rawLink = pickText(item["link"]);
+      const link = canonicalizeUrl(rawLink);
       const pubDate = pickText(item["pubDate"]);
+      const guid = pickText(item["guid"]);
       const descRaw = pickText(item["description"]);
       const contentRaw = pickText(item["content:encoded"]) || descRaw;
 
@@ -352,12 +374,23 @@ function parseRssFeed(
         imageUrl = enclosure["@_url"];
       }
       const mediaContent = item["media:content"] as
-        | { "@_url"?: string }
-        | { "@_url"?: string }[]
+        | { "@_url"?: string; "@_medium"?: string }
+        | { "@_url"?: string; "@_medium"?: string }[]
         | undefined;
       if (!imageUrl) {
-        const m = Array.isArray(mediaContent) ? mediaContent[0] : mediaContent;
-        if (m?.["@_url"]) imageUrl = m["@_url"];
+        const mc = Array.isArray(mediaContent) ? mediaContent[0] : mediaContent;
+        if (mc?.["@_url"]) imageUrl = mc["@_url"];
+      }
+      // media:group → media:content (used by YouTube, NDTV, others)
+      const mediaGroup = item["media:group"] as Record<string, unknown> | undefined;
+      if (!imageUrl && mediaGroup) {
+        const gc = mediaGroup["media:content"] as { "@_url"?: string } | { "@_url"?: string }[] | undefined;
+        const gItem = Array.isArray(gc) ? gc[0] : gc;
+        if (gItem?.["@_url"]) imageUrl = gItem["@_url"];
+        if (!imageUrl) {
+          const gt = mediaGroup["media:thumbnail"] as { "@_url"?: string } | undefined;
+          if (gt?.["@_url"]) imageUrl = gt["@_url"];
+        }
       }
       const mediaThumbnail = item["media:thumbnail"] as
         | { "@_url"?: string }
@@ -372,8 +405,21 @@ function parseRssFeed(
       const description = stripHtml(descRaw).slice(0, 600);
       const content = stripHtml(contentRaw).slice(0, 2000);
 
+      // Use GUID as stable article ID when it looks like a real identifier.
+      // Many publishers (TOI, The Hindu) use numeric or URL GUIDs that are
+      // more stable than the link, which can carry tracking params.
+      const stableId = (guid && guid.length > 0 && guid !== rawLink)
+        ? guid
+        : (link || title);
+
+      // Normalise date — some Indian sources emit IST without offset; treat as-is
+      let pubDateIso: string | undefined;
+      if (pubDate) {
+        try { pubDateIso = new Date(pubDate).toISOString(); } catch { /* skip */ }
+      }
+
       return {
-        article_id: `${source.id}-${link || title}`,
+        article_id: `${source.id}-${stableId}`,
         title,
         description,
         content,
@@ -381,7 +427,7 @@ function parseRssFeed(
         source_id: source.id,
         source_name: source.name,
         source_url: source.url,
-        pubDate: pubDate ? new Date(pubDate).toISOString() : undefined,
+        pubDate: pubDateIso,
         image_url: imageUrl,
         category: [category],
       };
@@ -401,9 +447,9 @@ function parseRssFeed(
         | undefined;
       let link = "";
       if (Array.isArray(linkAttr)) {
-        link = linkAttr.find((l) => l["@_href"])?.["@_href"] ?? "";
+        link = canonicalizeUrl(linkAttr.find((l) => l["@_href"])?.["@_href"] ?? "");
       } else if (linkAttr?.["@_href"]) {
-        link = linkAttr["@_href"];
+        link = canonicalizeUrl(linkAttr["@_href"]);
       }
       const published =
         pickText(entry["published"]) || pickText(entry["updated"]);
@@ -621,6 +667,24 @@ function articleDomain(url: string): string {
     return new URL(url).hostname.replace(/^www\./, "");
   } catch {
     return "";
+  }
+}
+
+const TRACKING_PARAMS = new Set([
+  "utm_source","utm_medium","utm_campaign","utm_term","utm_content","utm_id",
+  "fbclid","gclid","gbraid","wbraid","ref","source","_r","cid",
+  "mc_cid","mc_eid","ncid","s","sr","via","icid","cms","outputType",
+]);
+
+function canonicalizeUrl(url: string): string {
+  if (!url) return url;
+  try {
+    const u = new URL(url);
+    for (const p of TRACKING_PARAMS) u.searchParams.delete(p);
+    u.hash = "";
+    return u.href;
+  } catch {
+    return url;
   }
 }
 
@@ -862,6 +926,7 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
     ...INDIA_POLITICS_RSS_SOURCES,
     ...MARKETS_RSS_SOURCES,
     ...GEOPOLITICS_RSS_SOURCES,
+    ...BUSINESS_RSS_SOURCES,
   ]) {
     if (!seen.has(s.id)) { seen.add(s.id); uniqueSources.push(s); }
   }

@@ -35,6 +35,9 @@ type StoryCard = {
   };
   sources: Source[];
   sourceCount: number;
+  isTrending?: boolean;
+  isBreaking?: boolean;
+  isDeveloping?: boolean;
 };
 
 type CacheEntry = { at: number; data: StoryCard[] };
@@ -935,6 +938,19 @@ function buildStoryCards(
   });
 }
 
+function detectTrending(stories: StoryCard[]): StoryCard[] {
+  const now = Date.now();
+  return stories.map(s => {
+    const age = now - new Date(s.publishedAt).getTime();
+    return {
+      ...s,
+      isTrending: s.sourceCount >= 3,
+      isBreaking: s.sourceCount >= 2 && age < 2 * 60 * 60 * 1000,
+      isDeveloping: s.sourceCount >= 4 && age < 6 * 60 * 60 * 1000,
+    };
+  });
+}
+
 const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 
 async function buildBreakingFeed(): Promise<StoryCard[]> {
@@ -974,7 +990,7 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
     return tb - ta;
   });
 
-  return buildFallbackStories(recent.slice(0, 30));
+  return detectTrending(buildFallbackStories(recent.slice(0, 30)));
 }
 
 async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
@@ -996,7 +1012,7 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
   }
   if (articles.length === 0) return [];
   const clusters = deterministicCluster(articles);
-  return buildStoryCards(articles, clusters);
+  return detectTrending(buildStoryCards(articles, clusters));
 }
 
 const inflightFeed = new Map<string, Promise<StoryCard[]>>();

@@ -181,6 +181,23 @@ const BUSINESS_RSS_SOURCES: RssSource[] = [
   { id: "cnbctv18-biz", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/business.xml" },
 ];
 
+// Unified pool of all non-tech RSS sources (deduplicated by id).
+// Fetched together in fetchIndianFeeds, then narrowed by TOPIC_KEYWORDS per topic.
+// This lets Economic Times appear in india-politics, News18 in markets, etc.
+const ALL_GENERAL_RSS_SOURCES: RssSource[] = (() => {
+  const seen = new Set<string>();
+  const out: RssSource[] = [];
+  for (const s of [
+    ...INDIA_POLITICS_RSS_SOURCES,
+    ...MARKETS_RSS_SOURCES,
+    ...GEOPOLITICS_RSS_SOURCES,
+    ...BUSINESS_RSS_SOURCES,
+  ]) {
+    if (!seen.has(s.id)) { seen.add(s.id); out.push(s); }
+  }
+  return out;
+})();
+
 const TOPIC_KEYWORDS: Record<string, string[]> = {
   "india-politics": ["parliament", "modi", "bjp", "congress", "election", "minister", "india", "government", "pm", "lok sabha", "rajya sabha", "political", "opposition", "party", "vote", "policy", "cabinet", "chief minister", "mla", "mp", "governor", "supreme court", "delhi", "mumbai", "state"],
   "geopolitics":    ["war", "conflict", "treaty", "nato", "sanction", "diplomacy", "foreign", "international", "global", "china", "russia", "pakistan", "ukraine", "israel", "gaza", "border", "military", "nuclear", "ceasefire", "united nations", "un security"],
@@ -224,9 +241,10 @@ function capBySource(articles: NewsDataArticle[], max: number): NewsDataArticle[
 }
 
 async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
-  const sources = sourcesForTopic(topic);
+  // Use ALL general sources so cross-beat publishers (ET for politics, IE for
+  // markets, etc.) contribute articles to every category — filtered below.
   const results = await Promise.allSettled(
-    sources.map(s => fetchOneRssFeed(s, topic)),
+    ALL_GENERAL_RSS_SOURCES.map(s => fetchOneRssFeed(s, topic)),
   );
   const articles: NewsDataArticle[] = [];
   for (const r of results) {
@@ -234,9 +252,8 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
   }
   const filtered = articles
     .filter(a => !isSportsOrEntertainment(a))
-    // For geopolitics the sources are already curated world-news feeds — skip
-    // keyword gating so articles about tariffs, elections, summits etc. aren't
-    // silently dropped just because they don't mention "war" or "military".
+    // For geopolitics skip keyword gating — the world-news sources are already
+    // curated and articles about tariffs, summits, etc. may not mention "war".
     .filter(a => topic === "geopolitics" ? true : matchesTopic(a, topic));
 
   filtered.sort((a, b) => {
@@ -244,9 +261,9 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
-  // Keep the N most recent articles per source — prevents TOI/NDTV from
-  // flooding the feed with 20+ items while smaller sources get zero slots.
-  return capBySource(filtered, 8);
+  // 12 articles per source (up from 8) — more content per category now that
+  // the full cross-category source pool is used.
+  return capBySource(filtered, 12);
 }
 
 
@@ -1252,6 +1269,36 @@ router.get("/sources", (_req, res) => {
   res.json({
     sources: TECH_RSS_SOURCES.map((s) => ({ id: s.id, name: s.name })),
   });
+});
+
+// Live per-source article count diagnostic — fetches all feeds and returns
+// item counts, latency, and status per source. Used for debugging feed health.
+router.get("/debug/sources", async (_req, res) => {
+  const allSources: RssSource[] = (() => {
+    const seen = new Set<string>();
+    const out: RssSource[] = [];
+    for (const s of [...TECH_RSS_SOURCES, ...ALL_GENERAL_RSS_SOURCES]) {
+      if (!seen.has(s.id)) { seen.add(s.id); out.push(s); }
+    }
+    return out;
+  })();
+
+  const started = Date.now();
+  const results = await Promise.allSettled(
+    allSources.map(async (s) => {
+      const t0 = Date.now();
+      try {
+        const articles = await fetchOneRssFeed(s, "debug");
+        return { id: s.id, name: s.name, url: s.url, items: articles.length, latencyMs: Date.now() - t0, status: "ok" };
+      } catch (err) {
+        return { id: s.id, name: s.name, url: s.url, items: 0, latencyMs: Date.now() - t0, status: err instanceof Error ? err.message : "error" };
+      }
+    }),
+  );
+
+  const rows = results.map(r => r.status === "fulfilled" ? r.value : { items: 0, status: "promise-rejected" });
+  rows.sort((a, b) => (b as { items: number }).items - (a as { items: number }).items);
+  res.json({ fetchedIn: Date.now() - started, sources: rows });
 });
 
 router.get("/feed", async (req, res) => {

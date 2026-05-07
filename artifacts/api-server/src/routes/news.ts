@@ -133,29 +133,29 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "thenextweb",   name: "The Next Web",      url: "https://thenextweb.com/feed/" },
   { id: "hackernews",   name: "Hacker News",       url: "https://hnrss.org/frontpage" },
   { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
-  { id: "ie-tech",      name: "Indian Express Tech",url: "https://indianexpress.com/section/technology/feed/" },
-  { id: "news18-tech",  name: "News18",            url: "https://www.news18.com/rss/tech.xml" },
-  { id: "fp-tech",      name: "Firstpost",         url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/tech.xml" },
   { id: "scrollin",     name: "Scroll.in",         url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
+  // IE/News18/Firstpost block Render's IP range (403) — removed
 ];
 
 // Topic-specific Indian source lists
+// IE / News18 / Firstpost / MoneyControl all return HTTP 403 from Render's
+// datacenter IP range. Use feedburner-hosted or CDN-backed alternatives.
 const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "ie-india",     name: "Indian Express",   url: "https://indianexpress.com/section/india/feed/" },
+  { id: "ndtv-india",   name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-india-news" },
+  { id: "ndtv-latest",  name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-latest" },
+  { id: "indiatoday",   name: "India Today",      url: "https://www.indiatoday.in/rss/home" },
+  { id: "theprint-ind", name: "The Print",        url: "https://theprint.in/category/india/feed/" },
+  { id: "theprint-pol", name: "The Print",        url: "https://theprint.in/category/politics/feed/" },
   { id: "thequint-ind", name: "The Quint",        url: "https://feeds.feedburner.com/thequint" },
-  { id: "news18-india", name: "News18",           url: "https://www.news18.com/rss/india.xml" },
-  { id: "fp-india",     name: "Firstpost",        url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/india.xml" },
   { id: "cnbctv18-ind", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/india.xml" },
   { id: "scrollin",     name: "Scroll.in",        url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
 ];
 
 const MARKETS_RSS_SOURCES: RssSource[] = [
   { id: "et-markets",   name: "Economic Times",   url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
-  { id: "mc-markets",   name: "MoneyControl",     url: "https://www.moneycontrol.com/rss/marketreports.xml" },
   { id: "livemint",     name: "Livemint",         url: "https://www.livemint.com/rss/markets" },
   { id: "cnbctv18",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
-  { id: "news18-biz",   name: "News18",           url: "https://www.news18.com/rss/business.xml" },
-  { id: "fp-biz",       name: "Firstpost",        url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/business.xml" },
+  // MoneyControl / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 
 // Reuters ended public RSS June 2020. AP News retired /rss/apf-* paths — use hub format.
@@ -165,20 +165,18 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "guardian-wld", name: "The Guardian",           url: "https://www.theguardian.com/world/rss" },
   { id: "aljazeera",    name: "Al Jazeera",             url: "https://www.aljazeera.com/xml/rss/all.xml" },
   { id: "nyt-world",    name: "NYT World",              url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
-  { id: "ie-world",     name: "Indian Express World",   url: "https://indianexpress.com/section/world/feed/" },
   { id: "npr-world",    name: "NPR World",              url: "https://feeds.npr.org/1004/rss.xml" },
-  { id: "news18-world", name: "News18",                 url: "https://www.news18.com/rss/world.xml" },
-  { id: "fp-world",     name: "Firstpost",              url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/world.xml" },
+  { id: "indiatoday-w", name: "India Today",           url: "https://www.indiatoday.in/rss/home" },
+  // IE / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 
 const BUSINESS_RSS_SOURCES: RssSource[] = [
   { id: "livemint-co",  name: "Mint",             url: "https://www.livemint.com/rss/companies" },
   { id: "et-co",        name: "Economic Times",   url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
-  { id: "mc-biz",       name: "MoneyControl",     url: "https://www.moneycontrol.com/rss/economy.xml" },
   { id: "inc42",        name: "Inc42",            url: "https://inc42.com/feed/" },
-  { id: "news18-biz",   name: "News18",           url: "https://www.news18.com/rss/business.xml" },
-  { id: "fp-biz",       name: "Firstpost",        url: "https://www.firstpost.com/commonfeeds/v1/mfp/rss/business.xml" },
   { id: "cnbctv18-biz", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/business.xml" },
+  { id: "theprint-biz", name: "The Print",        url: "https://theprint.in/category/economy/feed/" },
+  // MoneyControl / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 
 // Unified pool of all non-tech RSS sources (deduplicated by id).

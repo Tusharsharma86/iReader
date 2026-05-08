@@ -340,8 +340,14 @@ function stripHtml(html: string): string {
 }
 
 function extractFirstImage(html: string): string | null {
-  const m = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
-  return m?.[1] ?? null;
+  // Try src first, then data-src (lazy-loaded), then first srcset URL
+  const srcMatch = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
+  if (srcMatch?.[1] && !srcMatch[1].startsWith('data:')) return srcMatch[1];
+  const dataSrcMatch = /<img[^>]+data-src=["']([^"']+)["']/i.exec(html);
+  if (dataSrcMatch?.[1]) return dataSrcMatch[1];
+  const srcsetMatch = /<img[^>]+srcset=["']([^\s,"']+)/i.exec(html);
+  if (srcsetMatch?.[1]) return srcsetMatch[1];
+  return null;
 }
 
 function extractOgImage(html: string): string | null {
@@ -361,14 +367,16 @@ function extractOgImage(html: string): string | null {
 async function fetchOgImage(url: string): Promise<string | null> {
   if (!url) return null;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 3500);
+  const timer = setTimeout(() => ctrl.abort(), 5000);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
       headers: {
         "User-Agent":
-          "Mozilla/5.0 (compatible; ParticleNews/1.0; +https://example.com)",
-        Accept: "text/html",
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
       },
     });
     if (!res.ok) return null;

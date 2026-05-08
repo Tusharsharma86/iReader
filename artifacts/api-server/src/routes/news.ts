@@ -134,6 +134,7 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "hackernews",   name: "Hacker News",       url: "https://hnrss.org/frontpage" },
   { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
   { id: "scrollin",     name: "Scroll.in",         url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
+  { id: "ft-tech",      name: "Financial Times",   url: "https://www.ft.com/companies/technology?format=rss" },
   // IE/News18/Firstpost block Render's IP range (403) — removed
 ];
 
@@ -155,6 +156,7 @@ const MARKETS_RSS_SOURCES: RssSource[] = [
   { id: "et-markets",   name: "Economic Times",   url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
   { id: "livemint",     name: "Livemint",         url: "https://www.livemint.com/rss/markets" },
   { id: "cnbctv18",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
+  { id: "ft-markets",   name: "Financial Times",  url: "https://www.ft.com/markets?format=rss" },
   // MoneyControl / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 
@@ -167,6 +169,7 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "nyt-world",    name: "NYT World",              url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
   { id: "npr-world",    name: "NPR World",              url: "https://feeds.npr.org/1004/rss.xml" },
   { id: "theprint-wld", name: "The Print",             url: "https://theprint.in/category/world/feed/" },
+  { id: "ft-world",     name: "Financial Times",        url: "https://www.ft.com/world?format=rss" },
   // IE / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 
@@ -176,6 +179,7 @@ const BUSINESS_RSS_SOURCES: RssSource[] = [
   { id: "inc42",        name: "Inc42",            url: "https://inc42.com/feed/" },
   { id: "cnbctv18-biz", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/business.xml" },
   { id: "theprint-biz", name: "The Print",        url: "https://theprint.in/category/economy/feed/" },
+  { id: "ft-companies", name: "Financial Times",  url: "https://www.ft.com/companies?format=rss" },
   // MoneyControl / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 

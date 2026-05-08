@@ -734,10 +734,34 @@ function canonicalizeUrl(url: string): string {
   }
 }
 
+function titleNamedEntities(title: string): Set<string> {
+  const entities = new Set<string>();
+  const words = title.split(/\s+/);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!.replace(/[^a-zA-Z]/g, "");
+    // ALL-CAPS acronym (e.g. BJP, NASA, IPL)
+    if (/^[A-Z]{2,}$/.test(w) && w.length > 2) {
+      entities.add(w.toLowerCase());
+    }
+    // Two consecutive Title-Case words = named entity
+    if (i < words.length - 1) {
+      const w2 = words[i + 1]!.replace(/[^a-zA-Z]/g, "");
+      if (
+        w.length > 1 && w2.length > 1 &&
+        /^[A-Z]/.test(w) && /^[A-Z]/.test(w2)
+      ) {
+        entities.add((w + " " + w2).toLowerCase());
+      }
+    }
+  }
+  return entities;
+}
+
 // Cluster articles by title similarity and same-domain proximity.
 // Returns a ClusterResult matching the same shape buildStoryCards expects.
 function deterministicCluster(articles: NewsDataArticle[]): ClusterResult {
   const tokenSets = articles.map((a) => titleTokens(a.title ?? ""));
+  const entitySets = articles.map((a) => titleNamedEntities(a.title ?? ""));
   const assigned = new Array<number>(articles.length).fill(-1);
   const clusters: ClusterResult["clusters"] = [];
 
@@ -750,13 +774,17 @@ function deterministicCluster(articles: NewsDataArticle[]): ClusterResult {
     for (let j = i + 1; j < articles.length; j++) {
       if (assigned[j] !== -1) continue;
       if (members.length >= 8) break;
-      // Only cluster if different sources cover the same story (70%+ token overlap).
-      // Never cluster just because same domain/publisher.
+      // Never cluster same domain/publisher.
       const domA = articleDomain(articles[i]!.link ?? "");
       const domB = articleDomain(articles[j]!.link ?? "");
       if (domA && domA === domB) continue;
       const overlap = overlapCoefficient(tokenSets[i]!, tokenSets[j]!);
-      if (overlap >= 0.7) {
+      // Force-cluster if 2+ shared named entities (e.g. "Narendra Modi", "Supreme Court")
+      let sharedEntities = 0;
+      for (const e of entitySets[i]!) {
+        if (entitySets[j]!.has(e)) sharedEntities++;
+      }
+      if (overlap >= 0.35 || sharedEntities >= 2) {
         assigned[j] = clusterIdx;
         members.push(j);
       }

@@ -277,7 +277,7 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
-  return capBySource(filtered, 12);
+  return filtered;
 }
 
 
@@ -561,17 +561,12 @@ async function fetchCategoryRss(
   for (const r of results) {
     if (r.status === "fulfilled") articles.push(...r.value);
   }
-  const cutoff = Date.now() - FORTY_HOURS_MS;
-  const recent = articles.filter((a) => {
-    const t = a.pubDate ? Date.parse(a.pubDate) : 0;
-    return t > cutoff;
-  });
-  recent.sort((a, b) => {
+  articles.sort((a, b) => {
     const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
-  return recent;
+  return articles;
 }
 
 const ogImageCache = new Map<string, { url: string | null; ts: number }>();
@@ -1031,10 +1026,6 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
   }
 
   const recent = raw
-    .filter(a => {
-      const t = a.pubDate ? Date.parse(a.pubDate) : 0;
-      return t > cutoff;
-    })
     .filter(a => !isSportsOrEntertainment(a));
 
   recent.sort((a, b) => {
@@ -1043,7 +1034,7 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
     return tb - ta;
   });
 
-  return detectTrending(buildFallbackStories(recent.slice(0, 30)));
+  return detectTrending(buildFallbackStories(recent));
 }
 
 async function buildFreshFeed(topic: string): Promise<StoryCard[]> {

@@ -134,7 +134,7 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "hackernews",   name: "Hacker News",       url: "https://hnrss.org/frontpage" },
   { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
   { id: "scrollin",     name: "Scroll.in",         url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
-  { id: "ft-tech",      name: "Financial Times",   url: "https://www.ft.com/companies/technology?format=rss" },
+  { id: "fe-tech",      name: "Financial Express",  url: "https://www.financialexpress.com/business/technology/feed/" },
   // IE/News18/Firstpost block Render's IP range (403) — removed
 ];
 
@@ -156,7 +156,7 @@ const MARKETS_RSS_SOURCES: RssSource[] = [
   { id: "et-markets",   name: "Economic Times",   url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
   { id: "livemint",     name: "Livemint",         url: "https://www.livemint.com/rss/markets" },
   { id: "cnbctv18",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
-  { id: "ft-markets",   name: "Financial Times",  url: "https://www.ft.com/markets?format=rss" },
+  { id: "fe-markets",   name: "Financial Express", url: "https://www.financialexpress.com/market/feed/" },
   // MoneyControl / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 
@@ -169,7 +169,7 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "nyt-world",    name: "NYT World",              url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
   { id: "npr-world",    name: "NPR World",              url: "https://feeds.npr.org/1004/rss.xml" },
   { id: "theprint-wld", name: "The Print",             url: "https://theprint.in/category/world/feed/" },
-  { id: "ft-world",     name: "Financial Times",        url: "https://www.ft.com/world?format=rss" },
+  { id: "fe-world",     name: "Financial Express",       url: "https://www.financialexpress.com/world-news/feed/" },
   // IE / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 
@@ -179,7 +179,7 @@ const BUSINESS_RSS_SOURCES: RssSource[] = [
   { id: "inc42",        name: "Inc42",            url: "https://inc42.com/feed/" },
   { id: "cnbctv18-biz", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/business.xml" },
   { id: "theprint-biz", name: "The Print",        url: "https://theprint.in/category/economy/feed/" },
-  { id: "ft-companies", name: "Financial Times",  url: "https://www.ft.com/companies?format=rss" },
+  { id: "fe-companies", name: "Financial Express", url: "https://www.financialexpress.com/business/feed/" },
   // MoneyControl / News18 / Firstpost: 403 from Render datacenter IPs
 ];
 
@@ -256,6 +256,15 @@ function capBySource(articles: NewsDataArticle[], max: number): NewsDataArticle[
   });
 }
 
+async function enrichMissingImages(articles: NewsDataArticle[]): Promise<void> {
+  const needs = articles.filter(a => !a.image_url && a.link);
+  if (needs.length === 0) return;
+  const results = await Promise.allSettled(needs.map(a => getOgImageCached(a.link!)));
+  results.forEach((res, idx) => {
+    if (res.status === "fulfilled" && res.value) needs[idx]!.image_url = res.value;
+  });
+}
+
 async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
   // Use per-category source lists so each tab only pulls from relevant outlets.
   // Cross-category pooling caused market/world articles to bleed into India tab
@@ -277,6 +286,7 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
     const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
     return tb - ta;
   });
+  await enrichMissingImages(filtered);
   return filtered;
 }
 
@@ -428,8 +438,11 @@ function parseRssFeed(
       const enclosure = item["enclosure"] as
         | { "@_url"?: string; "@_type"?: string }
         | undefined;
-      if (enclosure?.["@_url"] && enclosure["@_type"]?.startsWith("image")) {
-        imageUrl = enclosure["@_url"];
+      if (enclosure?.["@_url"]) {
+        const encType = enclosure["@_type"] ?? "";
+        if (!encType || encType.startsWith("image")) {
+          imageUrl = enclosure["@_url"];
+        }
       }
       const mediaContent = item["media:content"] as
         | { "@_url"?: string; "@_medium"?: string }
@@ -620,22 +633,7 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
   // No hard cap — take all 24h articles (RSS feeds are naturally bounded ~20-30/source)
   const top = recent.slice(0, 300);
 
-  // Enrich items missing image_url by scraping og:image (parallel, time-boxed).
-  const needs = top
-    .map((a, i) => ({ a, i }))
-    .filter(({ a }) => !a.image_url && a.link);
-  if (needs.length > 0) {
-    const enriched = await Promise.allSettled(
-      needs.map(({ a }) => getOgImageCached(a.link!)),
-    );
-    enriched.forEach((res, idx) => {
-      if (res.status === "fulfilled" && res.value) {
-        const target = needs[idx]!.a;
-        target.image_url = res.value;
-      }
-    });
-  }
-
+  await enrichMissingImages(top);
   return top;
 }
 
@@ -834,7 +832,7 @@ const MAINSTREAM_HOSTS = [
   "bloomberg",
   "guardian",
   "washingtonpost",
-  "ft.com",
+  "financialexpress.com",
   "aljazeera",
   "npr",
 ];
@@ -1042,6 +1040,7 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
     return tb - ta;
   });
 
+  await enrichMissingImages(recent);
   return detectTrending(buildFallbackStories(recent));
 }
 

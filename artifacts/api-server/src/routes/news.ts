@@ -274,10 +274,66 @@ function capBySource(articles: NewsDataArticle[], max: number): NewsDataArticle[
   });
 }
 
+// Default/placeholder OG images that should be treated as "no image"
+const DEFAULT_OG_IMAGE_PATTERNS = [
+  "theprint_default_image",
+  "default_image_new",
+  "/default-og",
+  "/placeholder",
+  "/no-image",
+  "/logo-og",
+];
+
+function isDefaultOgImage(url: string): boolean {
+  return DEFAULT_OG_IMAGE_PATTERNS.some(p => url.includes(p));
+}
+
+// Try fetching the featured image for a WordPress article via WP-JSON.
+// Avoids hitting the full article HTML page (which gets rate-limited).
+async function fetchWpFeaturedImage(articleUrl: string): Promise<string | null> {
+  let parsed: URL;
+  try { parsed = new URL(articleUrl); } catch { return null; }
+  const host = parsed.hostname.replace(/^www\./, "");
+  if (!WP_JSON_HOSTS.has(host)) return null;
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const slug = segments[segments.length - 1];
+  if (!slug) return null;
+  const apiUrl = `${parsed.origin}/wp-json/wp/v2/posts?slug=${encodeURIComponent(slug)}&_embed&_fields=_embedded`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3_000);
+  try {
+    const res = await fetch(apiUrl, {
+      signal: ctrl.signal,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as Array<{ _embedded?: { "wp:featuredmedia"?: Array<{ source_url?: string }> } }>;
+    if (!Array.isArray(data) || data.length === 0) return null;
+    const img = data[0]?._embedded?.["wp:featuredmedia"]?.[0]?.source_url;
+    return img ?? null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function enrichMissingImages(articles: NewsDataArticle[]): Promise<void> {
   const needs = articles.filter(a => !a.image_url && a.link);
   if (needs.length === 0) return;
-  const results = await Promise.allSettled(needs.map(a => getOgImageCached(a.link!)));
+  const results = await Promise.allSettled(needs.map(async a => {
+    // For WordPress sites, use WP-JSON to fetch the featured image — avoids
+    // rate-limiting from bulk page scraping.
+    const wpImg = await fetchWpFeaturedImage(a.link!);
+    if (wpImg) return wpImg;
+    const og = await getOgImageCached(a.link!);
+    // Treat known placeholder/default OG images as null
+    if (og && isDefaultOgImage(og)) return null;
+    return og;
+  }));
   results.forEach((res, idx) => {
     if (res.status === "fulfilled" && res.value) needs[idx]!.image_url = res.value;
   });
@@ -640,22 +696,23 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
     if (r.status === "fulfilled") articles.push(...r.value);
   }
 
-  // No time cutoff — take all articles the RSS feeds provide, sorted newest first
-  const recent = [...articles];
+  // Cap each source at 8 articles before sorting so no single outlet dominates
+  // page 1. TechCrunch/Verge/Ars each publish 15-40/day; without a cap they
+  // would fill every slot in the first page, hiding Wired, Engadget, 9to5, etc.
+  const capped = capBySource(articles, 8);
 
-  // Sort: preferred sources first within each time bucket, then newest first
-  recent.sort((a, b) => {
-    const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
-    const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
-    const prefA = PREFERRED_SOURCES.has(a.source_id ?? "") ? 1 : 0;
-    const prefB = PREFERRED_SOURCES.has(b.source_id ?? "") ? 1 : 0;
-    // Primary: prefer TechCrunch/Verge; secondary: newest first
-    if (prefB !== prefA) return prefB - prefA;
+  // Sort: preferred sources get a 3h freshness bonus so they still float near
+  // the top within a time window, but non-preferred sources from the last hour
+  // can beat a preferred source from 4h ago. This interleaves sources instead
+  // of hard-ranking preferred above everything.
+  const PREF_BONUS_MS = 3 * 60 * 60 * 1000;
+  capped.sort((a, b) => {
+    const ta = (a.pubDate ? Date.parse(a.pubDate) : 0) + (PREFERRED_SOURCES.has(a.source_id ?? "") ? PREF_BONUS_MS : 0);
+    const tb = (b.pubDate ? Date.parse(b.pubDate) : 0) + (PREFERRED_SOURCES.has(b.source_id ?? "") ? PREF_BONUS_MS : 0);
     return tb - ta;
   });
 
-  // No hard cap — take all 24h articles (RSS feeds are naturally bounded ~20-30/source)
-  const top = recent.slice(0, 300);
+  const top = capped.slice(0, 300);
 
   await enrichMissingImages(top);
   return top;
@@ -1702,6 +1759,23 @@ async function tryWordPressJson(
   }
 }
 
+// Build an AMP URL for publishers known to block datacenter IPs on their main
+// site but serve AMP pages via the AMP CDN without IP restrictions.
+function toAmpUrl(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, "");
+    if (host === "ndtv.com") {
+      // NDTV AMP: replace www.ndtv.com with amp.ndtv.com
+      u.hostname = "amp.ndtv.com";
+      return u.href;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function extractArticle(url: string): Promise<ArticleResult> {
   // Fast path for known WordPress publishers (currently TechCrunch). Returns
   // the full article body via their public JSON API — bypasses the JS-hydrated
@@ -1734,6 +1808,18 @@ async function extractArticle(url: string): Promise<ArticleResult> {
       paragraphs = htmlToParagraphs(html);
     }
     if (paragraphs.length > 0 || i === FETCH_USER_AGENTS.length - 1) {
+      // Before giving up with zero paragraphs, try AMP URL for blocked publishers.
+      if (paragraphs.length === 0) {
+        const ampUrl = toAmpUrl(url);
+        if (ampUrl) {
+          try {
+            const ampHtml = await fetchHtmlWithUA(ampUrl, FETCH_USER_AGENTS[0]!);
+            const { bodyHtml: ampBody, title: ampTitle } = extractArticleBody(ampHtml);
+            const ampParas = htmlToParagraphs(ampBody);
+            if (ampParas.length > 0) return { title: ampTitle ?? title, summaryBullets: [], paragraphs: ampParas };
+          } catch { /* fall through */ }
+        }
+      }
       return { title, summaryBullets: [], paragraphs };
     }
   }

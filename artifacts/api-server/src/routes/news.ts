@@ -1121,11 +1121,176 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
   return detectTrending(buildFallbackStories(recent));
 }
 
+// ----- AI clustering (stale-while-revalidate, 30-min TTL) -----
+
+function articleFingerprint(articles: any[]): string {
+  return articles
+    .slice(0, 20)
+    .map(a => a.id || a.headline?.slice(0, 20))
+    .join('|');
+}
+
+const globalClusterCache = new Map<string, {
+  clusters: any[];
+  fingerprint: string;
+  ts: number;
+}>();
+
+const CLUSTER_TTL = 30 * 60 * 1000;
+let clusteringInProgress = false;
+let aiCallsToday = 0;
+let lastReset = Date.now();
+
+function clusterByKeywords(articles: any[]): any[] {
+  return articles.slice(0, 8);
+}
+
+async function getAIClusters(topic: string, articles: any[]): Promise<any[]> {
+  const fingerprint = articleFingerprint(articles);
+  const cached = globalClusterCache.get(topic);
+
+  if (
+    cached &&
+    cached.fingerprint === fingerprint &&
+    Date.now() - cached.ts < CLUSTER_TTL
+  ) {
+    return cached.clusters;
+  }
+
+  if (cached && !clusteringInProgress) {
+    clusteringInProgress = true;
+    runAIClustering(topic, articles, fingerprint)
+      .finally(() => { clusteringInProgress = false; });
+    return cached.clusters;
+  }
+
+  if (!cached) {
+    return await runAIClustering(topic, articles, fingerprint);
+  }
+
+  return cached.clusters;
+}
+
+async function runAIClustering(
+  topic: string,
+  articles: any[],
+  fingerprint: string,
+): Promise<any[]> {
+  try {
+    if (Date.now() - lastReset > 86400000) {
+      aiCallsToday = 0;
+      lastReset = Date.now();
+    }
+
+    if (aiCallsToday >= 100) {
+      console.warn('AI limit reached, keyword fallback');
+      return clusterByKeywords(articles);
+    }
+
+    const headlines = articles
+      .slice(0, 30)
+      .map((a, i) => `${i}:${a.headline}`)
+      .join('\n');
+
+    const prompt = `You are news editor. Group these ${topic} headlines into topic clusters.
+
+${headlines}
+
+Rules:
+- Group only genuinely related stories
+- Each number appears exactly once
+- 4-8 groups maximum
+- Singles go into "other" group
+- Label each group 2-3 words
+
+JSON only:
+{"groups":[{"label":"topic name","indices":[0,1,4]},{"label":"other","indices":[2,3]}]}`;
+
+    aiCallsToday++;
+    console.log(`AI call #${aiCallsToday} today for ${topic}`);
+
+    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY || '',
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 600,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    if (!aiRes.ok) throw new Error(`AI failed: ${aiRes.status}`);
+
+    const data = await aiRes.json() as any;
+    const text = (data.content?.[0]?.text as string) || '';
+    const clean = text.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    if (!parsed?.groups?.length) throw new Error('Bad response');
+
+    const clustered = parsed.groups
+      .map((g: any) => {
+        const groupArticles = (g.indices || [])
+          .filter((i: number) => i >= 0 && i < articles.length)
+          .map((i: number) => articles[i])
+          .filter(Boolean);
+
+        if (!groupArticles.length) return null;
+        const primary = groupArticles[0];
+
+        return {
+          id: primary.id || `ai_${g.label}`,
+          headline: primary.headline,
+          summary: primary.summary,
+          imageUrl: primary.imageUrl,
+          publishedAt: primary.publishedAt,
+          category: primary.category,
+          clusterLabel: g.label,
+          sourceCount: groupArticles.length,
+          isTrending: groupArticles.length >= 3,
+          isBreaking:
+            groupArticles.length >= 2 &&
+            Date.now() - new Date(primary.publishedAt).getTime() < 7200000,
+          sources: groupArticles.map((a: any) => ({
+            name: a.source || a.sources?.[0]?.name || '',
+            url: a.url || a.sources?.[0]?.url || '',
+            imageUrl: a.imageUrl,
+            publishedAt: a.publishedAt,
+          })),
+        };
+      })
+      .filter(Boolean)
+      .sort(
+        (a: any, b: any) =>
+          new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime(),
+      )
+      .slice(0, 8);
+
+    globalClusterCache.set(topic, { clusters: clustered, fingerprint, ts: Date.now() });
+    return clustered;
+
+  } catch (e) {
+    console.error(`AI clustering failed for ${topic}:`, e);
+    const fallback = clusterByKeywords(articles);
+    if (fallback.length > 0) {
+      globalClusterCache.set(topic, { clusters: fallback, fingerprint, ts: Date.now() });
+      return fallback;
+    }
+    return articles;
+  }
+}
+
 async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
   let articles: NewsDataArticle[];
   switch (topic) {
-    case "breaking":
-      return buildBreakingFeed();
+    case "breaking": {
+      const stories = await buildBreakingFeed();
+      return (await getAIClusters(topic, stories as any[])) as StoryCard[];
+    }
     case "technology":
       articles = await fetchTechRss();
       break;
@@ -1140,7 +1305,8 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
   }
   if (articles.length === 0) return [];
   const clusters = deterministicCluster(articles);
-  return detectTrending(buildStoryCards(articles, clusters));
+  const stories = detectTrending(buildStoryCards(articles, clusters));
+  return (await getAIClusters(topic, stories as any[])) as StoryCard[];
 }
 
 const inflightFeed = new Map<string, Promise<StoryCard[]>>();

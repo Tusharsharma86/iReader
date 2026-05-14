@@ -211,7 +211,25 @@ const TOPIC_KEYWORDS: Record<string, string[]> = {
   "business":       ["startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "crore", "billion", "corporate", "deal", "valuation", "unicorn", "quarter", "investor", "venture", "series", "founder", "layoff", "earnings", "quarterly"],
 };
 
-const SPORTS_ENTERTAINMENT_RE = /\b(cricket|ipl|bcci|test match|odi|t20i?|football|fifa|tennis|wimbledon|formula[- ]1|f1 race|chess|olympics|hockey|badminton|icc|world cup final|bollywood|movie release|film|actor|actress|celebrity|box office|trailer launch|oscar|grammy|award show|web series|ott)\b/i;
+const SPORTS_ENTERTAINMENT_RE = /\b(cricket|ipl|bcci|test match|odi|t20i?|football|fifa|tennis|wimbledon|formula[- ]1|f1 race|chess|olympics|hockey|badminton|icc|world cup final|bollywood|movie release|film|actor|actress|celebrity|box office|trailer launch|oscar|grammy|award show|web series|ott|album launch|concert tour|dating|gossip|box office collection|sports score|match score|entertainment news)\b/i;
+
+// Low-priority breaking content: phone prices, gadget deals, specs leaks
+const BREAKING_LOWPRIORITY_RE = /\b(phone price|smartphone price|budget phone|feature phone|price drops?|price cut|price hike|price reveal|price history|lowest price|lowest ever price|best price|now available|available for rs|available at|launched at|starts at rs|starts at \$|goes on sale|now on sale|gets a price|cashback|exchange offer|upcoming phone|specifications|specs leak|hands.?on review|camera test|benchmark|unboxing|vs comparison|best phone|top phone|redmi|realme note|poco [a-z]|samsung [a-z]+\d+|iphone \d+ price|watch price|earbuds price|laptop deal|tablet deal|gadget deal|at the lowest|record low price|all.?time low)\b/i;
+
+// High-priority breaking content: geopolitics, economy, India, major tech
+const BREAKING_HIGHPRIORITY_RE = /\b(war|conflict|attack|blast|explosion|earthquake|tsunami|flood|pandemic|outbreak|crisis|emergency|election result|sanctions|nuclear|missile|treaty|summit|terror|coup|protest|strike|budget|gdp|inflation|rate hike|rate cut|fed |rbi |rupee|dollar crash|china|russia|pakistan|ukraine|israel|hamas|nato|un security council|supreme court|parliament|lok sabha|rajya sabha|prime minister|president|minister|assassination|death toll|casualties|ceasefire|ipo|acquisition|merger|layoff|bankruptcy|market crash|market rally|sensex|nifty|tariff|trade war|ai regulation|openai|chatgpt|gemini|nvidia|data breach|cyberattack|antitrust|ban on|crackdown)\b/i;
+
+function breakingScore(a: NewsDataArticle): number {
+  const text = `${a.title ?? ""} ${a.description ?? ""}`;
+  const ts = a.pubDate ? Date.parse(a.pubDate) : 0;
+  const hoursOld = (Date.now() - ts) / (1000 * 60 * 60);
+  let score = 0;
+  if (BREAKING_HIGHPRIORITY_RE.test(text)) score += 20;
+  if (BREAKING_LOWPRIORITY_RE.test(text)) score -= 12;
+  // Freshness: up to 8 points for articles < 8 hours old
+  score += Math.max(0, 8 - hoursOld);
+  return score;
+}
 
 function isSportsOrEntertainment(article: NewsDataArticle): boolean {
   const text = `${article.title ?? ""} ${article.description ?? ""}`.slice(0, 300);
@@ -350,11 +368,15 @@ function stripHtml(html: string): string {
 }
 
 function extractFirstImage(html: string): string | null {
-  // Try src first, then data-src (lazy-loaded), then first srcset URL
+  // Try src first (skip data: URIs)
   const srcMatch = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
   if (srcMatch?.[1] && !srcMatch[1].startsWith('data:')) return srcMatch[1];
-  const dataSrcMatch = /<img[^>]+data-src=["']([^"']+)["']/i.exec(html);
-  if (dataSrcMatch?.[1]) return dataSrcMatch[1];
+  // Lazy-load attributes (WordPress, TechCrunch, others)
+  for (const attr of ['data-lazy-src', 'data-src', 'data-original', 'data-hi-res-src']) {
+    const m = new RegExp(`<img[^>]+${attr}=["']([^"']+)["']`, 'i').exec(html);
+    if (m?.[1] && !m[1].startsWith('data:')) return m[1];
+  }
+  // First URL in srcset
   const srcsetMatch = /<img[^>]+srcset=["']([^\s,"']+)/i.exec(html);
   if (srcsetMatch?.[1]) return srcsetMatch[1];
   return null;
@@ -592,11 +614,13 @@ async function fetchCategoryRss(
 
 const ogImageCache = new Map<string, { url: string | null; ts: number }>();
 const OG_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const OG_NULL_CACHE_TTL_MS = 5 * 60 * 1000; // retry failed lookups after 5 min
 
 async function getOgImageCached(articleUrl: string): Promise<string | null> {
   const cached = ogImageCache.get(articleUrl);
-  if (cached && Date.now() - cached.ts < OG_CACHE_TTL_MS) {
-    return cached.url;
+  if (cached) {
+    const ttl = cached.url ? OG_CACHE_TTL_MS : OG_NULL_CACHE_TTL_MS;
+    if (Date.now() - cached.ts < ttl) return cached.url;
   }
   const url = await fetchOgImage(articleUrl);
   ogImageCache.set(articleUrl, { url, ts: Date.now() });
@@ -1032,13 +1056,15 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
   }
 
   const recent = raw
-    .filter(a => !isSportsOrEntertainment(a));
+    .filter(a => !isSportsOrEntertainment(a))
+    .filter(a => {
+      // Hard-remove phone-price/gadget-deal noise from Breaking tab
+      const text = `${a.title ?? ""} ${a.description ?? ""}`;
+      return !BREAKING_LOWPRIORITY_RE.test(text);
+    });
 
-  recent.sort((a, b) => {
-    const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
-    const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
-    return tb - ta;
-  });
+  // Sort by composite score: high-priority keywords + freshness
+  recent.sort((a, b) => breakingScore(b) - breakingScore(a));
 
   await enrichMissingImages(recent);
   return detectTrending(buildFallbackStories(recent));

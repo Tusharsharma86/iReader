@@ -1287,10 +1287,8 @@ JSON only:
 async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
   let articles: NewsDataArticle[];
   switch (topic) {
-    case "breaking": {
-      const stories = await buildBreakingFeed();
-      return (await getAIClusters(topic, stories as any[])) as StoryCard[];
-    }
+    case "breaking":
+      return buildBreakingFeed();
     case "technology":
       articles = await fetchTechRss();
       break;
@@ -1305,8 +1303,7 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
   }
   if (articles.length === 0) return [];
   const clusters = deterministicCluster(articles);
-  const stories = detectTrending(buildStoryCards(articles, clusters));
-  return (await getAIClusters(topic, stories as any[])) as StoryCard[];
+  return detectTrending(buildStoryCards(articles, clusters));
 }
 
 const inflightFeed = new Map<string, Promise<StoryCard[]>>();

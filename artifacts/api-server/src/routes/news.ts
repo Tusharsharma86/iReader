@@ -696,23 +696,17 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
     if (r.status === "fulfilled") articles.push(...r.value);
   }
 
-  // Cap each source at 8 articles before sorting so no single outlet dominates
-  // page 1. TechCrunch/Verge/Ars each publish 15-40/day; without a cap they
-  // would fill every slot in the first page, hiding Wired, Engadget, 9to5, etc.
-  const capped = capBySource(articles, 8);
-
-  // Sort: preferred sources get a 3h freshness bonus so they still float near
-  // the top within a time window, but non-preferred sources from the last hour
-  // can beat a preferred source from 4h ago. This interleaves sources instead
-  // of hard-ranking preferred above everything.
-  const PREF_BONUS_MS = 3 * 60 * 60 * 1000;
-  capped.sort((a, b) => {
-    const ta = (a.pubDate ? Date.parse(a.pubDate) : 0) + (PREFERRED_SOURCES.has(a.source_id ?? "") ? PREF_BONUS_MS : 0);
-    const tb = (b.pubDate ? Date.parse(b.pubDate) : 0) + (PREFERRED_SOURCES.has(b.source_id ?? "") ? PREF_BONUS_MS : 0);
+  // Sort: preferred sources first, then newest first within each tier
+  articles.sort((a, b) => {
+    const ta = a.pubDate ? Date.parse(a.pubDate) : 0;
+    const tb = b.pubDate ? Date.parse(b.pubDate) : 0;
+    const prefA = PREFERRED_SOURCES.has(a.source_id ?? "") ? 1 : 0;
+    const prefB = PREFERRED_SOURCES.has(b.source_id ?? "") ? 1 : 0;
+    if (prefB !== prefA) return prefB - prefA;
     return tb - ta;
   });
 
-  const top = capped.slice(0, 300);
+  const top = articles.slice(0, 300);
 
   await enrichMissingImages(top);
   return top;

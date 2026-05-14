@@ -211,10 +211,10 @@ const TOPIC_KEYWORDS: Record<string, string[]> = {
   "business":       ["startup", "revenue", "profit", "acquisition", "ceo", "merger", "funding", "crore", "billion", "corporate", "deal", "valuation", "unicorn", "quarter", "investor", "venture", "series", "founder", "layoff", "earnings", "quarterly"],
 };
 
-const SPORTS_ENTERTAINMENT_RE = /\b(cricket|ipl|bcci|test match|odi|t20i?|football|fifa|tennis|wimbledon|formula[- ]1|f1 race|chess|olympics|hockey|badminton|icc|world cup final|bollywood|movie release|film|actor|actress|celebrity|box office|trailer launch|oscar|grammy|award show|web series|ott|album launch|concert tour|dating|gossip|box office collection|sports score|match score|entertainment news)\b/i;
+const SPORTS_ENTERTAINMENT_RE = /\b(cricket|ipl|bcci|test match|odi|t20i?|football|soccer|premier league|la liga|bundesliga|serie a|ligue 1|nfl|nba|mlb|nhl|fifa|tennis|wimbledon|formula[- ]1|f1 race|chess|olympics|hockey|badminton|icc|world cup final|match report|match preview|scorecard|squad announced|batting|bowling|wicket|wickets|run chase|innings|half.?time|full.?time|penalty kick|goal scored|transfer window|player transfer|fantasy cricket|dream11|my11circle|rohit sharma|virat kohli|ms dhoni|bollywood|hindi film|tollywood|kollywood|mollywood|south film|telugu film|tamil film|movie release|film release|first look|box office|box office collection|trailer launch|song launch|music video|item song|oscar|grammy|award show|web series|ott platform|album launch|concert tour|celebrity gossip|dating|gossip|entertainment news|celebrity|actor|actress|sports score|match score|celebrity wedding|star spotted)\b/i;
 
-// Low-priority breaking content: phone prices, gadget deals, specs leaks
-const BREAKING_LOWPRIORITY_RE = /\b(phone price|smartphone price|budget phone|feature phone|price drops?|price cut|price hike|price reveal|price history|lowest price|lowest ever price|best price|now available|available for rs|available at|launched at|starts at rs|starts at \$|goes on sale|now on sale|gets a price|cashback|exchange offer|upcoming phone|specifications|specs leak|hands.?on review|camera test|benchmark|unboxing|vs comparison|best phone|top phone|redmi|realme note|poco [a-z]|samsung [a-z]+\d+|iphone \d+ price|watch price|earbuds price|laptop deal|tablet deal|gadget deal|at the lowest|record low price|all.?time low)\b/i;
+// Low-priority breaking content: phone prices, gadget deals, specs leaks, routine sports/entertainment
+const BREAKING_LOWPRIORITY_RE = /\b(phone price|smartphone price|budget phone|feature phone|price drops?|price cut|price hike|price reveal|price history|lowest price|lowest ever price|best price|now available|available for rs|available at|launched at|starts at rs|starts at \$|goes on sale|now on sale|gets a price|cashback|exchange offer|upcoming phone|specifications|specs leak|hands.?on review|camera test|benchmark|unboxing|vs comparison|best phone|top phone|redmi|realme note|poco [a-z]|samsung [a-z]+\d+|iphone \d+ price|watch price|earbuds price|laptop deal|tablet deal|gadget deal|at the lowest|record low price|all.?time low|match preview|scorecard|squad|batting|bowling|wicket|fantasy cricket|dream11|box office|trailer|song launch|celebrity gossip|tollywood|bollywood film|film release)\b/i;
 
 // High-priority breaking content: geopolitics, economy, India, major tech
 const BREAKING_HIGHPRIORITY_RE = /\b(war|conflict|attack|blast|explosion|earthquake|tsunami|flood|pandemic|outbreak|crisis|emergency|election result|sanctions|nuclear|missile|treaty|summit|terror|coup|protest|strike|budget|gdp|inflation|rate hike|rate cut|fed |rbi |rupee|dollar crash|china|russia|pakistan|ukraine|israel|hamas|nato|un security council|supreme court|parliament|lok sabha|rajya sabha|prime minister|president|minister|assassination|death toll|casualties|ceasefire|ipo|acquisition|merger|layoff|bankruptcy|market crash|market rally|sensex|nifty|tariff|trade war|ai regulation|openai|chatgpt|gemini|nvidia|data breach|cyberattack|antitrust|ban on|crackdown)\b/i;
@@ -225,7 +225,8 @@ function breakingScore(a: NewsDataArticle): number {
   const hoursOld = (Date.now() - ts) / (1000 * 60 * 60);
   let score = 0;
   if (BREAKING_HIGHPRIORITY_RE.test(text)) score += 20;
-  if (BREAKING_LOWPRIORITY_RE.test(text)) score -= 12;
+  if (BREAKING_LOWPRIORITY_RE.test(text)) score -= 20;
+  if (SPORTS_ENTERTAINMENT_RE.test(text)) score -= 25;
   // Freshness: up to 8 points for articles < 8 hours old
   score += Math.max(0, 8 - hoursOld);
   return score;
@@ -321,14 +322,33 @@ async function fetchWpFeaturedImage(articleUrl: string): Promise<string | null> 
   }
 }
 
+// Detect WordPress thumbnail-sized image URLs (e.g. -150x150.jpg, -300x169.jpg).
+// These are auto-generated resized variants — we want the full featured image instead.
+function isWpThumbnailUrl(url: string): boolean {
+  return /\-\d{2,4}x\d{2,4}\.(jpg|jpeg|png|webp)(\?.*)?$/i.test(url);
+}
+
+function needsImageEnrichment(a: NewsDataArticle): boolean {
+  if (!a.link) return false;
+  if (!a.image_url) return true;
+  // For TechCrunch (WP-JSON hosts), replace thumbnail-sized RSS images with the
+  // full-resolution featured image from the WordPress API.
+  try {
+    const host = new URL(a.link).hostname.replace(/^www\./, "");
+    if (WP_JSON_HOSTS.has(host) && isWpThumbnailUrl(a.image_url)) return true;
+  } catch { /* ignore */ }
+  return false;
+}
+
 async function enrichMissingImages(articles: NewsDataArticle[]): Promise<void> {
-  const needs = articles.filter(a => !a.image_url && a.link);
+  const needs = articles.filter(needsImageEnrichment);
   if (needs.length === 0) return;
   const results = await Promise.allSettled(needs.map(async a => {
     // For WordPress sites, use WP-JSON to fetch the featured image — avoids
-    // rate-limiting from bulk page scraping.
+    // rate-limiting from bulk page scraping and gives full-resolution images.
     const wpImg = await fetchWpFeaturedImage(a.link!);
     if (wpImg) return wpImg;
+    if (a.image_url) return a.image_url; // keep existing if WP-JSON fails
     const og = await getOgImageCached(a.link!);
     // Treat known placeholder/default OG images as null
     if (og && isDefaultOgImage(og)) return null;
@@ -1106,16 +1126,20 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
     if (r.status === "fulfilled") raw.push(...r.value);
   }
 
-  const recent = raw
+  // Hard-filter: remove sports/entertainment and gadget-deal noise
+  const filtered = raw
     .filter(a => !isSportsOrEntertainment(a))
     .filter(a => {
-      // Hard-remove phone-price/gadget-deal noise from Breaking tab
       const text = `${a.title ?? ""} ${a.description ?? ""}`;
       return !BREAKING_LOWPRIORITY_RE.test(text);
     });
 
-  // Sort by composite score: high-priority keywords + freshness
-  recent.sort((a, b) => breakingScore(b) - breakingScore(a));
+  // Score and sort by relevance + freshness
+  const scored = filtered.map(a => ({ a, score: breakingScore(a) }));
+  scored.sort((x, y) => y.score - x.score);
+
+  // Drop articles with negative scores (low-priority even after hard filter)
+  const recent = scored.filter(({ score }) => score >= -2).map(({ a }) => a);
 
   await enrichMissingImages(recent);
   return detectTrending(buildFallbackStories(recent));
@@ -1584,6 +1608,8 @@ router.get("/debug/sources", async (_req, res) => {
 router.get("/feed", async (req, res) => {
   const topic = String(req.query["topic"] ?? "top").toLowerCase();
   const refresh = req.query["refresh"] === "1";
+  // force=1: synchronous rebuild — waits for fresh data (used by pull-to-refresh)
+  const force = req.query["force"] === "1";
   const sourceFilter =
     typeof req.query["source"] === "string" && req.query["source"].length > 0
       ? String(req.query["source"]).toLowerCase()
@@ -1605,15 +1631,39 @@ router.get("/feed", async (req, res) => {
     res.json({ stories: result, total, page, limit, ...extra });
   };
 
+  // Force-refresh: synchronous rebuild so pull-to-refresh always returns new data.
+  // Fall back to stale cache if build exceeds timeout or fails.
+  if (force) {
+    try {
+      const buildTimeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("build timeout")), 12_000),
+      );
+      const stories = await Promise.race([buildFreshFeed(topic), buildTimeout]);
+      if (stories.length > 0) {
+        cache.set(topic, { at: Date.now(), data: stories });
+        persistFeedCache();
+      }
+      respond(stories.length > 0 ? stories : (cached?.data ?? []), { cached: false, forced: true });
+    } catch {
+      // Timeout — return best available data and queue background refresh
+      if (cached) {
+        refreshInBackground(topic, req.log);
+        respond(cached.data, { cached: true, stale: true });
+      } else {
+        res.status(504).json({ error: "Feed refresh timed out, try again" });
+      }
+    }
+    return;
+  }
+
   // Fast path: return cached data if fresh.
   if (!refresh && isFresh) {
     respond(cached.data, { cached: true });
     return;
   }
 
-  // Stale-while-revalidate: if user hit refresh OR cache is stale, return what
-  // we have immediately and refetch in the background. The next request will
-  // see the fresh data.
+  // Stale-while-revalidate: if cache is stale, return what we have immediately
+  // and refetch in the background. The next request will see the fresh data.
   if (cached) {
     refreshInBackground(topic, req.log);
     respond(cached.data, { cached: true, stale: true });

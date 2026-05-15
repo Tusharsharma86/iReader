@@ -1157,7 +1157,7 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
     const paragraph = naiveParagraph(text);
 
     return {
-      id: `${Date.now()}-${idx}-${a.article_id ?? idx}`,
+      id: createHash("md5").update(sourceUrl || a.article_id || `${Date.now()}-${idx}`).digest("hex").slice(0, 16),
       headline,
       category: pickCategory(a),
       imageUrl: a.image_url ?? null,

@@ -150,54 +150,52 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "hackernews",   name: "Hacker News",       url: "https://hnrss.org/frontpage" },
   { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
   { id: "scrollin",     name: "Scroll.in",         url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
-  { id: "fe-tech",      name: "Financial Express",  url: "https://www.financialexpress.com/business/technology/feed/" },
-  { id: "ie-tech",      name: "Indian Express",     url: "https://indianexpress.com/section/technology/feed/" },
+  // IE direct URLs → 403 from Render IPs; FeedBurner proxy works (IE Tech section, 200 items)
+  { id: "ie-tech",      name: "Indian Express",    url: "https://feeds.feedburner.com/indianexpress" },
+  // Financial Express RSS feeds are dead (410 / returns HTML) — removed
 ];
 
 // Topic-specific Indian source lists
 // IE / News18 / Firstpost / MoneyControl all return HTTP 403 from Render's
-// datacenter IP range. Use feedburner-hosted or CDN-backed alternatives.
+// datacenter IP range. IE only works via FeedBurner proxy (Tech section only).
 const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "ndtv-india",       name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-india-news" },
-  { id: "ndtv-latest",      name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-latest" },
-  { id: "indiatoday",       name: "India Today",      url: "https://www.indiatoday.in/rss/home" },
-  { id: "indianexpress",    name: "Indian Express",   url: "https://indianexpress.com/feed/" },
-  { id: "theprint-ind",     name: "The Print",        url: "https://theprint.in/category/india/feed/" },
-  { id: "theprint-pol",     name: "The Print",        url: "https://theprint.in/category/politics/feed/" },
-  { id: "thequint-ind",     name: "The Quint",        url: "https://feeds.feedburner.com/thequint" },
-  { id: "cnbctv18-ind",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/india.xml" },
-  { id: "scrollin",         name: "Scroll.in",        url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
+  { id: "ndtv-india",   name: "NDTV",        url: "https://feeds.feedburner.com/ndtvnews-india-news" },
+  { id: "ndtv-latest",  name: "NDTV",        url: "https://feeds.feedburner.com/ndtvnews-latest" },
+  { id: "indiatoday",   name: "India Today", url: "https://www.indiatoday.in/rss/home" },
+  { id: "theprint-ind", name: "The Print",   url: "https://theprint.in/category/india/feed/" },
+  { id: "theprint-pol", name: "The Print",   url: "https://theprint.in/category/politics/feed/" },
+  { id: "thequint-ind", name: "The Quint",   url: "https://feeds.feedburner.com/thequint" },
+  { id: "cnbctv18-ind", name: "CNBC TV18",   url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/india.xml" },
+  { id: "scrollin",     name: "Scroll.in",   url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
 ];
 
 const MARKETS_RSS_SOURCES: RssSource[] = [
-  { id: "et-markets",   name: "Economic Times",   url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
-  { id: "livemint",     name: "Livemint",         url: "https://www.livemint.com/rss/markets" },
-  { id: "cnbctv18",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
-  { id: "fe-markets",   name: "Financial Express", url: "https://www.financialexpress.com/market/feed/" },
-  { id: "ie-markets",   name: "Indian Express",    url: "https://indianexpress.com/section/business/feed/" },
+  { id: "et-markets",   name: "Economic Times", url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
+  { id: "livemint",     name: "Livemint",       url: "https://www.livemint.com/rss/markets" },
+  { id: "cnbctv18",     name: "CNBC TV18",      url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
+  // Financial Express RSS dead (410). IE direct 403. Livemint tech covers some market content.
+  { id: "livemint-tech", name: "Livemint",      url: "https://www.livemint.com/rss/technology" },
 ];
 
 // Reuters ended public RSS June 2020. AP News retired /rss/apf-* paths — use hub format.
 // The Guardian and NPR World are reliable open RSS alternatives.
 const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "bbc-world",    name: "BBC World",              url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
-  { id: "guardian-wld", name: "The Guardian",           url: "https://www.theguardian.com/world/rss" },
-  { id: "aljazeera",    name: "Al Jazeera",             url: "https://www.aljazeera.com/xml/rss/all.xml" },
-  { id: "nyt-world",    name: "NYT World",              url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
-  { id: "npr-world",    name: "NPR World",              url: "https://feeds.npr.org/1004/rss.xml" },
-  { id: "theprint-wld", name: "The Print",             url: "https://theprint.in/category/world/feed/" },
-  { id: "fe-world",     name: "Financial Express",       url: "https://www.financialexpress.com/world-news/feed/" },
-  { id: "ie-world",     name: "Indian Express",          url: "https://indianexpress.com/section/world/feed/" },
+  { id: "bbc-world",    name: "BBC World",   url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
+  { id: "guardian-wld", name: "The Guardian", url: "https://www.theguardian.com/world/rss" },
+  { id: "aljazeera",    name: "Al Jazeera",  url: "https://www.aljazeera.com/xml/rss/all.xml" },
+  { id: "nyt-world",    name: "NYT World",   url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
+  { id: "npr-world",    name: "NPR World",   url: "https://feeds.npr.org/1004/rss.xml" },
+  { id: "theprint-wld", name: "The Print",   url: "https://theprint.in/category/world/feed/" },
+  // Financial Express 403/dead, IE direct 403
 ];
 
 const BUSINESS_RSS_SOURCES: RssSource[] = [
-  { id: "livemint-co",  name: "Mint",             url: "https://www.livemint.com/rss/companies" },
-  { id: "et-co",        name: "Economic Times",   url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
-  { id: "inc42",        name: "Inc42",            url: "https://inc42.com/feed/" },
-  { id: "cnbctv18-biz", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/business.xml" },
-  { id: "theprint-biz", name: "The Print",        url: "https://theprint.in/category/economy/feed/" },
-  { id: "fe-companies", name: "Financial Express", url: "https://www.financialexpress.com/business/feed/" },
-  { id: "ie-biz",       name: "Indian Express",    url: "https://indianexpress.com/section/business/feed/" },
+  { id: "livemint-co",  name: "Mint",        url: "https://www.livemint.com/rss/companies" },
+  { id: "et-co",        name: "Economic Times", url: "https://economictimes.indiatimes.com/rssfeedsdefault/4719148.cms" },
+  { id: "inc42",        name: "Inc42",       url: "https://inc42.com/feed/" },
+  { id: "cnbctv18-biz", name: "CNBC TV18",   url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/business.xml" },
+  { id: "theprint-biz", name: "The Print",   url: "https://theprint.in/category/economy/feed/" },
+  // Financial Express RSS dead, IE direct 403
 ];
 
 // Unified pool of all non-tech RSS sources (deduplicated by id).

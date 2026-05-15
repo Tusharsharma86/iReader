@@ -2158,6 +2158,101 @@ Article: ${text}`,
   }
 }
 
+// ----- AI cluster labels (stale-while-revalidate, 30-min TTL) -----
+// Accepts a flat list of story headlines from the client, returns AI-generated
+// topic group labels. The server caches by topic + content fingerprint so
+// repeated requests within the TTL window are instant.
+
+async function runLabelClustering(
+  cacheKey: string,
+  fingerprint: string,
+  topic: string,
+  texts: string[],
+): Promise<{ label: string; indices: number[] }[]> {
+  const limited = texts.slice(0, 30);
+  const headlineList = limited.map((t, i) => `${i}: ${t}`).join('\n');
+
+  const apiKey = process.env['ANTHROPIC_API_KEY'];
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY missing');
+
+  const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 600,
+      messages: [{
+        role: 'user',
+        content: `Group these ${topic} news headlines into topic clusters.\n\n${headlineList}\n\nRules:\n- Group only genuinely related stories\n- Each number appears exactly once\n- 3-7 groups maximum\n- Put unrelated singles in "Other"\n- Label each group 2-4 words (e.g. "India-Pakistan Tensions", "Budget 2025", "Tech Layoffs")\n\nReturn JSON only:\n{"groups":[{"label":"topic name","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`,
+      }],
+    }),
+  });
+
+  if (!aiRes.ok) throw new Error(`AI error: ${aiRes.status}`);
+  const data = await aiRes.json() as { content?: { text?: string }[] };
+  const raw = (data.content?.[0]?.text ?? '').replace(/```json|```/g, '').trim();
+  const parsed = JSON.parse(raw) as { groups?: { label: string; indices: number[] }[] };
+  if (!Array.isArray(parsed?.groups)) throw new Error('bad AI response');
+
+  const result = parsed.groups;
+  globalClusterCache.set(cacheKey, { clusters: result, fingerprint, ts: Date.now() });
+  return result;
+}
+
+let labelClusteringInProgress = false;
+
+router.post("/cluster-labels", async (req, res) => {
+  const { topic = 'breaking', headlines } = req.body as {
+    topic?: string;
+    headlines?: { id: string; text: string }[];
+  };
+
+  if (!Array.isArray(headlines) || headlines.length < 3) {
+    res.json({ groups: [], cached: false });
+    return;
+  }
+
+  const fingerprint = headlines.slice(0, 20).map(h => h.text.slice(0, 20)).join('|');
+  const cacheKey = `labels_${topic}`;
+  const cached = globalClusterCache.get(cacheKey);
+
+  const mapResult = (clusters: { label: string; indices: number[] }[]) =>
+    clusters
+      .filter(g => g.label.toLowerCase() !== 'other')
+      .map(g => ({
+        label: g.label,
+        ids: g.indices.filter(i => i < headlines.length).map(i => headlines[i]!.id),
+      }));
+
+  if (cached && cached.fingerprint === fingerprint) {
+    if (Date.now() - cached.ts < CLUSTER_TTL) {
+      res.json({ groups: mapResult(cached.clusters), cached: true });
+      return;
+    }
+    // Stale but same content: return immediately, refresh in background
+    if (!labelClusteringInProgress) {
+      labelClusteringInProgress = true;
+      runLabelClustering(cacheKey, fingerprint, topic, headlines.map(h => h.text))
+        .finally(() => { labelClusteringInProgress = false; });
+    }
+    res.json({ groups: mapResult(cached.clusters), cached: true, stale: true });
+    return;
+  }
+
+  // Content changed or no cache: wait for fresh AI grouping
+  try {
+    const groups = await runLabelClustering(cacheKey, fingerprint, topic, headlines.map(h => h.text));
+    res.json({ groups: mapResult(groups), cached: false });
+  } catch (err) {
+    req.log.warn({ err }, 'cluster-labels failed');
+    res.json({ groups: [], cached: false, error: true });
+  }
+});
+
 router.post("/ai-summary", async (req, res) => {
   const { url, paragraphs, type = "summary" } = req.body as {
     url?: string;

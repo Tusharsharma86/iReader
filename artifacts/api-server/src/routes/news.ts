@@ -1287,9 +1287,10 @@ async function buildBreakingFeed(): Promise<FeedItem[]> {
   // Drop articles with negative scores (low-priority even after hard filter)
   const recent = scored.filter(({ score }) => score >= -2).map(({ a }) => a);
 
-  await enrichMissingImages(recent);
-  const groups = clusterForMixedFeed(recent);
-  return buildMixedFeed(recent, groups);
+  const recentDeduped = capBySource(recent, 999);
+  await enrichMissingImages(recentDeduped);
+  const groups = clusterForMixedFeed(recentDeduped);
+  return buildMixedFeed(recentDeduped, groups);
 }
 
 // ----- AI clustering (stale-while-revalidate, 30-min TTL) -----
@@ -1480,9 +1481,12 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   }
   if (articles.length === 0) return [];
 
-  const groups = clusterForMixedFeed(articles);
-  rawFeedCache.set(topic, { articles, groups, at: Date.now() });
-  return buildMixedFeed(articles, groups);
+  // Deduplicate by canonical URL before clustering — prevents same-URL articles
+  // from landing in the same cluster and generating identical MD5 IDs.
+  const deduped = capBySource(articles, 999);
+  const groups = clusterForMixedFeed(deduped);
+  rawFeedCache.set(topic, { articles: deduped, groups, at: Date.now() });
+  return buildMixedFeed(deduped, groups);
 }
 
 const inflightFeed = new Map<string, Promise<FeedItem[]>>();

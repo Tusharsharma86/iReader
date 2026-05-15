@@ -151,7 +151,7 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
   { id: "scrollin",     name: "Scroll.in",         url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
   { id: "fe-tech",      name: "Financial Express",  url: "https://www.financialexpress.com/business/technology/feed/" },
-  // IE/News18/Firstpost block Render's IP range (403) — removed
+  { id: "ie-tech",      name: "Indian Express",     url: "https://indianexpress.com/section/technology/feed/" },
 ];
 
 // Topic-specific Indian source lists
@@ -174,7 +174,7 @@ const MARKETS_RSS_SOURCES: RssSource[] = [
   { id: "livemint",     name: "Livemint",         url: "https://www.livemint.com/rss/markets" },
   { id: "cnbctv18",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml" },
   { id: "fe-markets",   name: "Financial Express", url: "https://www.financialexpress.com/market/feed/" },
-  // MoneyControl / News18 / Firstpost: 403 from Render datacenter IPs
+  { id: "ie-markets",   name: "Indian Express",    url: "https://indianexpress.com/section/business/feed/" },
 ];
 
 // Reuters ended public RSS June 2020. AP News retired /rss/apf-* paths — use hub format.
@@ -187,7 +187,7 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "npr-world",    name: "NPR World",              url: "https://feeds.npr.org/1004/rss.xml" },
   { id: "theprint-wld", name: "The Print",             url: "https://theprint.in/category/world/feed/" },
   { id: "fe-world",     name: "Financial Express",       url: "https://www.financialexpress.com/world-news/feed/" },
-  // IE / News18 / Firstpost: 403 from Render datacenter IPs
+  { id: "ie-world",     name: "Indian Express",          url: "https://indianexpress.com/section/world/feed/" },
 ];
 
 const BUSINESS_RSS_SOURCES: RssSource[] = [
@@ -197,7 +197,7 @@ const BUSINESS_RSS_SOURCES: RssSource[] = [
   { id: "cnbctv18-biz", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/business.xml" },
   { id: "theprint-biz", name: "The Print",        url: "https://theprint.in/category/economy/feed/" },
   { id: "fe-companies", name: "Financial Express", url: "https://www.financialexpress.com/business/feed/" },
-  // MoneyControl / News18 / Firstpost: 403 from Render datacenter IPs
+  { id: "ie-biz",       name: "Indian Express",    url: "https://indianexpress.com/section/business/feed/" },
 ];
 
 // Unified pool of all non-tech RSS sources (deduplicated by id).

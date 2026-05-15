@@ -40,13 +40,29 @@ type StoryCard = {
   isDeveloping?: boolean;
 };
 
-type CacheEntry = { at: number; data: StoryCard[] };
-const cache = new Map<string, CacheEntry>();
-const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000;
-const TECH_CACHE_TTL_MS = 30 * 60 * 1000;
+// ── Mixed-feed types ─────────────────────────────────────────────────────────
+type FeedCluster = {
+  type: "cluster";
+  topicTitle: string;
+  topicSummary: string;
+  articles: StoryCard[];
+};
+type FeedArticle = StoryCard & { type: "article" };
+type FeedItem = FeedCluster | FeedArticle;
 
-function ttlFor(topic: string): number {
-  return topic === "technology" ? TECH_CACHE_TTL_MS : DEFAULT_CACHE_TTL_MS;
+// Raw article + cluster-group cache (RSS fetch + clustering, 10-min TTL)
+type RawFeedEntry = { articles: NewsDataArticle[]; groups: number[][]; at: number };
+const rawFeedCache = new Map<string, RawFeedEntry>();
+const RAW_FEED_TTL_MS = 10 * 60 * 1000;
+
+// Scored, ordered feed cache (5-min TTL — scores decay as freshness changes)
+type CacheEntry = { at: number; data: FeedItem[] };
+const cache = new Map<string, CacheEntry>();
+const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
+const TECH_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function ttlFor(_topic: string): number {
+  return DEFAULT_CACHE_TTL_MS;
 }
 
 // ----- Persistent disk cache -----
@@ -916,6 +932,136 @@ function deterministicCluster(articles: NewsDataArticle[]): ClusterResult {
   return { clusters };
 }
 
+// ── Mixed-feed pipeline ───────────────────────────────────────────────────────
+
+// Topic title for a cluster: words appearing in 2+ headlines → shared theme.
+function feedClusterLabel(articles: NewsDataArticle[]): string {
+  const freq: Record<string, number> = {};
+  for (const a of articles) {
+    const seen = new Set<string>();
+    for (const t of titleTokens(a.title ?? "")) {
+      if (!seen.has(t)) { seen.add(t); freq[t] = (freq[t] ?? 0) + 1; }
+    }
+  }
+  const shared = Object.entries(freq)
+    .filter(([, c]) => c >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([w]) => w.charAt(0).toUpperCase() + w.slice(1));
+  if (shared.length > 0) return shared.join(" ");
+  const rep = Array.from(titleTokens(articles[0]?.title ?? "")).slice(0, 3);
+  return rep.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || "News";
+}
+
+// Union-Find clustering: articles sharing 2+ non-stopword title tokens are
+// grouped. Returns array of groups (each is an array of article indices).
+// Same-domain articles never merge. Groups are capped at 8 members.
+function clusterForMixedFeed(articles: NewsDataArticle[]): number[][] {
+  const tokenSets = articles.map(a => titleTokens(a.title ?? ""));
+  const n = articles.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const rank = new Array<number>(n).fill(0);
+  function find(x: number): number {
+    if (parent[x] !== x) parent[x] = find(parent[x]!);
+    return parent[x]!;
+  }
+  function unite(x: number, y: number) {
+    const [px, py] = [find(x), find(y)];
+    if (px === py) return;
+    if (rank[px]! < rank[py]!) parent[px] = py;
+    else if (rank[px]! > rank[py]!) parent[py] = px;
+    else { parent[py] = px; rank[px]!++; }
+  }
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const domA = articleDomain(articles[i]!.link ?? "");
+      const domB = articleDomain(articles[j]!.link ?? "");
+      if (domA && domB && domA === domB) continue;
+      let shared = 0;
+      for (const t of tokenSets[i]!) if (tokenSets[j]!.has(t)) shared++;
+      if (shared >= 2) unite(i, j);
+    }
+  }
+  const compMap = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    if (!compMap.has(root)) compMap.set(root, []);
+    compMap.get(root)!.push(i);
+  }
+  return Array.from(compMap.values()).map(g => g.slice(0, 8));
+}
+
+// Score and order all groups into a mixed FeedItem[].
+// Groups ≥ 3 become clusters; smaller groups produce standalone FeedArticle items.
+// score = velocity * 0.4 + freshness * 0.35 + relevance * 0.25
+function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedItem[] {
+  const now = Date.now();
+  const scored: Array<{ item: FeedItem; score: number }> = [];
+
+  for (const group of groups) {
+    const ga = group.map(i => articles[i]!).filter(Boolean);
+    if (ga.length === 0) continue;
+
+    const newest = Math.max(...ga.map(a => a.pubDate ? Date.parse(a.pubDate) : 0));
+    const hoursOld = Math.max(0, (now - newest) / 3_600_000);
+
+    if (group.length >= 3) {
+      const recentCount = ga.filter(a => {
+        const ms = a.pubDate ? Date.parse(a.pubDate) : 0;
+        return now - ms < 3 * 3_600_000;
+      }).length;
+      const velocity = recentCount / ga.length;
+      const freshness = 1 / (hoursOld + 1);
+      const relevance = Math.log(ga.length + 1);
+      const score = velocity * 0.4 + freshness * 0.35 + relevance * 0.25;
+
+      const cards = buildFallbackStories(ga);
+      const topicTitle = feedClusterLabel(ga);
+      const rep = ga[0]!;
+      const topicSummary = naiveParagraph(
+        stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim()),
+      );
+      scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
+    } else {
+      for (const a of ga) {
+        const pubMs = a.pubDate ? Date.parse(a.pubDate) : 0;
+        const ah = Math.max(0, (now - pubMs) / 3_600_000);
+        const velocity = ah < 1 ? 1 : Math.exp(-0.5 * (ah - 1));
+        const freshness = 1 / (ah + 1);
+        const score = velocity * 0.4 + freshness * 0.35 + 0.3 * 0.25;
+        const [card] = buildFallbackStories([a]);
+        if (card) scored.push({ item: { ...card, type: "article" }, score });
+      }
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(s => s.item);
+}
+
+// Extract all StoryCards from a FeedItem array (used for publisher counting,
+// push notification fingerprinting, etc.).
+function extractCards(items: FeedItem[]): StoryCard[] {
+  const out: StoryCard[] = [];
+  for (const item of items) {
+    if (item.type === "cluster") out.push(...item.articles);
+    else out.push(item);
+  }
+  return out;
+}
+
+// Representative StoryCards for push-notification dedup fingerprinting.
+// For clusters, returns the first article with sourceCount set to cluster size.
+function feedToRepCards(items: FeedItem[]): StoryCard[] {
+  return items.flatMap(item => {
+    if (item.type === "cluster") {
+      const rep = item.articles[0];
+      return rep ? [{ ...rep, sourceCount: item.articles.length }] : [];
+    }
+    return [item as StoryCard];
+  });
+}
+
 const MAINSTREAM_HOSTS = [
   "reuters",
   "bbc",
@@ -1102,7 +1248,7 @@ function detectTrending(stories: StoryCard[]): StoryCard[] {
 
 const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 
-async function buildBreakingFeed(): Promise<StoryCard[]> {
+async function buildBreakingFeed(): Promise<FeedItem[]> {
   const cutoff = Date.now() - EIGHT_HOURS_MS;
 
   // All sources: tech + all topic-specific feeds, deduped by id
@@ -1142,7 +1288,8 @@ async function buildBreakingFeed(): Promise<StoryCard[]> {
   const recent = scored.filter(({ score }) => score >= -2).map(({ a }) => a);
 
   await enrichMissingImages(recent);
-  return detectTrending(buildFallbackStories(recent));
+  const groups = clusterForMixedFeed(recent);
+  return buildMixedFeed(recent, groups);
 }
 
 // ----- AI clustering (stale-while-revalidate, 30-min TTL) -----
@@ -1308,11 +1455,17 @@ JSON only:
   }
 }
 
-async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
+async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
+  if (topic === "breaking") return buildBreakingFeed();
+
+  // Reuse cluster assignments when only scores need updating (saves RSS round-trip).
+  const rawEntry = rawFeedCache.get(topic);
+  if (rawEntry && Date.now() - rawEntry.at < RAW_FEED_TTL_MS) {
+    return buildMixedFeed(rawEntry.articles, rawEntry.groups);
+  }
+
   let articles: NewsDataArticle[];
   switch (topic) {
-    case "breaking":
-      return buildBreakingFeed();
     case "technology":
       articles = await fetchTechRss();
       break;
@@ -1326,11 +1479,13 @@ async function buildFreshFeed(topic: string): Promise<StoryCard[]> {
       articles = await fetchNewsData(topic);
   }
   if (articles.length === 0) return [];
-  const clusters = deterministicCluster(articles);
-  return detectTrending(buildStoryCards(articles, clusters));
+
+  const groups = clusterForMixedFeed(articles);
+  rawFeedCache.set(topic, { articles, groups, at: Date.now() });
+  return buildMixedFeed(articles, groups);
 }
 
-const inflightFeed = new Map<string, Promise<StoryCard[]>>();
+const inflightFeed = new Map<string, Promise<FeedItem[]>>();
 
 // Minimum number of distinct publisher hostnames a refresh must produce before
 // we'll let it overwrite an existing healthy cache entry. Prevents a cold-start
@@ -1338,10 +1493,10 @@ const inflightFeed = new Map<string, Promise<StoryCard[]>>();
 // for the next TTL window.
 const MIN_HEALTHY_PUBLISHERS = 3;
 
-function distinctPublisherCount(stories: StoryCard[]): number {
+function distinctPublisherCount(items: FeedItem[]): number {
   const hosts = new Set<string>();
-  for (const story of stories) {
-    for (const src of story.sources ?? []) {
+  for (const card of extractCards(items)) {
+    for (const src of card.sources ?? []) {
       try {
         if (src.url) hosts.add(new URL(src.url).hostname.replace(/^www\./, ""));
       } catch {
@@ -1359,50 +1514,37 @@ function refreshInBackground(
   if (inflightFeed.has(topic)) return;
   const started = Date.now();
   const p = buildFreshFeed(topic)
-    .then((stories) => {
-      const freshPubs = distinctPublisherCount(stories);
+    .then((feed) => {
+      const freshPubs = distinctPublisherCount(feed);
       const existing = cache.get(topic);
       const existingPubs = existing ? distinctPublisherCount(existing.data) : 0;
 
-      // Skip the cache write if this refresh is degraded (too few publishers)
-      // AND we already have a healthier entry. Don't regress the cache just
-      // because some RSS feeds were slow this round. We still return `stories`
-      // to any in-flight awaiter so they get something rather than nothing.
       const isDegraded = freshPubs < MIN_HEALTHY_PUBLISHERS;
-      const shouldKeepExisting =
-        isDegraded && existing && existingPubs > freshPubs;
+      const shouldKeepExisting = isDegraded && existing && existingPubs > freshPubs;
 
       if (shouldKeepExisting) {
         // eslint-disable-next-line no-console
         console.log(
-          `[prewarm] ${topic} SKIPPED cache write (degraded: ${freshPubs} publishers, ${stories.length} stories) — keeping existing (${existingPubs} publishers, ${existing.data.length} stories)`,
+          `[prewarm] ${topic} SKIPPED cache write (degraded: ${freshPubs} publishers, ${feed.length} items) — keeping existing (${existingPubs} publishers, ${existing.data.length} items)`,
         );
       } else {
-        // Use a CONTENT fingerprint (not StoryCard.id, which is Date.now()-
-        // based and therefore changes every refresh) to detect new clusters.
-        // Without this, every prewarm cycle would treat all stories as new
-        // and spam users with push notifications.
-        const previousFps = new Set(
-          (existing?.data ?? []).map(clusterFingerprint),
-        );
-        cache.set(topic, { at: Date.now(), data: stories });
+        const repCards = feedToRepCards(existing?.data ?? []);
+        const previousFps = new Set(repCards.map(clusterFingerprint));
+        cache.set(topic, { at: Date.now(), data: feed });
         persistFeedCache();
         // eslint-disable-next-line no-console
         console.log(
-          `[prewarm] ${topic} refreshed in ${Date.now() - started}ms (${stories.length} stories, ${freshPubs} publishers${isDegraded ? " — DEGRADED but accepted (no prior cache)" : ""})`,
+          `[prewarm] ${topic} refreshed in ${Date.now() - started}ms (${feed.length} items, ${freshPubs} publishers${isDegraded ? " — DEGRADED but accepted (no prior cache)" : ""})`,
         );
-        // Fire-and-forget push notifications for new clusters. Skip on the
-        // very first prewarm (no `existing`) to avoid pushing the entire
-        // initial feed at boot.
         if (existing) {
-          notifyOnNewClusters(stories, previousFps).catch(() => {});
+          notifyOnNewClusters(feedToRepCards(feed), previousFps).catch(() => {});
         }
       }
-      return stories;
+      return feed;
     })
     .catch((err) => {
       log.warn({ err, topic }, "background refresh failed");
-      return [] as StoryCard[];
+      return [] as FeedItem[];
     })
     .finally(() => {
       inflightFeed.delete(topic);
@@ -1608,44 +1750,27 @@ router.get("/debug/sources", async (_req, res) => {
 router.get("/feed", async (req, res) => {
   const topic = String(req.query["topic"] ?? "top").toLowerCase();
   const refresh = req.query["refresh"] === "1";
-  // force=1: synchronous rebuild — waits for fresh data (used by pull-to-refresh)
   const force = req.query["force"] === "1";
-  const sourceFilter =
-    typeof req.query["source"] === "string" && req.query["source"].length > 0
-      ? String(req.query["source"]).toLowerCase()
-      : null;
-  const page = Math.max(1, parseInt(String(req.query["page"] ?? "1"), 10) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(String(req.query["limit"] ?? "20"), 10) || 20));
-  const offset = (page - 1) * limit;
 
   const cached = cache.get(topic);
   const isFresh = cached && Date.now() - cached.at < ttlFor(topic);
 
-  const respond = (
-    stories: StoryCard[],
-    extra: Record<string, unknown> = {},
-  ) => {
-    let result = sourceFilter ? filterStoriesBySource(stories, sourceFilter) : stories;
-    const total = result.length;
-    result = result.slice(offset, offset + limit);
-    res.json({ stories: result, total, page, limit, ...extra });
+  const respond = (feed: FeedItem[], extra: Record<string, unknown> = {}) => {
+    res.json({ feed, ...extra });
   };
 
-  // Force-refresh: synchronous rebuild so pull-to-refresh always returns new data.
-  // Fall back to stale cache if build exceeds timeout or fails.
   if (force) {
     try {
       const buildTimeout = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("build timeout")), 12_000),
       );
-      const stories = await Promise.race([buildFreshFeed(topic), buildTimeout]);
-      if (stories.length > 0) {
-        cache.set(topic, { at: Date.now(), data: stories });
+      const feed = await Promise.race([buildFreshFeed(topic), buildTimeout]);
+      if (feed.length > 0) {
+        cache.set(topic, { at: Date.now(), data: feed });
         persistFeedCache();
       }
-      respond(stories.length > 0 ? stories : (cached?.data ?? []), { cached: false, forced: true });
+      respond(feed.length > 0 ? feed : (cached?.data ?? []), { cached: false, forced: true });
     } catch {
-      // Timeout — return best available data and queue background refresh
       if (cached) {
         refreshInBackground(topic, req.log);
         respond(cached.data, { cached: true, stale: true });
@@ -1656,28 +1781,23 @@ router.get("/feed", async (req, res) => {
     return;
   }
 
-  // Fast path: return cached data if fresh.
   if (!refresh && isFresh) {
     respond(cached.data, { cached: true });
     return;
   }
 
-  // Stale-while-revalidate: if cache is stale, return what we have immediately
-  // and refetch in the background. The next request will see the fresh data.
   if (cached) {
     refreshInBackground(topic, req.log);
     respond(cached.data, { cached: true, stale: true });
     return;
   }
 
-  // Cold path (no cache at all): user has to wait for the first build.
-  // De-dupe concurrent first-time fetches with inflightFeed.
   let p = inflightFeed.get(topic);
   if (!p) {
     p = buildFreshFeed(topic)
-      .then((stories) => {
-        cache.set(topic, { at: Date.now(), data: stories });
-        return stories;
+      .then((feed) => {
+        cache.set(topic, { at: Date.now(), data: feed });
+        return feed;
       })
       .finally(() => {
         inflightFeed.delete(topic);
@@ -1685,8 +1805,8 @@ router.get("/feed", async (req, res) => {
     inflightFeed.set(topic, p);
   }
   try {
-    const stories = await p;
-    respond(stories, { cached: false, source: "ai" });
+    const feed = await p;
+    respond(feed, { cached: false });
   } catch (err) {
     req.log.error({ err }, "feed cold fetch failed");
     res.status(502).json({

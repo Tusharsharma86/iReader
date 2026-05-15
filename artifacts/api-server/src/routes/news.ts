@@ -158,14 +158,15 @@ const TECH_RSS_SOURCES: RssSource[] = [
 // IE / News18 / Firstpost / MoneyControl all return HTTP 403 from Render's
 // datacenter IP range. Use feedburner-hosted or CDN-backed alternatives.
 const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "ndtv-india",   name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-india-news" },
-  { id: "ndtv-latest",  name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-latest" },
-  { id: "indiatoday",   name: "India Today",      url: "https://www.indiatoday.in/rss/home" },
-  { id: "theprint-ind", name: "The Print",        url: "https://theprint.in/category/india/feed/" },
-  { id: "theprint-pol", name: "The Print",        url: "https://theprint.in/category/politics/feed/" },
-  { id: "thequint-ind", name: "The Quint",        url: "https://feeds.feedburner.com/thequint" },
-  { id: "cnbctv18-ind", name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/india.xml" },
-  { id: "scrollin",     name: "Scroll.in",        url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
+  { id: "ndtv-india",       name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-india-news" },
+  { id: "ndtv-latest",      name: "NDTV",             url: "https://feeds.feedburner.com/ndtvnews-latest" },
+  { id: "indiatoday",       name: "India Today",      url: "https://www.indiatoday.in/rss/home" },
+  { id: "indianexpress",    name: "Indian Express",   url: "https://indianexpress.com/feed/" },
+  { id: "theprint-ind",     name: "The Print",        url: "https://theprint.in/category/india/feed/" },
+  { id: "theprint-pol",     name: "The Print",        url: "https://theprint.in/category/politics/feed/" },
+  { id: "thequint-ind",     name: "The Quint",        url: "https://feeds.feedburner.com/thequint" },
+  { id: "cnbctv18-ind",     name: "CNBC TV18",        url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/india.xml" },
+  { id: "scrollin",         name: "Scroll.in",        url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
 ];
 
 const MARKETS_RSS_SOURCES: RssSource[] = [

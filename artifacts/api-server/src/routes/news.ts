@@ -187,7 +187,9 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "aljazeera",    name: "Al Jazeera",  url: "https://www.aljazeera.com/xml/rss/all.xml" },
   { id: "nyt-world",    name: "NYT World",   url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
   { id: "npr-world",    name: "NPR World",   url: "https://feeds.npr.org/1004/rss.xml" },
-  { id: "theprint-wld", name: "The Print",   url: "https://theprint.in/category/world/feed/" },
+  { id: "theprint-wld", name: "The Print",       url: "https://theprint.in/category/world/feed/" },
+  { id: "ht-world",     name: "Hindustan Times", url: "https://www.hindustantimes.com/feeds/rss/world-news/rssfeed.xml" },
+  { id: "toi-world",    name: "Times of India",  url: "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms" },
   // Financial Express 403/dead, IE direct 403
 ];
 

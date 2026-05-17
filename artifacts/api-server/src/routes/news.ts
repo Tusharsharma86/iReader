@@ -167,8 +167,8 @@ const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
   { id: "thequint-ind", name: "The Quint",   url: "https://feeds.feedburner.com/thequint" },
   { id: "cnbctv18-ind", name: "CNBC TV18",   url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/india.xml" },
   { id: "scrollin",     name: "Scroll.in",   url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
-  { id: "ani-national", name: "ANI",         url: "https://www.aninews.in/rss/feed/category/national.xml" },
-  { id: "ani-politics", name: "ANI",         url: "https://www.aninews.in/rss/feed/category/national/politics.xml" },
+  { id: "thehindu-nat", name: "The Hindu",        url: "https://www.thehindu.com/news/national/feeder/default.rss" },
+  { id: "toi-india",    name: "Times of India",  url: "https://timesofindia.indiatimes.com/rssfeeds/-2128936835.cms" },
 ];
 
 const MARKETS_RSS_SOURCES: RssSource[] = [
@@ -600,8 +600,7 @@ function parseRssFeed(
         : (link || title);
 
       // Normalise date — some Indian sources emit IST without offset; treat as-is
-      // ANI has no <pubDate> on items; fall back to date embedded in URL slug (YYYYMMDDHHMMSS)
-      // then to channel lastBuildDate as last resort.
+      // Fall back to date embedded in URL slug (YYYYMMDDHHMMSS) then channel lastBuildDate.
       let pubDateIso: string | undefined;
       if (pubDate) {
         try { pubDateIso = new Date(pubDate).toISOString(); } catch { /* skip */ }

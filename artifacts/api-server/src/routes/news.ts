@@ -167,8 +167,8 @@ const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
   { id: "thequint-ind", name: "The Quint",   url: "https://feeds.feedburner.com/thequint" },
   { id: "cnbctv18-ind", name: "CNBC TV18",   url: "https://www.cnbctv18.com/commonfeeds/v1/cne/rss/india.xml" },
   { id: "scrollin",     name: "Scroll.in",   url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
-  { id: "thehindu-nat", name: "The Hindu",        url: "https://www.thehindu.com/news/national/feeder/default.rss" },
-  { id: "toi-india",    name: "Times of India",  url: "https://timesofindia.indiatimes.com/rssfeeds/-2128936835.cms" },
+  { id: "ht-india",     name: "Hindustan Times",  url: "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml" },
+  { id: "toi-india",   name: "Times of India",   url: "https://timesofindia.indiatimes.com/rssfeeds/-2128936835.cms" },
 ];
 
 const MARKETS_RSS_SOURCES: RssSource[] = [

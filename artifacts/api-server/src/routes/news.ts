@@ -538,6 +538,7 @@ function parseRssFeed(
   // RSS 2.0
   const rss = parsed["rss"] as { channel?: Record<string, unknown> } | undefined;
   if (rss?.channel) {
+    const channelBuildDate = pickText(rss.channel["lastBuildDate"]);
     const items = asArray(rss.channel["item"] as unknown);
     return items.map((raw) => {
       const item = raw as Record<string, unknown>;
@@ -599,9 +600,22 @@ function parseRssFeed(
         : (link || title);
 
       // Normalise date — some Indian sources emit IST without offset; treat as-is
+      // ANI has no <pubDate> on items; fall back to date embedded in URL slug (YYYYMMDDHHMMSS)
+      // then to channel lastBuildDate as last resort.
       let pubDateIso: string | undefined;
       if (pubDate) {
         try { pubDateIso = new Date(pubDate).toISOString(); } catch { /* skip */ }
+      }
+      if (!pubDateIso && link) {
+        const m = link.match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+        if (m) {
+          try {
+            pubDateIso = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}+05:30`).toISOString();
+          } catch { /* skip */ }
+        }
+      }
+      if (!pubDateIso && channelBuildDate) {
+        try { pubDateIso = new Date(channelBuildDate).toISOString(); } catch { /* skip */ }
       }
 
       return {

@@ -4,6 +4,7 @@ import { XMLParser } from "fast-xml-parser";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { cleanArticleParagraphs } from "../lib/articleCleaner";
 
 const router: IRouter = Router();
 
@@ -2205,6 +2206,13 @@ async function getOrFetchArticle(url: string): Promise<ArticleResult> {
       // Only cache successful extractions so a transient block doesn't pin a
       // bad result for the full TTL window.
       if ((data.paragraphs?.length ?? 0) > 0) {
+        // Apply non-AI cleaning pipeline; fall back to raw on any error.
+        try {
+          const { paragraphs: cleaned, originalParagraphs } = cleanArticleParagraphs(data.paragraphs);
+          data = { ...data, paragraphs: cleaned, originalParagraphs, deduped: true };
+        } catch (_) {
+          // cleaning failed — serve raw
+        }
         articleCache.set(url, { at: Date.now(), data });
         trimArticleCacheIfNeeded();
         // Persist asynchronously; ignore errors.
@@ -2239,12 +2247,12 @@ router.get("/article", async (req, res) => {
       res.status(502).json({ error: "Couldn't extract article body" });
       return;
     }
-    // No AI dedup — return raw extraction. paragraphs and originalParagraphs
-    // are the same; keeping both fields for backwards compat with older clients.
     res.json({
       ...data,
-      originalParagraphs: data.paragraphs,
-      deduped: false,
+      // originalParagraphs is set by the cleaning pipeline; fall back to
+      // paragraphs for backwards compat with older cache entries.
+      originalParagraphs: data.originalParagraphs ?? data.paragraphs,
+      deduped: data.deduped ?? false,
       cached: true,
     });
   } catch (err) {

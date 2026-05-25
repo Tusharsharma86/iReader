@@ -2599,7 +2599,6 @@ Respond with JSON only.`;
 
     if (!response.ok) throw new Error(`Claude API ${response.status}`);
     const data = await response.json() as { content: Array<{ type: string; text: string }>; usage?: any };
-    logClaudeUsage({ model: "claude-haiku-4-5-20251001", usage: data.usage, feature: "deepdive" });
     const raw = data.content.find(c => c.type === "text")?.text ?? "{}";
 
     let parsed: Partial<DeepDiveResult> = {};

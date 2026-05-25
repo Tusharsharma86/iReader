@@ -2518,4 +2518,57 @@ router.get("/image", async (req, res) => {
   }
 });
 
+// ── Usage / cost proxy ──────────────────────────────────────────────────────
+// GET /api/news/usage?range=mtd|7d|30d
+// Hits the api-usage-dashboard internal /api/usage (with shared LOG_SECRET) and
+// returns a sanitized summary safe to expose to clients. Never leaks the token.
+router.get("/usage", async (req, res) => {
+  const url = process.env["USAGE_DASHBOARD_URL"];
+  const token = process.env["USAGE_DASHBOARD_TOKEN"];
+  if (!url || !token) {
+    return res.status(503).json({ error: "Usage dashboard not configured" });
+  }
+
+  const range = String(req.query.range ?? "mtd").toLowerCase();
+  const today = new Date();
+  let start = new Date(today);
+  let end = new Date(today);
+  if (range === "7d") {
+    start.setUTCDate(today.getUTCDate() - 6);
+  } else if (range === "30d") {
+    start.setUTCDate(today.getUTCDate() - 29);
+  } else {
+    // "mtd" — first of this month
+    start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), 1));
+  }
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+
+  try {
+    const u = `${url.replace(/\/$/, "")}/api/usage?start=${iso(start)}&end=${iso(end)}`;
+    const upstream = await fetch(u, { headers: { Authorization: `Bearer ${token}` } });
+    if (!upstream.ok) return res.status(502).json({ error: `Dashboard ${upstream.status}` });
+    const data = (await upstream.json()) as {
+      range: { start: string; end: string };
+      days: Array<{ day: string; total: { cost: number; calls: number; inputTokens: number; outputTokens: number } }>;
+      totals: { cost: number; calls: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreateTokens: number };
+      byModel: Record<string, { cost: number; calls: number }>;
+      byFeature: Record<string, { cost: number; calls: number }>;
+      byApp: Record<string, { cost: number; calls: number }>;
+    };
+
+    res.setHeader("Cache-Control", "public, max-age=300"); // 5 min CDN cache
+    res.json({
+      range: { ...data.range, key: range },
+      totals: data.totals,
+      days: data.days.map(d => ({ day: d.day, cost: d.total?.cost ?? 0, calls: d.total?.calls ?? 0 })),
+      byModel: data.byModel,
+      byFeature: data.byFeature,
+      byApp: data.byApp,
+    });
+  } catch (err) {
+    req.log?.warn({ err }, "usage proxy failed");
+    res.status(502).json({ error: "Usage proxy failed" });
+  }
+});
+
 export default router;

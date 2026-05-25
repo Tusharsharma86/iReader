@@ -2518,6 +2518,115 @@ router.get("/image", async (req, res) => {
   }
 });
 
+// ── AI Deep Dive — one-shot structured story understanding ─────────────────
+// POST /api/news/deepdive
+// Body: { url, headline, paragraphs }
+// Returns: { tldr[], narrative, insight, questions[], tags[] } — all in ONE
+// Claude call. Cached aggressively (memory + disk) to keep cost down.
+interface DeepDiveResult {
+  at: number;
+  tldr: string[];
+  narrative: string;
+  insight: string;
+  questions: string[];
+  tags: string[];
+}
+const deepDiveCache = new Map<string, DeepDiveResult>();
+const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+router.post("/deepdive", async (req, res) => {
+  const { url, headline, paragraphs } = req.body as {
+    url?: string;
+    headline?: string;
+    paragraphs?: string[];
+  };
+  if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
+    res.status(400).json({ error: "url and paragraphs required" });
+    return;
+  }
+
+  const cacheKey = `deepdive:${url}`;
+  const hashKey = createHash("md5").update(cacheKey).digest("hex");
+  const diskPath = `/tmp/deepdive-${hashKey}.json`;
+
+  const cached = deepDiveCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < DEEPDIVE_TTL_MS) {
+    res.json({ ...cached, cached: true });
+    return;
+  }
+  const diskCached = safeReadJson<DeepDiveResult>(diskPath);
+  if (diskCached && Date.now() - diskCached.at < DEEPDIVE_TTL_MS) {
+    deepDiveCache.set(cacheKey, diskCached);
+    res.json({ ...diskCached, cached: true });
+    return;
+  }
+
+  const apiKey = process.env["ANTHROPIC_API_KEY"];
+  if (!apiKey) { res.status(502).json({ error: "AI not configured" }); return; }
+
+  try {
+    const text = paragraphs.slice(0, 25).join(" ").slice(0, 3500);
+    const prompt = `You are transforming a raw news article into a structured, AI-native "story understanding" experience. Read the article and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
+
+{
+  "tldr": ["bullet 1", "bullet 2", "bullet 3"],       // 3-5 concise factual bullets, max 18 words each
+  "narrative": "...",                                  // 3-4 short paragraphs (joined by \\n\\n) retelling the story in clear, accessible storytelling voice. Plain text, no markdown. ~180-260 words total.
+  "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
+  "questions": ["...", "...", "..."],                  // 3-4 conversational follow-up questions a curious reader would ask. Each ends with "?"
+  "tags": ["...", "...", "..."]                        // 4-6 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation")
+}
+
+Headline: ${headline ?? "(no headline)"}
+
+Article:
+${text}
+
+Respond with JSON only.`;
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1200,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+
+    if (!response.ok) throw new Error(`Claude API ${response.status}`);
+    const data = await response.json() as { content: Array<{ type: string; text: string }>; usage?: any };
+    logClaudeUsage({ model: "claude-haiku-4-5-20251001", usage: data.usage, feature: "deepdive" });
+    const raw = data.content.find(c => c.type === "text")?.text ?? "{}";
+
+    let parsed: Partial<DeepDiveResult> = {};
+    try { parsed = JSON.parse(raw.replace(/```json|```/g, "").trim()); } catch { /* ignore */ }
+
+    const result: DeepDiveResult = {
+      at: Date.now(),
+      tldr: Array.isArray(parsed.tldr) ? parsed.tldr.slice(0, 6).map(String) : [],
+      narrative: typeof parsed.narrative === "string" ? parsed.narrative : "",
+      insight: typeof parsed.insight === "string" ? parsed.insight : "",
+      questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 5).map(String) : [],
+      tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 8).map(String) : [],
+    };
+
+    if (!result.tldr.length && !result.narrative) {
+      throw new Error("Empty AI response");
+    }
+
+    deepDiveCache.set(cacheKey, result);
+    safeWriteJson(diskPath, result);
+    res.json({ ...result, cached: false });
+  } catch (err) {
+    req.log.error({ err }, "deepdive failed");
+    res.status(502).json({ error: "Deep Dive unavailable" });
+  }
+});
+
 // ── Usage / cost proxy ──────────────────────────────────────────────────────
 // GET /api/news/usage?range=mtd|7d|30d
 // Hits the api-usage-dashboard internal /api/usage (with shared LOG_SECRET) and

@@ -2601,8 +2601,14 @@ Respond with JSON only.`;
     const data = await response.json() as { content: Array<{ type: string; text: string }>; usage?: any };
     const raw = data.content.find(c => c.type === "text")?.text ?? "{}";
 
+    // Forgiving JSON parse — strip code fences, extract first {...} block
     let parsed: Partial<DeepDiveResult> = {};
-    try { parsed = JSON.parse(raw.replace(/```json|```/g, "").trim()); } catch { /* ignore */ }
+    const cleaned = raw.replace(/```json|```/g, "").trim();
+    try { parsed = JSON.parse(cleaned); }
+    catch {
+      const m = cleaned.match(/\{[\s\S]*\}/);
+      if (m) { try { parsed = JSON.parse(m[0]); } catch { /* ignore */ } }
+    }
 
     const result: DeepDiveResult = {
       at: Date.now(),
@@ -2613,16 +2619,19 @@ Respond with JSON only.`;
       tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 8).map(String) : [],
     };
 
-    if (!result.tldr.length && !result.narrative) {
-      throw new Error("Empty AI response");
+    // Return whatever we got — even partial data is useful. Only fail on total emptiness.
+    if (!result.tldr.length && !result.narrative && !result.insight && !result.questions.length) {
+      req.log.error({ raw: raw.slice(0, 500) }, "deepdive: empty parse");
+      res.status(502).json({ error: "AI returned no parseable content", raw: raw.slice(0, 200) });
+      return;
     }
 
     deepDiveCache.set(cacheKey, result);
     safeWriteJson(diskPath, result);
     res.json({ ...result, cached: false });
   } catch (err) {
-    req.log.error({ err }, "deepdive failed");
-    res.status(502).json({ error: "Deep Dive unavailable" });
+    req.log.error({ err: err instanceof Error ? err.message : String(err) }, "deepdive failed");
+    res.status(502).json({ error: "Deep Dive unavailable", detail: err instanceof Error ? err.message : String(err) });
   }
 });
 

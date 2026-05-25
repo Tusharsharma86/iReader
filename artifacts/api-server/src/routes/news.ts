@@ -2583,19 +2583,39 @@ ${text}
 
 Respond with JSON only.`;
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1200,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
+    // Retry once on transient network failure (Render → Anthropic occasionally
+    // throws "fetch failed" with no upstream response). Backs off 800ms before retry.
+    const callClaude = async (): Promise<Response> => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 25000);
+      try {
+        return await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 1200,
+            messages: [{ role: "user", content: prompt }],
+          }),
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(t);
+      }
+    };
+
+    let response: Response;
+    try {
+      response = await callClaude();
+    } catch (firstErr) {
+      req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: claude fetch failed, retrying once");
+      await new Promise(r => setTimeout(r, 800));
+      response = await callClaude();
+    }
 
     if (!response.ok) throw new Error(`Claude API ${response.status}`);
     const data = await response.json() as { content: Array<{ type: string; text: string }>; usage?: any };

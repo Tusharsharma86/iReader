@@ -2530,6 +2530,9 @@ interface DeepDiveResult {
   insight: string;
   questions: string[];
   tags: string[];
+  keyPeople: string[];
+  keyCompanies: string[];
+  topics: string[];
 }
 const deepDiveCache = new Map<string, DeepDiveResult>();
 const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -2572,8 +2575,11 @@ router.post("/deepdive", async (req, res) => {
   "tldr": ["bullet 1", "bullet 2", "bullet 3", "bullet 4", "bullet 5", "bullet 6"],  // 5-7 substantive bullets, 20-30 words each. Cover who/what/when/where, key numbers, named parties, latest development, reactions, and stakes.
   "narrative": "...",                                  // 4-5 short paragraphs (joined by \\n\\n) retelling the story in clear, accessible storytelling voice. Plain text, no markdown. ~220-320 words total. Lead with the most concrete fact.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
-  "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Each ends with "?"
-  "tags": ["...", "...", "..."]                        // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
+  "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
+  "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
+  "keyPeople": ["..."],                                // named individuals mentioned (full names). May be empty if none.
+  "keyCompanies": ["..."],                             // organisations, companies, agencies, political parties. May be empty.
+  "topics": ["..."]                                    // broader topics / themes (e.g. "Monetary Policy", "AI Safety"). 3-6 items.
 }
 
 Headline: ${headline ?? "(no headline)"}
@@ -2637,6 +2643,9 @@ Respond with JSON only.`;
       insight: typeof parsed.insight === "string" ? parsed.insight : "",
       questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 5).map(String) : [],
       tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 8).map(String) : [],
+      keyPeople: Array.isArray(parsed.keyPeople) ? parsed.keyPeople.slice(0, 12).map(String) : [],
+      keyCompanies: Array.isArray(parsed.keyCompanies) ? parsed.keyCompanies.slice(0, 10).map(String) : [],
+      topics: Array.isArray(parsed.topics) ? parsed.topics.slice(0, 8).map(String) : [],
     };
 
     // Return whatever we got — even partial data is useful. Only fail on total emptiness.
@@ -2694,14 +2703,21 @@ router.post("/ask", async (req, res) => {
   if (!apiKey) { res.status(502).json({ error: "AI not configured" }); return; }
 
   const context = [headline, summary, narrative].filter(Boolean).join("\n\n").slice(0, 2500);
-  const prompt = `You are answering a curious reader's follow-up question about a news story. Use only the context provided. If the answer is not in the context, say so briefly and offer what context implies, but do not invent facts.
+  const prompt = `You are a knowledgeable, friendly assistant answering a curious reader's follow-up question. Use the story context below as your primary source, and combine it with your own general knowledge to give a complete, useful answer.
 
-CONTEXT:
+Rules:
+- Lead with what's known from the story.
+- If you draw on general knowledge for background, context, or historical comparisons, add it naturally — don't refuse or hedge needlessly.
+- If the question is broader than the story (e.g. "what happens next?", "how does this compare historically?"), use general knowledge to answer thoughtfully.
+- If you genuinely don't know something specific, say so briefly, then offer the closest useful context.
+- Never invent specific facts (names, dates, numbers) that aren't in the story or well-established public knowledge.
+
+STORY CONTEXT:
 ${context}
 
 QUESTION: ${question}
 
-Answer in 2-4 sentences, ~80 words max. Plain text, no markdown. Be specific and direct.`;
+Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational but precise.`;
 
   try {
     const ctrl = new AbortController();
@@ -2712,7 +2728,7 @@ Answer in 2-4 sentences, ~80 words max. Plain text, no markdown. Be specific and
       headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 400,
+        max_tokens: 600,
         messages: [{ role: "user", content: prompt }],
       }),
       signal: ctrl.signal,

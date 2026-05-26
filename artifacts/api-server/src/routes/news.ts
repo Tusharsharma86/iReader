@@ -2569,11 +2569,11 @@ router.post("/deepdive", async (req, res) => {
     const prompt = `You are transforming a raw news article into a structured, AI-native "story understanding" experience. Read the article and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldr": ["bullet 1", "bullet 2", "bullet 3"],       // 3-5 concise factual bullets, max 18 words each
-  "narrative": "...",                                  // 3-4 short paragraphs (joined by \\n\\n) retelling the story in clear, accessible storytelling voice. Plain text, no markdown. ~180-260 words total.
+  "tldr": ["bullet 1", "bullet 2", "bullet 3", "bullet 4", "bullet 5", "bullet 6"],  // 5-7 substantive bullets, 20-30 words each. Cover who/what/when/where, key numbers, named parties, latest development, reactions, and stakes.
+  "narrative": "...",                                  // 4-5 short paragraphs (joined by \\n\\n) retelling the story in clear, accessible storytelling voice. Plain text, no markdown. ~220-320 words total. Lead with the most concrete fact.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
-  "questions": ["...", "...", "..."],                  // 3-4 conversational follow-up questions a curious reader would ask. Each ends with "?"
-  "tags": ["...", "...", "..."]                        // 4-6 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation")
+  "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Each ends with "?"
+  "tags": ["...", "...", "..."]                        // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
 }
 
 Headline: ${headline ?? "(no headline)"}
@@ -2598,7 +2598,7 @@ Respond with JSON only.`;
           },
           body: JSON.stringify({
             model: "claude-haiku-4-5-20251001",
-            max_tokens: 1200,
+            max_tokens: 1800,
             messages: [{ role: "user", content: prompt }],
           }),
           signal: ctrl.signal,
@@ -2632,7 +2632,7 @@ Respond with JSON only.`;
 
     const result: DeepDiveResult = {
       at: Date.now(),
-      tldr: Array.isArray(parsed.tldr) ? parsed.tldr.slice(0, 6).map(String) : [],
+      tldr: Array.isArray(parsed.tldr) ? parsed.tldr.slice(0, 8).map(String) : [],
       narrative: typeof parsed.narrative === "string" ? parsed.narrative : "",
       insight: typeof parsed.insight === "string" ? parsed.insight : "",
       questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 5).map(String) : [],
@@ -2652,6 +2652,88 @@ Respond with JSON only.`;
   } catch (err) {
     req.log.error({ err: err instanceof Error ? err.message : String(err) }, "deepdive failed");
     res.status(502).json({ error: "Deep Dive unavailable", detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ── Follow-up Q&A — answer a question about a story ────────────────────────
+// POST /api/news/ask
+// Body: { question, headline, summary?, narrative? }
+// Returns: { answer }
+interface AskCacheEntry { at: number; answer: string; }
+const askCache = new Map<string, AskCacheEntry>();
+const ASK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+router.post("/ask", async (req, res) => {
+  const { question, headline, summary, narrative } = req.body as {
+    question?: string;
+    headline?: string;
+    summary?: string;
+    narrative?: string;
+  };
+  if (!question || !headline) {
+    res.status(400).json({ error: "question and headline required" });
+    return;
+  }
+
+  const cacheKey = createHash("md5").update(`${headline}::${question}`).digest("hex");
+  const diskPath = `/tmp/ask-${cacheKey}.json`;
+
+  const cached = askCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < ASK_TTL_MS) {
+    res.json({ answer: cached.answer, cached: true });
+    return;
+  }
+  const diskCached = safeReadJson<AskCacheEntry>(diskPath);
+  if (diskCached && Date.now() - diskCached.at < ASK_TTL_MS) {
+    askCache.set(cacheKey, diskCached);
+    res.json({ answer: diskCached.answer, cached: true });
+    return;
+  }
+
+  const apiKey = process.env["ANTHROPIC_API_KEY"];
+  if (!apiKey) { res.status(502).json({ error: "AI not configured" }); return; }
+
+  const context = [headline, summary, narrative].filter(Boolean).join("\n\n").slice(0, 2500);
+  const prompt = `You are answering a curious reader's follow-up question about a news story. Use only the context provided. If the answer is not in the context, say so briefly and offer what context implies, but do not invent facts.
+
+CONTEXT:
+${context}
+
+QUESTION: ${question}
+
+Answer in 2-4 sentences, ~80 words max. Plain text, no markdown. Be specific and direct.`;
+
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 25000);
+    let response: Response;
+    const callOnce = () => fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 400,
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal: ctrl.signal,
+    });
+    try {
+      try { response = await callOnce(); }
+      catch { await new Promise(r => setTimeout(r, 600)); response = await callOnce(); }
+    } finally { clearTimeout(t); }
+
+    if (!response.ok) throw new Error(`Claude API ${response.status}`);
+    const data = await response.json() as { content: Array<{ type: string; text: string }> };
+    const answer = (data.content.find(c => c.type === "text")?.text ?? "").trim();
+    if (!answer) throw new Error("Empty answer");
+
+    const entry: AskCacheEntry = { at: Date.now(), answer };
+    askCache.set(cacheKey, entry);
+    safeWriteJson(diskPath, entry);
+    res.json({ answer, cached: false });
+  } catch (err) {
+    req.log.error({ err: err instanceof Error ? err.message : String(err) }, "ask failed");
+    res.status(502).json({ error: "Q&A unavailable", detail: err instanceof Error ? err.message : String(err) });
   }
 });
 

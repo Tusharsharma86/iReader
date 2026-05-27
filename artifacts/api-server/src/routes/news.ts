@@ -1656,6 +1656,12 @@ async function notifyOnNewClusters(
   const topicSubs = allPrefs
     .filter((p) => p.topicsEnabled && p.topicsKeywords.length > 0)
     .map((p) => ({ token: p.token, kws: p.topicsKeywords }));
+  const favSourceSubs = allPrefs
+    .filter((p) => p.favSourcesEnabled && p.favSources.length > 0)
+    .map((p) => ({
+      token: p.token,
+      srcs: p.favSources.map((s: string) => s.toLowerCase()),
+    }));
 
   for (const { s: cluster, fp } of newClusters) {
     const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 3;
@@ -1683,6 +1689,28 @@ async function notifyOnNewClusters(
           body: cluster.headline,
           data: { kind: "topic", clusterId: cluster.id, fp },
         });
+      }
+    }
+
+    // D) Fav-source: any source name in the cluster matches a user's list.
+    if (favSourceSubs.length > 0) {
+      const clusterSrcs = (cluster.sources ?? [])
+        .map((s: { name?: string }) => (s.name ?? "").toLowerCase())
+        .filter(Boolean);
+      if (clusterSrcs.length > 0) {
+        const matched: string[] = [];
+        for (const sub of favSourceSubs) {
+          if (sub.srcs.some((src: string) => clusterSrcs.includes(src)))
+            matched.push(sub.token);
+        }
+        if (matched.length > 0) {
+          const primarySource = (cluster.sources?.[0]?.name as string) ?? "Source";
+          await sendPushToTokens(matched, {
+            title: primarySource,
+            body: cluster.headline,
+            data: { kind: "fav-source", clusterId: cluster.id, fp },
+          });
+        }
       }
     }
 

@@ -25,6 +25,9 @@ export const notificationPrefsTable = pgTable("notification_prefs", {
   breakingEnabled: boolean("breaking_enabled").notNull().default(false),
   topicsEnabled: boolean("topics_enabled").notNull().default(false),
   topicsKeywords: text("topics_keywords").array().notNull().default([]),
+  favSourcesEnabled: boolean("fav_sources_enabled").notNull().default(false),
+  favSources: text("fav_sources").array().notNull().default([]),
+  lastDigestSentAt: timestamp("last_digest_sent_at", { withTimezone: true }),
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

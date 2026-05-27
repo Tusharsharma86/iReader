@@ -87,6 +87,8 @@ router.post("/preferences", async (req, res) => {
         breakingEnabled?: boolean;
         topicsEnabled?: boolean;
         topicsKeywords?: string[];
+        favSourcesEnabled?: boolean;
+        favSources?: string[];
       }
     | undefined;
   const token = body?.token;
@@ -121,6 +123,14 @@ router.post("/preferences", async (req, res) => {
       .map((k) => k.trim().toLowerCase())
       .filter((k) => k.length > 0)
       .slice(0, 30);
+  if (typeof body?.favSourcesEnabled === "boolean")
+    update["favSourcesEnabled"] = body.favSourcesEnabled;
+  if (Array.isArray(body?.favSources))
+    update["favSources"] = body.favSources
+      .filter((s): s is string => typeof s === "string")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .slice(0, 50);
 
   try {
     // Upsert: insert with defaults if missing, otherwise update.
@@ -161,6 +171,70 @@ router.get("/preferences", async (req, res) => {
   } catch (err) {
     req.log.error({ err }, "push preferences fetch failed");
     res.status(500).json({ error: "fetch failed" });
+  }
+});
+
+// ── Daily digest tick ──────────────────────────────────────────────────────
+// Cron hits this every ~15 min. Endpoint finds users whose digestHour matches
+// the current UTC hour AND who haven't been sent a digest in the last 23h.
+// Sends them a push with today's top breaking headline.
+router.post("/digest-tick", async (_req, res) => {
+  try {
+    const now = new Date();
+    const hourNow = now.getUTCHours();
+    const minuteNow = now.getUTCMinutes();
+    const cutoff = new Date(now.getTime() - 23 * 60 * 60 * 1000);
+
+    const allPrefs = await db.select().from(notificationPrefsTable);
+    const due = allPrefs.filter(
+      (p) =>
+        p.digestEnabled &&
+        p.digestHour === hourNow &&
+        // Fire if scheduled minute is within the previous 15 min (cron window).
+        Math.abs(p.digestMinute - minuteNow) <= 15 &&
+        (!p.lastDigestSentAt || new Date(p.lastDigestSentAt) < cutoff),
+    );
+    if (due.length === 0) {
+      res.json({ ok: true, sent: 0 });
+      return;
+    }
+
+    // Pull top breaking story for the digest body.
+    const feedRes = await fetch(
+      "https://ireader.onrender.com/api/news/feed?topic=breaking",
+    );
+    const feed = (await feedRes.json()) as Array<{
+      type?: string;
+      articles?: { headline: string }[];
+      headline?: string;
+    }>;
+    const top = feed?.[0];
+    const headline =
+      (top?.type === "cluster" ? top.articles?.[0]?.headline : top?.headline) ??
+      "Today's top stories";
+
+    const { sendPushToTokens } = await import("../lib/push-sender");
+    await sendPushToTokens(
+      due.map((p) => p.token),
+      {
+        title: "📰 Daily Digest",
+        body: headline,
+        data: { kind: "digest" },
+      },
+    );
+
+    // Mark sent so we don't re-fire within 23h.
+    for (const p of due) {
+      await db
+        .update(notificationPrefsTable)
+        .set({ lastDigestSentAt: sql`now()` })
+        .where(eq(notificationPrefsTable.token, p.token));
+    }
+    res.json({ ok: true, sent: due.length });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("digest-tick failed", err);
+    res.status(500).json({ error: "digest failed" });
   }
 });
 

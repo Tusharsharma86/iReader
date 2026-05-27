@@ -171,6 +171,7 @@ export function StoryCardView({
           {
             borderRadius: colors.radius,
             backgroundColor: surfaceColor,
+            borderColor: "rgba(255,255,255,0.12)",
             opacity: pressed && Platform.OS === "ios" ? 0.92 : 1,
           },
         ]}
@@ -259,8 +260,11 @@ export function StoryCardView({
                     styles.modeChip,
                     {
                       backgroundColor: active
-                        ? "#FFFFFF"
-                        : "rgba(255,255,255,0.10)",
+                        ? accentText
+                        : "rgba(255,255,255,0.075)",
+                      borderColor: active
+                        ? accentText
+                        : "rgba(255,255,255,0.12)",
                       opacity: pressed ? 0.7 : 1,
                     },
                   ]}
@@ -269,7 +273,7 @@ export function StoryCardView({
                     style={[
                       styles.modeText,
                       {
-                        color: active ? "#0A0A0A" : "rgba(255,255,255,0.85)",
+                        color: active ? "#090B0D" : "rgba(255,255,255,0.82)",
                       },
                     ]}
                   >
@@ -482,18 +486,19 @@ function SourcesList({
 
 const styles = StyleSheet.create({
   cardShadow: {
-    marginBottom: 16,
-    shadowOffset: { width: 0, height: 14 },
-    shadowOpacity: 0.45,
-    shadowRadius: 28,
-    elevation: 12,
+    marginBottom: 18,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.32,
+    shadowRadius: 24,
+    elevation: 9,
   },
   card: {
     overflow: "hidden",
+    borderWidth: StyleSheet.hairlineWidth,
   },
   imageWrap: {
     width: "100%",
-    aspectRatio: 16 / 9,
+    aspectRatio: 21 / 11,
     backgroundColor: "rgba(0,0,0,0.3)",
   },
   image: { width: "100%", height: "100%" },
@@ -507,7 +512,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 999,
-    backgroundColor: "rgba(0,0,0,0.45)",
+    backgroundColor: "rgba(0,0,0,0.38)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.28)",
   },
   categoryPillStandalone: {
     alignSelf: "flex-start",
@@ -520,14 +527,13 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontFamily: "Inter_600SemiBold",
     fontSize: 10,
-    letterSpacing: 1.2,
+    letterSpacing: 1,
   },
-  body: { padding: 18, gap: 14 },
+  body: { padding: 18, gap: 13 },
   headline: {
     fontFamily: "Inter_700Bold",
-    fontSize: 22,
-    lineHeight: 28,
-    letterSpacing: -0.4,
+    fontSize: 21,
+    lineHeight: 27,
     color: "#FFFFFF",
   },
   metaRow: {
@@ -550,7 +556,7 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_500Medium",
     fontSize: 13,
     lineHeight: 19,
-    color: "rgba(255,255,255,0.72)",
+    color: "rgba(255,255,255,0.68)",
     marginTop: 2,
   },
   modeRow: { flexDirection: "row", gap: 8, flexWrap: "wrap" },
@@ -558,6 +564,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 7,
     borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   modeText: { fontFamily: "Inter_600SemiBold", fontSize: 12 },
   summaryWrap: { marginTop: 2 },
@@ -594,8 +601,10 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    padding: 8,
+    padding: 9,
     borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.08)",
   },
   sourceThumbWrap: {
     width: 44,

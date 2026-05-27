@@ -487,7 +487,6 @@ const styles = StyleSheet.create({
   brandText: {
     fontFamily: "Inter_700Bold",
     fontSize: 26,
-    letterSpacing: -0.4,
     textShadowOffset: { width: 0, height: 2 },
     textShadowRadius: 16,
   },
@@ -516,7 +515,6 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_700Bold",
     fontSize: 26,
     lineHeight: 32,
-    letterSpacing: -0.5,
   },
   dek: {
     paddingHorizontal: 22,

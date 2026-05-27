@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { getColors } from "react-native-image-colors";
 
 export type Tint = {
   dominant: string;
@@ -9,43 +8,20 @@ export type Tint = {
 const FALLBACK: Tint = { dominant: "#1A1A1A", vibrant: "#3A3A3A" };
 const cache = new Map<string, Tint>();
 
-function isValidHex(value: unknown): value is string {
-  return (
-    typeof value === "string" && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(value)
-  );
-}
+const TINTS: Tint[] = [
+  { dominant: "#1F363D", vibrant: "#5DD9C1" },
+  { dominant: "#2E2B45", vibrant: "#8EA7FF" },
+  { dominant: "#3A3020", vibrant: "#E8C36A" },
+  { dominant: "#253A2E", vibrant: "#55D08A" },
+  { dominant: "#3B252B", vibrant: "#FF8A8A" },
+];
 
-function pickColors(result: Awaited<ReturnType<typeof getColors>>): Tint {
-  let dominant: string | undefined;
-  let vibrant: string | undefined;
-
-  if (result.platform === "android") {
-    dominant = result.dominant ?? result.average ?? result.muted;
-    vibrant = result.vibrant ?? result.darkVibrant ?? result.lightVibrant;
-  } else if (result.platform === "ios") {
-    dominant = result.background ?? result.primary;
-    vibrant = result.detail ?? result.secondary ?? result.primary;
-  } else {
-    dominant =
-      result.dominant ??
-      result.darkMuted ??
-      result.muted ??
-      result.darkVibrant;
-    vibrant =
-      result.vibrant ??
-      result.lightVibrant ??
-      result.darkVibrant ??
-      result.muted;
+function tintFromKey(key: string): Tint {
+  let hash = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
   }
-
-  return {
-    dominant: isValidHex(dominant) ? dominant : FALLBACK.dominant,
-    vibrant: isValidHex(vibrant)
-      ? vibrant
-      : isValidHex(dominant)
-        ? dominant
-        : FALLBACK.vibrant,
-  };
+  return TINTS[hash % TINTS.length] ?? FALLBACK;
 }
 
 export function useImageTint(imageUrl: string | null | undefined): Tint {
@@ -55,7 +31,6 @@ export function useImageTint(imageUrl: string | null | undefined): Tint {
   });
 
   useEffect(() => {
-    let cancelled = false;
     if (!imageUrl) {
       setTint(FALLBACK);
       return;
@@ -66,25 +41,9 @@ export function useImageTint(imageUrl: string | null | undefined): Tint {
       return;
     }
 
-    getColors(imageUrl, {
-      fallback: "#1A1A1A",
-      cache: true,
-      key: imageUrl,
-      quality: "low",
-    })
-      .then((result) => {
-        if (cancelled) return;
-        const picked = pickColors(result);
-        cache.set(imageUrl, picked);
-        setTint(picked);
-      })
-      .catch(() => {
-        // ignore — keep fallback
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    const picked = tintFromKey(imageUrl);
+    cache.set(imageUrl, picked);
+    setTint(picked);
   }, [imageUrl]);
 
   return tint;

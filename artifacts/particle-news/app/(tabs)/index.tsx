@@ -56,6 +56,14 @@ export default function ForYouScreen() {
         ListHeaderComponent={
           <View>
             <View style={styles.gearRow}>
+              <View>
+                <Text style={[styles.brand, { color: colors.foreground }]}>
+                  iReader Pro
+                </Text>
+                <Text style={[styles.brandSub, { color: colors.mutedForeground }]}>
+                  Signal first, noise last
+                </Text>
+              </View>
               <Pressable
                 onPress={() => router.push("/settings" as never)}
                 hitSlop={12}
@@ -73,10 +81,17 @@ export default function ForYouScreen() {
               </Pressable>
             </View>
             <ScreenHeader
-              eyebrow="Today"
+              eyebrow="Today's brief"
               title="For You"
-              subtitle="High-density news, clustered and stripped of fluff."
+              subtitle="Clustered technology stories with source context, quick modes, and original reads."
             />
+            <View style={[styles.briefCard, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+              <Metric value={stories.length || "—"} label="clusters" />
+              <View style={[styles.metricDivider, { backgroundColor: colors.cardBorder }]} />
+              <Metric value="3" label="summary modes" />
+              <View style={[styles.metricDivider, { backgroundColor: colors.cardBorder }]} />
+              <Metric value="live" label="feed status" accent />
+            </View>
           </View>
         }
         ListEmptyComponent={
@@ -174,17 +189,56 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   gearRow: {
     flexDirection: "row",
-    justifyContent: "flex-end",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 20,
-    paddingTop: 4,
+    paddingTop: 8,
+    paddingBottom: 8,
+  },
+  brand: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 16,
+  },
+  brandSub: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 11,
+    marginTop: 2,
   },
   gearBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
+    width: 38,
+    height: 38,
+    borderRadius: 14,
     borderWidth: 1,
     alignItems: "center",
     justifyContent: "center",
+  },
+  briefCard: {
+    marginHorizontal: 20,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderRadius: 18,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  metric: { flex: 1 },
+  metricValue: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 18,
+    textTransform: "uppercase",
+  },
+  metricLabel: {
+    fontFamily: "Inter_600SemiBold",
+    fontSize: 10,
+    marginTop: 3,
+    textTransform: "uppercase",
+    letterSpacing: 1,
+  },
+  metricDivider: {
+    width: StyleSheet.hairlineWidth,
+    height: 30,
+    marginHorizontal: 12,
   },
   empty: {
     alignItems: "center",
@@ -212,3 +266,25 @@ const styles = StyleSheet.create({
   },
   retryText: { fontFamily: "Inter_600SemiBold", fontSize: 13 },
 });
+
+function Metric({
+  value,
+  label,
+  accent,
+}: {
+  value: string | number;
+  label: string;
+  accent?: boolean;
+}) {
+  const colors = useColors();
+  return (
+    <View style={styles.metric}>
+      <Text style={[styles.metricValue, { color: accent ? colors.primary : colors.foreground }]}>
+        {value}
+      </Text>
+      <Text style={[styles.metricLabel, { color: colors.mutedForeground }]}>
+        {label}
+      </Text>
+    </View>
+  );
+}

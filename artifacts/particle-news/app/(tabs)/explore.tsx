@@ -70,10 +70,27 @@ export default function ExploreScreen() {
         ListHeaderComponent={
           <View>
             <ScreenHeader
-              eyebrow="Discover"
+              eyebrow="Publisher lens"
               title="Explore"
-              subtitle="Browse by publisher. Same clustering, focused source."
+              subtitle="Filter the same briefing by publisher and compare the shape of coverage."
             />
+            <View style={[styles.sourcePanel, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+              <View style={styles.sourcePanelCopy}>
+                <Text style={[styles.sourcePanelTitle, { color: colors.foreground }]}>
+                  Source focus
+                </Text>
+                <Text style={[styles.sourcePanelText, { color: colors.mutedForeground }]}>
+                  {sourceId === ALL_SOURCE.id
+                    ? "Showing all publishers in one scan."
+                    : `Filtered to ${sources.find((s) => s.id === sourceId)?.name ?? "selected source"}.`}
+                </Text>
+              </View>
+              <View style={[styles.sourceCount, { backgroundColor: colors.surfaceElevated }]}>
+                <Text style={[styles.sourceCountText, { color: colors.primary }]}>
+                  {sources.length}
+                </Text>
+              </View>
+            </View>
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
@@ -194,8 +211,8 @@ const styles = StyleSheet.create({
   topicsRow: {
     paddingHorizontal: 20,
     gap: 8,
-    paddingTop: 8,
-    paddingBottom: 4,
+    paddingTop: 4,
+    paddingBottom: 12,
   },
   topicChip: {
     flexDirection: "row",
@@ -207,6 +224,37 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   topicText: { fontFamily: "Inter_600SemiBold", fontSize: 13 },
+  sourcePanel: {
+    marginHorizontal: 20,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 16,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 16,
+  },
+  sourcePanelCopy: { flex: 1, gap: 4 },
+  sourcePanelTitle: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 16,
+  },
+  sourcePanelText: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  sourceCount: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  sourceCountText: {
+    fontFamily: "Inter_700Bold",
+    fontSize: 16,
+  },
   empty: {
     alignItems: "center",
     paddingHorizontal: 32,

@@ -13,11 +13,14 @@ export function ScreenHeader({ eyebrow, title, subtitle }: Props) {
   const colors = useColors();
   return (
     <View style={styles.wrap}>
-      {eyebrow ? (
-        <Text style={[styles.eyebrow, { color: colors.primary }]}>
-          {eyebrow}
-        </Text>
-      ) : null}
+      <View style={styles.kickerRow}>
+        <View style={[styles.kickerRule, { backgroundColor: colors.primary }]} />
+        {eyebrow ? (
+          <Text style={[styles.eyebrow, { color: colors.primary }]}>
+            {eyebrow}
+          </Text>
+        ) : null}
+      </View>
       <Text style={[styles.title, { color: colors.foreground }]}>{title}</Text>
       {subtitle ? (
         <Text style={[styles.subtitle, { color: colors.mutedForeground }]}>
@@ -29,18 +32,28 @@ export function ScreenHeader({ eyebrow, title, subtitle }: Props) {
 }
 
 const styles = StyleSheet.create({
-  wrap: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 14, gap: 4 },
+  wrap: { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 18, gap: 6 },
+  kickerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    minHeight: 14,
+  },
+  kickerRule: {
+    width: 22,
+    height: 2,
+    borderRadius: 2,
+  },
   eyebrow: {
     fontFamily: "Inter_600SemiBold",
     fontSize: 11,
-    letterSpacing: 2,
+    letterSpacing: 1.8,
     textTransform: "uppercase",
   },
   title: {
     fontFamily: "Inter_700Bold",
-    fontSize: 32,
-    letterSpacing: -0.8,
-    lineHeight: 38,
+    fontSize: 36,
+    lineHeight: 41,
   },
   subtitle: {
     fontFamily: "Inter_500Medium",

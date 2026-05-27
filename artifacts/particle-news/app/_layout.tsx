@@ -20,7 +20,7 @@ import { NotificationsProvider } from "@/contexts/NotificationsContext";
 import { SavedProvider } from "@/contexts/SavedContext";
 
 SplashScreen.preventAutoHideAsync();
-SystemUI.setBackgroundColorAsync("#0A0A0A").catch(() => {});
+SystemUI.setBackgroundColorAsync("#090B0D").catch(() => {});
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -37,7 +37,7 @@ function RootLayoutNav() {
     <Stack
       screenOptions={{
         headerShown: false,
-        contentStyle: { backgroundColor: "#0A0A0A" },
+        contentStyle: { backgroundColor: "#090B0D" },
       }}
     >
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
@@ -47,7 +47,7 @@ function RootLayoutNav() {
           headerShown: false,
           presentation: "modal",
           animation: "slide_from_bottom",
-          contentStyle: { backgroundColor: "#0A0A0A" },
+          contentStyle: { backgroundColor: "#090B0D" },
         }}
       />
       <Stack.Screen
@@ -56,7 +56,7 @@ function RootLayoutNav() {
           headerShown: false,
           presentation: "modal",
           animation: "slide_from_bottom",
-          contentStyle: { backgroundColor: "#0A0A0A" },
+          contentStyle: { backgroundColor: "#090B0D" },
         }}
       />
     </Stack>
@@ -85,7 +85,7 @@ export default function RootLayout() {
         <QueryClientProvider client={queryClient}>
           <SavedProvider>
             <NotificationsProvider>
-              <GestureHandlerRootView style={{ flex: 1, backgroundColor: "#0A0A0A" }}>
+              <GestureHandlerRootView style={{ flex: 1, backgroundColor: "#090B0D" }}>
                 <KeyboardProvider>
                   <StatusBar style="light" />
                   <RootLayoutNav />

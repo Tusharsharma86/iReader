@@ -1,0 +1,108 @@
+Build and refactor my existing "iReader News App" with a strong focus on ultra-low cost AI usage, while maintaining a clean, modern UX inspired by Particle News.
+
+🎯 Core Objective
+
+Minimize daily cost to near $0 while preserving a high-quality user experience. AI should be used only where it adds real value, not for basic functionality.
+
+💰 Cost Constraints (CRITICAL)
+The app must cost $0 when idle (no background jobs, no prewarming)
+Cost per active day (10–20 articles read) should be near $0 or a few cents max
+Avoid repeated or unnecessary AI calls
+Prefer deterministic / rule-based logic over AI wherever possible
+Cache aggressively to avoid recomputation
+🧱 Architecture Changes
+1. ❌ Remove Prewarming Completely
+No background cron jobs
+No automatic refresh
+Only fetch/update when:
+User pulls to refresh
+User opens app (optional)
+2. 🧊 Implement Strong Caching Layer
+Cache feed + summaries in DB or memory (TTL: 6–24 hours)
+If data exists → return cached version (no AI call)
+Cache key = article hash (title + URL)
+3. 🧠 Remove Unnecessary AI Usage
+A. Summaries
+Do NOT generate AI summaries by default
+Use:
+RSS description OR
+First 2–3 paragraphs from article
+Add optional button:
+👉 “✨ AI Summary”
+→ Only trigger AI when user taps
+B. Clustering / Deduplication
+
+Replace AI clustering with deterministic logic:
+
+Title similarity (string match)
+Shared keywords
+Same domain grouping
+C. Key Highlights
+
+Replace AI-generated highlights with:
+
+Keyword extraction
+Entity extraction
+Simple rule-based bullet points
+4. ⚡ Lazy AI Usage (On-Demand Only)
+AI should only run when:
+User explicitly requests deeper insight
+OR multiple sources conflict
+Never run AI automatically per article load
+5. 🪶 Reduce Token Usage (if AI is used)
+Truncate input text
+Limit output:
+Max 3 bullet points
+Max 50 words
+Use cheapest suitable model
+📱 UX Improvements (IMPORTANT)
+1. Content Structure
+
+Redesign article card:
+
+Image
+Title
+“Signal” (replace "Key Highlights")
+Short summary (2–3 lines max)
+Sources row
+2. Multi-Source Differentiation (Core Feature)
+Show all sources for a story
+Enable swipe or toggle between sources
+Highlight differences in headlines
+3. Confidence Indicator (No AI)
+Based on number of sources:
+1–2 → Low
+3–5 → Medium
+6+ → High
+4. Remove Redundant Features
+Remove "information tab"
+Prioritize original article view
+Keep experience minimal and fast
+🔌 Backend Rules
+API should NOT trigger AI automatically
+Feed endpoint must return cached data unless refresh=true
+AI endpoints must be separate and explicitly triggered
+📊 Expected Cost Outcome
+Idle: $0/day
+Light usage: ~$0.01–0.10/day
+No scaling cost explosion
+🚀 Deliverables
+Refactored backend (no prewarm, cached feed)
+Updated frontend (lazy AI + improved UI)
+AI usage isolated behind explicit actions
+Cost-efficient architecture with clear separation of concerns
+⚠️ Important
+
+Do NOT implement solutions that:
+
+Call AI per article automatically
+Recompute same data multiple times
+Use agents where simple functions suffice
+
+Focus on:
+👉 Efficiency
+👉 Caching
+👉 Minimal AI
+👉 Clean UX
+
+End goal: A fast, modern, AI-assisted news app that feels intelligent but costs almost nothing to run

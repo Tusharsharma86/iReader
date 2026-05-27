@@ -46,7 +46,7 @@ function ClassicTabLayout() {
         },
         tabBarStyle: {
           position: "absolute",
-          backgroundColor: isIOS ? "transparent" : "rgba(10,10,10,0.92)",
+          backgroundColor: isIOS ? "transparent" : "rgba(9,11,13,0.94)",
           borderTopWidth: StyleSheet.hairlineWidth,
           borderTopColor: colors.cardBorder,
           elevation: 0,
@@ -63,7 +63,7 @@ function ClassicTabLayout() {
             <View
               style={[
                 StyleSheet.absoluteFill,
-                { backgroundColor: "rgba(10,10,10,0.94)" },
+                { backgroundColor: "rgba(9,11,13,0.96)" },
               ]}
             />
           ),

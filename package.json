@@ -9,9 +9,9 @@
     "build": "expo export"
   },
   "dependencies": {
-    "expo": "~51.0.0",
-    "react": "18.2.0",
-    "react-native": "0.74.0"
+    "expo": "~54.0.34",
+    "react": "catalog:",
+    "react-native": "0.81.5"
   },
   "packageManager": "pnpm@10.32.1"
 }

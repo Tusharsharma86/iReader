@@ -1,0 +1,17 @@
+{
+  "name": "ireader",
+  "version": "1.0.0",
+  "private": true,
+  "main": "node_modules/expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "build": "expo export"
+  },
+  "dependencies": {
+    "expo": "~51.0.0",
+    "react": "18.2.0",
+    "react-native": "0.74.0"
+  },
+  "packageManager": "pnpm@10.32.1"
+}

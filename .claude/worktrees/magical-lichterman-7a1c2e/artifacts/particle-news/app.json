@@ -1,0 +1,46 @@
+{
+  "expo": {
+    "name": "iReader Pro",
+    "slug": "claude-ireader",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon-pro.png",
+    "scheme": "ireader",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/images/icon-pro.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0A0A0A"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.ireader.app"
+    },
+    "android": {
+      "package": "com.tushar.ireaderpro",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/icon-pro.png",
+        "backgroundColor": "#0A0A0A"
+      }
+    },
+    "web": {
+      "favicon": "./assets/images/icon.png",
+      "backgroundColor": "#0A0A0A"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-web-browser",
+      "@react-native-community/datetimepicker"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "c7a7489b-8a06-4a9e-8872-28f17c7ac4b7"
+      }
+    },
+  }
+}

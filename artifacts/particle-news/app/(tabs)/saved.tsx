@@ -36,15 +36,23 @@ export default function SavedScreen() {
           paddingBottom: insets.bottom + TAB_BAR_HEIGHT + 24,
         }}
         ListHeaderComponent={
-          <ScreenHeader
-            eyebrow="Library"
-            title="Saved"
-            subtitle={
-              saved.length === 0
-                ? "Your bookmarked stories live here."
-                : `${saved.length} ${saved.length === 1 ? "story" : "stories"} saved.`
-            }
-          />
+          <View>
+            <ScreenHeader
+              eyebrow="Reading shelf"
+              title="Saved"
+              subtitle={
+                saved.length === 0
+                  ? "Your bookmarked stories live here for deeper reading."
+                  : `${saved.length} ${saved.length === 1 ? "story" : "stories"} held for later.`
+              }
+            />
+            <View style={[styles.libraryStrip, { backgroundColor: colors.card, borderColor: colors.cardBorder }]}>
+              <Feather name="archive" size={18} color={colors.primary} />
+              <Text style={[styles.libraryStripText, { color: colors.mutedForeground }]}>
+                Saved clusters keep their summaries, sources, and original article links.
+              </Text>
+            </View>
+          </View>
         }
         ListEmptyComponent={
           <View style={styles.empty}>
@@ -65,6 +73,22 @@ export default function SavedScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  libraryStrip: {
+    marginHorizontal: 20,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderRadius: 18,
+    padding: 15,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  libraryStripText: {
+    flex: 1,
+    fontFamily: "Inter_500Medium",
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
   empty: {
     alignItems: "center",
     justifyContent: "center",

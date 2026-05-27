@@ -1665,13 +1665,23 @@ async function notifyOnNewClusters(
 
   for (const { s: cluster, fp } of newClusters) {
     const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 3;
+    const primary = cluster.sources?.[0];
+    const articlePayload = {
+      id: cluster.id,
+      headline: cluster.headline,
+      summary: (cluster as { summary?: string }).summary ?? "",
+      imageUrl: (cluster as { imageUrl?: string }).imageUrl ?? "",
+      url: primary?.url ?? "",
+      source: primary?.name ?? "",
+      publishedAt: (cluster as { publishedAt?: string }).publishedAt ?? "",
+    };
 
     // B) Breaking news: 3+ publisher confirmation
     if (isBreaking && breakingTokens.length > 0) {
       await sendPushToTokens(breakingTokens, {
         title: "Breaking",
         body: cluster.headline,
-        data: { kind: "breaking", clusterId: cluster.id, fp },
+        data: { kind: "breaking", clusterId: cluster.id, fp, article: articlePayload },
       });
     }
 
@@ -1687,7 +1697,7 @@ async function notifyOnNewClusters(
         await sendPushToTokens(matched, {
           title: "Topic alert",
           body: cluster.headline,
-          data: { kind: "topic", clusterId: cluster.id, fp },
+          data: { kind: "topic", clusterId: cluster.id, fp, article: articlePayload },
         });
       }
     }
@@ -1708,7 +1718,7 @@ async function notifyOnNewClusters(
           await sendPushToTokens(matched, {
             title: primarySource,
             body: cluster.headline,
-            data: { kind: "fav-source", clusterId: cluster.id, fp },
+            data: { kind: "fav-source", clusterId: cluster.id, fp, article: articlePayload },
           });
         }
       }

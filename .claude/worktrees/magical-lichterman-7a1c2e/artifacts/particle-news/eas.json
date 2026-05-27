@@ -1,0 +1,45 @@
+{
+  "cli": {
+    "version": ">= 12.0.0",
+    "appVersionSource": "local"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "android": {
+        "buildType": "apk",
+        "image": "latest",
+        "ndk": "27.1.12297006"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://ireader.onrender.com"
+      },
+      "node": "20.18.0",
+      "pnpm": "10.32.1"
+    },
+    "production": {
+      "channel": "production",
+      "autoIncrement": true,
+      "android": {
+        "buildType": "app-bundle",
+        "image": "latest"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://ireader.onrender.com"
+      },
+      "node": "20.18.0",
+      "pnpm": "10.32.1"
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

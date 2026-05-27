@@ -1,0 +1,157 @@
+{
+  "colorScheme": "light",
+  "fonts": [
+    {
+      "family": "Poppins",
+      "role": "body"
+    },
+    {
+      "family": "Roboto",
+      "role": "unknown"
+    }
+  ],
+  "colors": {
+    "primary": "#1B6FD9",
+    "secondary": "#F54E00",
+    "accent": "#1B6FD9",
+    "background": "#FFFFFF",
+    "textPrimary": "#232946",
+    "link": "#232946"
+  },
+  "typography": {
+    "fontFamilies": {
+      "primary": "Poppins",
+      "heading": "Poppins"
+    },
+    "fontStacks": {
+      "heading": [
+        "Poppins",
+        "sans-serif"
+      ],
+      "body": [
+        "system-ui",
+        "-apple-system",
+        "Segoe UI",
+        "Roboto",
+        "Helvetica Neue",
+        "Noto Sans",
+        "Liberation Sans",
+        "Arial",
+        "sans-serif",
+        "Apple Color Emoji",
+        "Segoe UI Emoji",
+        "Segoe UI Symbol",
+        "Noto Color Emoji"
+      ],
+      "paragraph": [
+        "Poppins",
+        "sans-serif"
+      ]
+    },
+    "fontSizes": {
+      "h1": "59.2px",
+      "h2": "59.2px",
+      "body": "16px"
+    }
+  },
+  "spacing": {
+    "baseUnit": 4,
+    "borderRadius": "8px"
+  },
+  "components": {
+    "input": {
+      "background": "transparent",
+      "textColor": "#000000",
+      "borderColor": "#B3B3B3",
+      "borderRadius": "8px",
+      "borderRadiusCorners": {
+        "topLeft": "8px",
+        "topRight": "8px",
+        "bottomRight": "8px",
+        "bottomLeft": "8px"
+      },
+      "shadow": "none"
+    },
+    "buttonPrimary": {
+      "background": "#1B6FD9",
+      "textColor": "#FFFFFF",
+      "borderRadius": "8px",
+      "borderRadiusCorners": {
+        "topLeft": "8px",
+        "topRight": "8px",
+        "bottomRight": "8px",
+        "bottomLeft": "8px"
+      },
+      "shadow": "none"
+    },
+    "buttonSecondary": {
+      "background": "#FFFFFF",
+      "textColor": "#232946",
+      "borderColor": "#E9E9EC",
+      "borderRadius": "8px",
+      "borderRadiusCorners": {
+        "topLeft": "8px",
+        "topRight": "8px",
+        "bottomRight": "8px",
+        "bottomLeft": "8px"
+      },
+      "shadow": "none"
+    }
+  },
+  "images": {
+    "logo": "File saved at: attached_assets/logo.png",
+    "favicon": "File saved at: attached_assets/favicon.png",
+    "ogImage": "File saved at: attached_assets/ogImage.png",
+    "logoHref": "File saved at: attached_assets/logoHref.html",
+    "logoAlt": "newsdata_logo"
+  },
+  "__llm_logo_reasoning": {
+    "selectedIndex": 0,
+    "reasoning": "Selected #0 because it is visible, located in the header, links to the homepage, and matches the brand name 'NewsData.io'.",
+    "confidence": 0.95,
+    "source": "llm"
+  },
+  "__llm_button_reasoning": {
+    "primary": {
+      "index": 0,
+      "text": "Get API Key",
+      "reasoning": "The 'Get API Key' button is likely the primary CTA because it uses the brand's vibrant blue color (#1B6FD9) and has action-oriented text that aligns with the site's purpose of providing API services."
+    },
+    "secondary": {
+      "index": 5,
+      "text": "What is the news API?",
+      "reasoning": "The 'What is the news API?' button is a secondary action with a different background color (#FFFFFF) and provides additional information, making it a suitable secondary CTA."
+    },
+    "confidence": 0.95
+  },
+  "personality": {
+    "tone": "professional",
+    "energy": "medium",
+    "targetAudience": "developers and businesses looking for news data APIs"
+  },
+  "designSystem": {
+    "framework": "bootstrap",
+    "componentLibrary": ""
+  },
+  "confidence": {
+    "buttons": 0.95,
+    "colors": 0.9,
+    "overall": 0.925
+  },
+  "__llm_metadata": {
+    "logoSelection": {
+      "llmCalled": true,
+      "llmSucceeded": true,
+      "finalSource": "llm",
+      "rawLogoSelection": {
+        "selectedLogoIndex": 0,
+        "selectedLogoReasoning": "Selected #0 because it is visible, located in the header, links to the homepage, and matches the brand name 'NewsData.io'.",
+        "confidence": 0.95
+      }
+    },
+    "buttonClassification": {
+      "llmCalled": true,
+      "llmSucceeded": true
+    }
+  }
+}

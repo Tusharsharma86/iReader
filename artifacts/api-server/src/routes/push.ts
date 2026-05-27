@@ -89,6 +89,9 @@ router.post("/preferences", async (req, res) => {
         topicsKeywords?: string[];
         favSourcesEnabled?: boolean;
         favSources?: string[];
+        digestEveningEnabled?: boolean;
+        digestEveningHour?: number;
+        digestEveningMinute?: number;
       }
     | undefined;
   const token = body?.token;
@@ -123,6 +126,20 @@ router.post("/preferences", async (req, res) => {
       .map((k) => k.trim().toLowerCase())
       .filter((k) => k.length > 0)
       .slice(0, 30);
+  if (typeof body?.digestEveningEnabled === "boolean")
+    update["digestEveningEnabled"] = body.digestEveningEnabled;
+  if (
+    typeof body?.digestEveningHour === "number" &&
+    body.digestEveningHour >= 0 &&
+    body.digestEveningHour < 24
+  )
+    update["digestEveningHour"] = Math.floor(body.digestEveningHour);
+  if (
+    typeof body?.digestEveningMinute === "number" &&
+    body.digestEveningMinute >= 0 &&
+    body.digestEveningMinute < 60
+  )
+    update["digestEveningMinute"] = Math.floor(body.digestEveningMinute);
   if (typeof body?.favSourcesEnabled === "boolean")
     update["favSourcesEnabled"] = body.favSourcesEnabled;
   if (Array.isArray(body?.favSources))
@@ -183,19 +200,25 @@ router.post("/digest-tick", async (_req, res) => {
     const now = new Date();
     const hourNow = now.getUTCHours();
     const minuteNow = now.getUTCMinutes();
-    const cutoff = new Date(now.getTime() - 23 * 60 * 60 * 1000);
+    const cutoff = new Date(now.getTime() - 11 * 60 * 60 * 1000); // 11h to allow morning + evening
 
     const allPrefs = await db.select().from(notificationPrefsTable);
-    const due = allPrefs.filter(
+    const morningDue = allPrefs.filter(
       (p) =>
         p.digestEnabled &&
         p.digestHour === hourNow &&
-        // Fire if scheduled minute is within the previous 15 min (cron window).
         Math.abs(p.digestMinute - minuteNow) <= 15 &&
         (!p.lastDigestSentAt || new Date(p.lastDigestSentAt) < cutoff),
     );
-    if (due.length === 0) {
-      res.json({ ok: true, sent: 0 });
+    const eveningDue = allPrefs.filter(
+      (p) =>
+        p.digestEveningEnabled &&
+        p.digestEveningHour === hourNow &&
+        Math.abs(p.digestEveningMinute - minuteNow) <= 15 &&
+        (!p.lastDigestEveningSentAt || new Date(p.lastDigestEveningSentAt) < cutoff),
+    );
+    if (morningDue.length === 0 && eveningDue.length === 0) {
+      res.json({ ok: true, morning: 0, evening: 0 });
       return;
     }
 
@@ -214,23 +237,31 @@ router.post("/digest-tick", async (_req, res) => {
       "Today's top stories";
 
     const { sendPushToTokens } = await import("../lib/push-sender");
-    await sendPushToTokens(
-      due.map((p) => p.token),
-      {
-        title: "📰 Daily Digest",
-        body: headline,
-        data: { kind: "digest" },
-      },
-    );
-
-    // Mark sent so we don't re-fire within 23h.
-    for (const p of due) {
-      await db
-        .update(notificationPrefsTable)
-        .set({ lastDigestSentAt: sql`now()` })
-        .where(eq(notificationPrefsTable.token, p.token));
+    if (morningDue.length > 0) {
+      await sendPushToTokens(
+        morningDue.map((p) => p.token),
+        { title: "🌅 Morning Digest", body: headline, data: { kind: "digest", slot: "morning" } },
+      );
+      for (const p of morningDue) {
+        await db
+          .update(notificationPrefsTable)
+          .set({ lastDigestSentAt: sql`now()` })
+          .where(eq(notificationPrefsTable.token, p.token));
+      }
     }
-    res.json({ ok: true, sent: due.length });
+    if (eveningDue.length > 0) {
+      await sendPushToTokens(
+        eveningDue.map((p) => p.token),
+        { title: "🌙 Evening Digest", body: headline, data: { kind: "digest", slot: "evening" } },
+      );
+      for (const p of eveningDue) {
+        await db
+          .update(notificationPrefsTable)
+          .set({ lastDigestEveningSentAt: sql`now()` })
+          .where(eq(notificationPrefsTable.token, p.token));
+      }
+    }
+    res.json({ ok: true, morning: morningDue.length, evening: eveningDue.length });
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error("digest-tick failed", err);

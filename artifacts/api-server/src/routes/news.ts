@@ -1903,6 +1903,22 @@ router.get("/debug/sources", async (_req, res) => {
   res.json({ fetchedIn: Date.now() - started, sources: rows });
 });
 
+// Cheap cron endpoint — fires breaking-feed refresh in background, returns
+// immediately. Designed for cron-job.org (avoids their 30s timeout + body
+// size cap from streaming a full feed response).
+router.get("/cron/poll", (req, res) => {
+  for (const topic of ["breaking", "technology", "geopolitics", "business"]) {
+    refreshInBackground(topic, req.log);
+  }
+  res.json({ ok: true });
+});
+router.post("/cron/poll", (req, res) => {
+  for (const topic of ["breaking", "technology", "geopolitics", "business"]) {
+    refreshInBackground(topic, req.log);
+  }
+  res.json({ ok: true });
+});
+
 router.get("/feed", async (req, res) => {
   const topic = String(req.query["topic"] ?? "top").toLowerCase();
   const refresh = req.query["refresh"] === "1";

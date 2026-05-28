@@ -86,6 +86,7 @@ router.post("/preferences", async (req, res) => {
         digestHour?: number;
         digestMinute?: number;
         breakingEnabled?: boolean;
+        aiFeedEnabled?: boolean;
         topicsEnabled?: boolean;
         topicsKeywords?: string[];
         favSourcesEnabled?: boolean;
@@ -119,6 +120,8 @@ router.post("/preferences", async (req, res) => {
     update["digestMinute"] = Math.floor(body.digestMinute);
   if (typeof body?.breakingEnabled === "boolean")
     update["breakingEnabled"] = body.breakingEnabled;
+  if (typeof body?.aiFeedEnabled === "boolean")
+    update["aiFeedEnabled"] = body.aiFeedEnabled;
   if (typeof body?.topicsEnabled === "boolean")
     update["topicsEnabled"] = body.topicsEnabled;
   if (Array.isArray(body?.topicsKeywords))

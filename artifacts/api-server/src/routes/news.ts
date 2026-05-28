@@ -1717,6 +1717,9 @@ async function notifyOnNewClusters(
   const breakingTokens = allPrefs
     .filter((p) => p.breakingEnabled)
     .map((p) => p.token);
+  const aiFeedTokens = allPrefs
+    .filter((p) => p.aiFeedEnabled)
+    .map((p) => p.token);
   const topicSubs = allPrefs
     .filter((p) => p.topicsEnabled && p.topicsKeywords.length > 0)
     .map((p) => ({ token: p.token, kws: p.topicsKeywords }));
@@ -1764,6 +1767,19 @@ async function notifyOnNewClusters(
           title: "Breaking",
           body: cluster.headline,
           data: { kind: "breaking", clusterId: cluster.id, fp, article: articlePayload },
+        });
+        recordPushes(allowed);
+      }
+    }
+
+    // B2) AI Feed alerts — same trigger, but deeplinks to AI Feed Deep Dive.
+    if (isBreaking && aiFeedTokens.length > 0) {
+      const allowed = tokensUnderLimit(aiFeedTokens);
+      if (allowed.length > 0) {
+        await sendPushToTokens(allowed, {
+          title: "✨ AI Feed · Breaking",
+          body: cluster.headline,
+          data: { kind: "ai-feed", clusterId: cluster.id, fp, article: articlePayload },
         });
         recordPushes(allowed);
       }

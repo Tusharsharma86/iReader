@@ -87,7 +87,8 @@ const RAW_FEED_TTL_MS = 10 * 60 * 1000;
 
 // Scored, ordered feed cache (5-min TTL — scores decay as freshness changes)
 type CacheEntry = { at: number; data: FeedItem[] };
-const cache = new Map<string, CacheEntry>();
+export const cache = new Map<string, CacheEntry>();
+export const feedCache = cache; // alias used by other routes
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
 const TECH_CACHE_TTL_MS = 5 * 60 * 1000;
 

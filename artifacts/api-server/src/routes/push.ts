@@ -200,77 +200,76 @@ router.get("/preferences", async (req, res) => {
 // the current UTC hour AND who haven't been sent a digest in the last 23h.
 // Sends them a push with today's top breaking headline.
 const digestTickHandler = async (_req: import("express").Request, res: import("express").Response) => {
-  try {
-    const now = new Date();
-    const hourNow = now.getUTCHours();
-    const minuteNow = now.getUTCMinutes();
-    const cutoff = new Date(now.getTime() - 11 * 60 * 60 * 1000); // 11h to allow morning + evening
+  // Return immediately so cron-job.org (30s timeout) never sees a slow response.
+  // Actual work runs in the background.
+  res.json({ ok: true, queued: true });
 
-    const allPrefs = await db.select().from(notificationPrefsTable);
-    const morningDue = allPrefs.filter(
-      (p) =>
-        p.digestEnabled &&
-        p.digestHour === hourNow &&
-        Math.abs(p.digestMinute - minuteNow) <= 15 &&
-        (!p.lastDigestSentAt || new Date(p.lastDigestSentAt) < cutoff),
-    );
-    const eveningDue = allPrefs.filter(
-      (p) =>
-        p.digestEveningEnabled &&
-        p.digestEveningHour === hourNow &&
-        Math.abs(p.digestEveningMinute - minuteNow) <= 15 &&
-        (!p.lastDigestEveningSentAt || new Date(p.lastDigestEveningSentAt) < cutoff),
-    );
-    if (morningDue.length === 0 && eveningDue.length === 0) {
-      res.json({ ok: true, morning: 0, evening: 0 });
-      return;
-    }
+  // Fire-and-forget background work.
+  (async () => {
+    try {
+      const now = new Date();
+      const hourNow = now.getUTCHours();
+      const minuteNow = now.getUTCMinutes();
+      const cutoff = new Date(now.getTime() - 11 * 60 * 60 * 1000);
 
-    // Pull top breaking story for the digest body.
-    const feedRes = await fetch(
-      "https://ireader.onrender.com/api/news/feed?topic=breaking",
-    );
-    const feed = (await feedRes.json()) as Array<{
-      type?: string;
-      articles?: { headline: string }[];
-      headline?: string;
-    }>;
-    const top = feed?.[0];
-    const headline =
-      (top?.type === "cluster" ? top.articles?.[0]?.headline : top?.headline) ??
-      "Today's top stories";
-
-    const { sendPushToTokens } = await import("../lib/push-sender");
-    if (morningDue.length > 0) {
-      await sendPushToTokens(
-        morningDue.map((p) => p.token),
-        { title: "🌅 Morning Digest", body: headline, data: { kind: "digest", slot: "morning" } },
+      const allPrefs = await db.select().from(notificationPrefsTable);
+      const morningDue = allPrefs.filter(
+        (p) =>
+          p.digestEnabled &&
+          p.digestHour === hourNow &&
+          Math.abs(p.digestMinute - minuteNow) <= 15 &&
+          (!p.lastDigestSentAt || new Date(p.lastDigestSentAt) < cutoff),
       );
-      for (const p of morningDue) {
-        await db
-          .update(notificationPrefsTable)
-          .set({ lastDigestSentAt: sql`now()` })
-          .where(eq(notificationPrefsTable.token, p.token));
-      }
-    }
-    if (eveningDue.length > 0) {
-      await sendPushToTokens(
-        eveningDue.map((p) => p.token),
-        { title: "🌙 Evening Digest", body: headline, data: { kind: "digest", slot: "evening" } },
+      const eveningDue = allPrefs.filter(
+        (p) =>
+          p.digestEveningEnabled &&
+          p.digestEveningHour === hourNow &&
+          Math.abs(p.digestEveningMinute - minuteNow) <= 15 &&
+          (!p.lastDigestEveningSentAt || new Date(p.lastDigestEveningSentAt) < cutoff),
       );
-      for (const p of eveningDue) {
-        await db
-          .update(notificationPrefsTable)
-          .set({ lastDigestEveningSentAt: sql`now()` })
-          .where(eq(notificationPrefsTable.token, p.token));
+      if (morningDue.length === 0 && eveningDue.length === 0) return;
+
+      // Read top headline from in-memory feed cache via the news route helper.
+      // No HTTP self-fetch — avoids the timeout source.
+      let headline = "Today's top stories";
+      try {
+        const newsMod = await import("./news");
+        const c = (newsMod as unknown as { feedCache?: Map<string, { data: Array<{ type?: string; articles?: { headline: string }[]; headline?: string }> }> }).feedCache;
+        const cached = c?.get("breaking");
+        const top = cached?.data?.[0];
+        if (top) {
+          headline = (top.type === "cluster" ? top.articles?.[0]?.headline : top.headline) ?? headline;
+        }
+      } catch { /* fall back to default headline */ }
+
+      const { sendPushToTokens } = await import("../lib/push-sender");
+      if (morningDue.length > 0) {
+        await sendPushToTokens(
+          morningDue.map((p) => p.token),
+          { title: "🌅 Morning Digest", body: headline, data: { kind: "digest", slot: "morning" } },
+        );
+        for (const p of morningDue) {
+          await db.update(notificationPrefsTable)
+            .set({ lastDigestSentAt: sql`now()` })
+            .where(eq(notificationPrefsTable.token, p.token));
+        }
       }
+      if (eveningDue.length > 0) {
+        await sendPushToTokens(
+          eveningDue.map((p) => p.token),
+          { title: "🌙 Evening Digest", body: headline, data: { kind: "digest", slot: "evening" } },
+        );
+        for (const p of eveningDue) {
+          await db.update(notificationPrefsTable)
+            .set({ lastDigestEveningSentAt: sql`now()` })
+            .where(eq(notificationPrefsTable.token, p.token));
+        }
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("digest-tick background failed", err);
     }
-    res.json({ ok: true, morning: morningDue.length, evening: eveningDue.length });
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error("digest-tick failed", err);
-    res.status(500).json({ error: "digest failed" });
-  }
+  })();
 };
 router.post("/digest-tick", digestTickHandler);
 router.get("/digest-tick", digestTickHandler);

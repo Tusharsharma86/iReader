@@ -2450,10 +2450,18 @@ function aiPrompt(type: AiSummaryType, text: string): { prompt: string; maxToken
   switch (type) {
     case "fiveWs":
       return {
-        maxTokens: 400,
-        prompt: `Analyze this news article and return ONLY valid JSON with exactly 5 strings:
-{"fiveWs":["WHO: <who is involved>","WHAT: <what happened>","WHEN: <when it happened>","WHERE: <where it happened>","WHY: <why it matters>"]}
-Each string must start with the label. Be concise, under 25 words each.
+        maxTokens: 1100,
+        prompt: `Analyze this news article. Return ONLY valid JSON (no markdown, no prose, no code fences) with exactly 5 entries:
+{"fiveWs":["WHO: ...","WHAT: ...","WHEN: ...","WHERE: ...","WHY: ..."]}
+
+Rules:
+- Exactly 5 entries in this order: WHO, WHAT, WHEN, WHERE, WHY.
+- Each entry MUST start with its label followed by ": ".
+- Each entry is one continuous block of text — NO line breaks inside any entry.
+- TOTAL across all 5 entries ~300 words (range 280-340). Distribute as the story demands; WHAT and WHY usually carry the most.
+- Be specific: named parties, exact figures, dates, places. No filler.
+- Neutral tone. No bullets, no markdown inside the strings.
+
 Article: ${text}`,
       };
     case "eli5":

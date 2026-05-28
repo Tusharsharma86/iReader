@@ -2464,10 +2464,10 @@ Article: ${text}`,
       };
     default:
       return {
-        maxTokens: 900,
+        maxTokens: 1100,
         prompt: `Summarize this news article thoroughly. Return ONLY valid JSON:
-{"bullets":["<key point under 30 words>","<key point under 30 words>","<key point under 30 words>","<key point under 30 words>","<key point under 30 words>"],"summary":"<minimum 200 words, comprehensive and informative, cover all major facts, people, numbers, context, and implications>"}
-Rules: exactly 5 bullets; summary MUST be at least 200 words; neutral tone; include key facts, names, figures, context.
+{"bullets":["<key point under 30 words>","<key point under 30 words>","<key point under 30 words>","<key point under 30 words>","<key point under 30 words>"],"summary":"<300-400 words, comprehensive and detailed: cover all major facts, named parties, key numbers, timeline, context, reactions, and implications. Write in clear paragraphs separated by blank lines.>"}
+Rules: exactly 5 bullets; summary MUST be at least 300 words (target 350); neutral tone; include all key facts, named parties, figures, timeline, context, reactions. Use multiple paragraphs.
 Article: ${text}`,
       };
   }
@@ -2695,7 +2695,7 @@ router.post("/deepdive", async (req, res) => {
 
 {
   "tldr": ["bullet 1", "bullet 2", "bullet 3", "bullet 4", "bullet 5", "bullet 6"],  // 5-7 substantive bullets, 20-30 words each. Cover who/what/when/where, key numbers, named parties, latest development, reactions, and stakes.
-  "narrative": "...",                                  // 4-5 short paragraphs (joined by \\n\\n) retelling the story in clear, accessible storytelling voice. Plain text, no markdown. ~220-320 words total. Lead with the most concrete fact.
+  "narrative": "...",                                  // 4-5 short paragraphs (joined by \\n\\n) retelling the story in clear, accessible storytelling voice. Plain text, no markdown. TARGET ~300 words (range 280-340). Lead with the most concrete fact. Cover who/what/when/where, key numbers, context, latest development, and stakes.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.

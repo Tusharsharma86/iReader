@@ -1801,20 +1801,37 @@ async function notifyOnNewClusters(
       }
     }
 
-    // C) Topic alerts: per-user keyword match against headline + category.
+    // C) Topic alerts: per-user keyword match. Each keyword entry may be
+    // "keyword|Topic Label" — the label drives the push title so the user
+    // knows which of their starred topics matched. Tokens are grouped by
+    // matched label so the title is meaningful per recipient.
     if (topicSubs.length > 0) {
       const haystack = `${cluster.headline} ${cluster.category ?? ""}`.toLowerCase();
-      const matched: string[] = [];
+      const labelToTokens = new Map<string, string[]>();
       for (const sub of topicSubs) {
-        if (sub.kws.some((k: string) => haystack.includes(k)))
-          matched.push(sub.token);
+        let matchedLabel: string | undefined;
+        for (const entry of sub.kws as string[]) {
+          const sep = entry.indexOf("|");
+          const kw = (sep >= 0 ? entry.slice(0, sep) : entry).toLowerCase();
+          const label = sep >= 0 ? entry.slice(sep + 1).trim() : "";
+          if (kw && haystack.includes(kw)) {
+            matchedLabel = label || "Topic alert";
+            break;
+          }
+        }
+        if (matchedLabel) {
+          const arr = labelToTokens.get(matchedLabel) ?? [];
+          arr.push(sub.token);
+          labelToTokens.set(matchedLabel, arr);
+        }
       }
-      const allowed = tokensUnderLimit(matched);
-      if (allowed.length > 0) {
+      for (const [label, tokens] of labelToTokens.entries()) {
+        const allowed = tokensUnderLimit(tokens);
+        if (allowed.length === 0) continue;
         await sendPushToTokens(allowed, {
-          title: "Topic alert",
+          title: `📌 ${label}`,
           body: cluster.headline,
-          data: { kind: "topic", clusterId: cluster.id, fp, article: articlePayload },
+          data: { kind: "topic", topicLabel: label, clusterId: cluster.id, fp, article: articlePayload },
         });
         recordPushes(allowed);
       }

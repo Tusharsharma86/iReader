@@ -1413,18 +1413,27 @@ async function runAIClustering(
 
     const headlines = articles
       .slice(0, 30)
-      .map((a, i) => `${i}:${a.headline}`)
+      .map((a, i) => {
+        // Use a:Headline | Summary excerpt so the AI sees more semantic signal.
+        const summary = (a as { summary?: string }).summary?.replace(/\s+/g, ' ').slice(0, 160) ?? '';
+        return `${i}: ${a.headline}${summary ? ` | ${summary}` : ''}`;
+      })
       .join('\n');
 
-    const prompt = `You are a senior news editor. Group these ${topic} headlines into topic clusters and write SHARP, JOURNALISTIC labels for each.
+    const prompt = `You are a senior news editor. Read each headline + summary excerpt and group the stories into clusters.
 
 ${headlines}
 
-Rules:
-- Group only genuinely related stories (same underlying event/situation/entity).
-- Each headline number appears exactly once.
+GROUPING RULES (strict — read carefully):
+- Cluster only stories that are about the SAME UNDERLYING EVENT or the SAME ONGOING SITUATION involving the same primary entity. Examples:
+  * Two stories about today's Fed rate decision → SAME cluster.
+  * Fed decision + a general "interest rates explained" piece → DIFFERENT clusters.
+  * iPhone 17 launch coverage from 3 outlets → SAME cluster.
+  * iPhone 17 launch + Apple Vision Pro update → DIFFERENT clusters.
+- Same broad theme is NOT enough ("tech", "politics", "cricket"). It must be the same event/entity.
+- Each headline index appears in exactly one group.
 - 4-8 groups maximum.
-- True singletons (no related story in the set) → assign to "Other".
+- Stories that don't fit any cluster go into "Other".
 
 LABEL STYLE — write each cluster label like a magazine section title:
 - 3-6 words, Title Case.
@@ -2509,15 +2518,18 @@ async function runLabelClustering(
   const limited = texts.slice(0, 30);
   const headlineList = limited.map((t, i) => `${i}: ${t}`).join('\n');
 
-  const prompt = `You are a senior news editor. Group these ${topic} headlines into topic clusters and write SHARP, JOURNALISTIC labels.
+  const prompt = `You are a senior news editor. Group these ${topic} headlines into clusters and write SHARP, JOURNALISTIC labels.
 
 ${headlineList}
 
-Rules:
-- Group only genuinely related stories (same underlying event / situation / entity).
-- Each number appears exactly once.
+GROUPING RULES (strict):
+- Cluster only stories about the SAME UNDERLYING EVENT or the SAME ONGOING SITUATION involving the same primary entity.
+- Same broad theme is NOT enough (e.g. "tech", "politics"). It must be the same event/entity.
+- Examples of SAME cluster: 3 outlets covering today's Fed rate decision; multiple stories on the iPhone 17 launch event.
+- Examples of DIFFERENT clusters: Fed rate decision vs general inflation explainer; iPhone 17 launch vs Apple Vision Pro update.
+- Each headline number appears in exactly one group.
 - 3-7 groups maximum.
-- Singletons go into "Other".
+- Singletons → "Other".
 
 LABEL STYLE — like a magazine section title:
 - 3-6 words, Title Case.

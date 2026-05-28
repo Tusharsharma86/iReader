@@ -2019,6 +2019,10 @@ router.get("/feed", async (req, res) => {
   }
 });
 
+type ContentBlock =
+  | { type: "p"; text: string }
+  | { type: "img"; src: string; alt?: string };
+
 type ArticleResult = {
   title?: string;
   summaryBullets: string[];
@@ -2027,6 +2031,10 @@ type ArticleResult = {
   // dedup pass. Surfaced so the reader's "Original" tab can show the full
   // unedited article.
   originalParagraphs?: string[];
+  // Mixed paragraph + image blocks in document order. Web reader renders
+  // images inline between paragraphs when present. Falls back to `paragraphs`
+  // if absent.
+  contentBlocks?: ContentBlock[];
   byline?: string;
   deduped?: boolean;
 };
@@ -2093,6 +2101,67 @@ function cleanHtmlFragment(html: string): string {
     .replace(/<\/(p|div|li|h[1-6]|br|section|article)>/gi, "\n\n")
     .replace(/<br\s*\/?>(?!\n)/gi, "\n")
     .replace(/<[^>]+>/g, " ");
+}
+
+// Walk article HTML in document order and emit a mixed list of paragraph +
+// image blocks. Skips tiny tracker pixels, social icons, and ads heuristically.
+// Result is capped at IMG_CAP images and BLOCK_CAP total blocks.
+function htmlToContentBlocks(rawHtmlChunk: string): ContentBlock[] {
+  const IMG_CAP = 5;
+  const BLOCK_CAP = 80;
+  const BAD_SRC_RE = /pixel|tracking|analytics|sprite|icon|logo|avatar|emoji|share|social|placeholder|spacer|1x1\.|\.gif\?|adsystem|doubleclick/i;
+  const PARA_RE = /<(p|li)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+  const IMG_RE = /<img\b[^>]*>/gi;
+  // Find every <p>, <li>, <img> with its position in the source.
+  type Tok = { pos: number; kind: "p" | "img"; raw: string };
+  const toks: Tok[] = [];
+  let pm: RegExpExecArray | null;
+  while ((pm = PARA_RE.exec(rawHtmlChunk)) !== null) toks.push({ pos: pm.index, kind: "p", raw: pm[2] ?? "" });
+  let im: RegExpExecArray | null;
+  while ((im = IMG_RE.exec(rawHtmlChunk)) !== null) toks.push({ pos: im.index, kind: "img", raw: im[0] });
+  toks.sort((a, b) => a.pos - b.pos);
+
+  const BOILERPLATE_RE =
+    /^(advertisement|share this|read more|sign up|subscribe|follow us|related stories?|copyright|all rights reserved|terms of (use|service)|privacy policy|cookies?|by .{1,40}$|published .{1,40}$|updated .{1,40}$)/i;
+
+  const blocks: ContentBlock[] = [];
+  const seenImgs = new Set<string>();
+  let imgCount = 0;
+  for (const t of toks) {
+    if (blocks.length >= BLOCK_CAP) break;
+    if (t.kind === "p") {
+      const text = decodeArticleEntities(cleanHtmlFragment(t.raw))
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text.length > 80 && text.split(" ").length > 14 && !BOILERPLATE_RE.test(text)) {
+        blocks.push({ type: "p", text });
+      }
+    } else if (t.kind === "img" && imgCount < IMG_CAP) {
+      // Prefer srcset's first candidate (highest-quality often last; just take first)
+      // then data-src (lazy-load), then src.
+      let src =
+        /\s(?:data-srcset|srcset)=["']([^,"' ]+)/i.exec(t.raw)?.[1] ??
+        /\s(?:data-src|data-original|data-lazy-src)=["']([^"']+)["']/i.exec(t.raw)?.[1] ??
+        /\ssrc=["']([^"']+)["']/i.exec(t.raw)?.[1];
+      if (!src) continue;
+      // Strip query-string after first space for srcset descriptors.
+      src = src.trim();
+      if (src.startsWith("//")) src = "https:" + src;
+      if (!/^https?:/i.test(src)) continue;
+      if (BAD_SRC_RE.test(src)) continue;
+      // Try to read width/height attributes — skip if obviously tiny.
+      const w = parseInt(/\swidth=["']?(\d+)/i.exec(t.raw)?.[1] ?? "0", 10) || 0;
+      const h = parseInt(/\sheight=["']?(\d+)/i.exec(t.raw)?.[1] ?? "0", 10) || 0;
+      if (w > 0 && w < 200) continue;
+      if (h > 0 && h < 150) continue;
+      if (seenImgs.has(src)) continue;
+      seenImgs.add(src);
+      const alt = /\salt=["']([^"']*)["']/i.exec(t.raw)?.[1]?.trim();
+      blocks.push({ type: "img", src, alt: alt || undefined });
+      imgCount++;
+    }
+  }
+  return blocks;
 }
 
 function htmlToParagraphs(rawHtmlChunk: string): string[] {
@@ -2334,12 +2403,12 @@ async function extractArticle(url: string): Promise<ArticleResult> {
     }
     const { bodyHtml, title } = extractArticleBody(html);
     let paragraphs = htmlToParagraphs(bodyHtml);
+    let contentBlocks = htmlToContentBlocks(bodyHtml);
     if (paragraphs.length === 0) {
-      // Last-resort within this UA: try the whole document.
       paragraphs = htmlToParagraphs(html);
+      if (contentBlocks.length === 0) contentBlocks = htmlToContentBlocks(html);
     }
     if (paragraphs.length > 0 || i === FETCH_USER_AGENTS.length - 1) {
-      // Before giving up with zero paragraphs, try AMP URL for blocked publishers.
       if (paragraphs.length === 0) {
         const ampUrl = toAmpUrl(url);
         if (ampUrl) {
@@ -2347,11 +2416,12 @@ async function extractArticle(url: string): Promise<ArticleResult> {
             const ampHtml = await fetchHtmlWithUA(ampUrl, FETCH_USER_AGENTS[0]!);
             const { bodyHtml: ampBody, title: ampTitle } = extractArticleBody(ampHtml);
             const ampParas = htmlToParagraphs(ampBody);
-            if (ampParas.length > 0) return { title: ampTitle ?? title, summaryBullets: [], paragraphs: ampParas };
+            const ampBlocks = htmlToContentBlocks(ampBody);
+            if (ampParas.length > 0) return { title: ampTitle ?? title, summaryBullets: [], paragraphs: ampParas, contentBlocks: ampBlocks };
           } catch { /* fall through */ }
         }
       }
-      return { title, summaryBullets: [], paragraphs };
+      return { title, summaryBullets: [], paragraphs, contentBlocks };
     }
   }
   return { summaryBullets: [], paragraphs: [] };

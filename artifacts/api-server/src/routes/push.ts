@@ -196,7 +196,7 @@ router.get("/preferences", async (req, res) => {
 // Cron hits this every ~15 min. Endpoint finds users whose digestHour matches
 // the current UTC hour AND who haven't been sent a digest in the last 23h.
 // Sends them a push with today's top breaking headline.
-router.post("/digest-tick", async (_req, res) => {
+const digestTickHandler = async (_req: import("express").Request, res: import("express").Response) => {
   try {
     const now = new Date();
     const hourNow = now.getUTCHours();
@@ -268,6 +268,8 @@ router.post("/digest-tick", async (_req, res) => {
     console.error("digest-tick failed", err);
     res.status(500).json({ error: "digest failed" });
   }
-});
+};
+router.post("/digest-tick", digestTickHandler);
+router.get("/digest-tick", digestTickHandler);
 
 export default router;

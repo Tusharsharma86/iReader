@@ -1728,11 +1728,14 @@ async function notifyOnNewClusters(
     }));
 
   const FRESH_MS = 90 * 60 * 1000;
-  const BATCH_CAP = 5; // Max pushes fanned out per cron run, even if many new clusters.
+  const BATCH_CAP = 5;
+  const DEVANAGARI = /[ऀ-ॿ]/; // Hindi headlines — out of scope, feed already filters.
 
-  // Freshness filter — only push articles published in the last 90 min.
-  // Drops the "Render restart replays old clusters" failure mode.
+  // Freshness filter + drop Hindi headlines.
   const fresh = newClusters.filter(({ s }) => {
+    const headline = s.headline ?? "";
+    const summary = (s as { summary?: string }).summary ?? "";
+    if (DEVANAGARI.test(headline) || DEVANAGARI.test(summary)) return false;
     const ts = Date.parse((s as { publishedAt?: string }).publishedAt ?? "");
     return Number.isFinite(ts) && Date.now() - ts < FRESH_MS;
   });

@@ -1664,7 +1664,7 @@ async function notifyOnNewClusters(
     }));
 
   for (const { s: cluster, fp } of newClusters) {
-    const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 3;
+    const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 2;
     const primary = cluster.sources?.[0];
     const articlePayload = {
       id: cluster.id,

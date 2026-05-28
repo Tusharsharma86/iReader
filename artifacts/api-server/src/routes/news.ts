@@ -2647,9 +2647,11 @@ router.get("/image", async (req, res) => {
 // Body: { url, headline, paragraphs }
 // Returns: { tldr[], narrative, insight, questions[], tags[] } — all in ONE
 // Claude call. Cached aggressively (memory + disk) to keep cost down.
+interface TldrSection { heading: string; bullets: string[]; }
 interface DeepDiveResult {
   at: number;
   tldr: string[];
+  tldrSections: TldrSection[];
   narrative: string;
   insight: string;
   questions: string[];
@@ -2695,7 +2697,11 @@ router.post("/deepdive", async (req, res) => {
     const prompt = `You are transforming a raw news article into a structured, AI-native "story understanding" experience. Read the article and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldr": ["bullet 1", "bullet 2", "bullet 3", "bullet 4", "bullet 5", "bullet 6"],  // 5-7 substantive bullets, 20-30 words each. Cover who/what/when/where, key numbers, named parties, latest development, reactions, and stakes.
+  "tldrSections": [                                    // 2-4 grouped sections. Each section has a SHORT all-caps thematic heading (5-10 words) and 3-6 substantive bullets (20-30 words each). Use this structure ALWAYS — never return a flat tldr alone. First section heading should summarize the core conflict/event; later sections add context, reactions, or background. Bullets bold key entities + figures inline by surrounding them with ** (e.g. "**Rahul Gandhi** stated, **'A denial is not an answer'**").
+    { "heading": "CORE EVENT OR CONFLICT HEADING", "bullets": ["bullet 1", "bullet 2", "bullet 3", "bullet 4"] },
+    { "heading": "CONTEXT / REACTIONS / BACKGROUND HEADING", "bullets": ["bullet 1", "bullet 2", "bullet 3", "bullet 4", "bullet 5"] }
+  ],
+  "tldr": ["fallback flat bullets — same content as tldrSections flattened, in case the renderer needs a flat list"],  // 5-7 bullets, 20-30 words each.
   "narrative": "...",                                  // 4-5 short paragraphs (joined by \\n\\n) retelling the story in clear, accessible storytelling voice. Plain text, no markdown. TARGET ~300 words (range 280-340). Lead with the most concrete fact. Cover who/what/when/where, key numbers, context, latest development, and stakes.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
@@ -2738,9 +2744,29 @@ Respond with JSON only.`;
       if (m) { try { parsed = JSON.parse(m[0]); } catch { /* ignore */ } }
     }
 
+    // Parse tldrSections — sanitize each entry, then fall back to flat tldr if AI skipped sections.
+    const rawSections = Array.isArray((parsed as { tldrSections?: unknown }).tldrSections)
+      ? ((parsed as { tldrSections: unknown[] }).tldrSections)
+      : [];
+    const tldrSections: TldrSection[] = rawSections
+      .map((s) => {
+        const obj = s as { heading?: unknown; bullets?: unknown };
+        return {
+          heading: typeof obj?.heading === "string" ? obj.heading.slice(0, 120) : "",
+          bullets: Array.isArray(obj?.bullets) ? obj.bullets.slice(0, 8).map(String) : [],
+        };
+      })
+      .filter((s) => s.heading && s.bullets.length > 0)
+      .slice(0, 4);
+
+    const flatTldr = Array.isArray(parsed.tldr) && parsed.tldr.length > 0
+      ? parsed.tldr.slice(0, 8).map(String)
+      : tldrSections.flatMap((s) => s.bullets).slice(0, 8);
+
     const result: DeepDiveResult = {
       at: Date.now(),
-      tldr: Array.isArray(parsed.tldr) ? parsed.tldr.slice(0, 8).map(String) : [],
+      tldr: flatTldr,
+      tldrSections,
       narrative: typeof parsed.narrative === "string" ? parsed.narrative : "",
       insight: typeof parsed.insight === "string" ? parsed.insight : "",
       questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 5).map(String) : [],

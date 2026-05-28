@@ -2467,8 +2467,15 @@ Article: ${text}`,
       return {
         maxTokens: 1100,
         prompt: `Summarize this news article thoroughly. Return ONLY valid JSON:
-{"bullets":["<~45-word bullet>","<~45-word bullet>","<~45-word bullet>","<~45-word bullet>","<~45-word bullet>","<~45-word bullet>","<~45-word bullet>"],"summary":""}
-Rules: exactly 7 bullets, each ~45 words (range 35-55), total ~300 words; neutral tone; cover all key facts, named parties, figures, timeline, context, reactions, and implications. Leave "summary" as empty string — bullets carry everything.
+{"bullets":["bullet 1","bullet 2","bullet 3","..."],"summary":""}
+Rules:
+- TOTAL across all bullets ~300 words (range 250-350). This is the only hard target.
+- Number of bullets is YOUR call — choose what fits the story:
+  * Breaking / fast-moving / single-event story → fewer, punchier bullets (~4-5, ~60 words each).
+  * Complex / multi-thread / political / analysis story → more bullets (~7-10, ~30-40 words each).
+  * One bullet = one distinct fact, angle, or development. Don't pad.
+- Neutral tone. Cover all key facts: who, what, when, where, named parties, figures, timeline, context, reactions, stakes.
+- Leave "summary" as an empty string — bullets carry everything.
 Article: ${text}`,
       };
   }
@@ -2606,7 +2613,7 @@ router.post("/ai-summary", async (req, res) => {
 
     const result: AiSummaryEntry = {
       at: Date.now(),
-      bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 8) : [],
+      bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 12) : [],
       summary: typeof parsed.summary === "string" ? parsed.summary : "",
       fiveWs: Array.isArray(parsed.fiveWs) ? parsed.fiveWs.slice(0, 5) : [],
       eli5: typeof parsed.eli5 === "string" ? parsed.eli5 : "",

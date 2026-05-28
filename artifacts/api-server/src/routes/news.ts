@@ -8,6 +8,35 @@ import { cleanArticleParagraphs } from "../lib/articleCleaner";
 
 const router: IRouter = Router();
 
+// ── Groq AI helper ──────────────────────────────────────────────────────────
+// All AI summaries now go through Groq's Llama 4 Scout. Free tier, much faster
+// than Claude, similar quality for structured JSON. ANTHROPIC_API_KEY kept as
+// optional fallback for now (some routes still call Claude until migrated).
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
+async function callGroq(
+  prompt: string,
+  maxTokens: number,
+  opts: { temperature?: number; signal?: AbortSignal } = {},
+): Promise<string> {
+  const key = process.env["GROQ_API_KEY"];
+  if (!key) throw new Error("GROQ_API_KEY missing");
+  const r = await fetch(GROQ_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      max_tokens: maxTokens,
+      temperature: opts.temperature ?? 0.3,
+      messages: [{ role: "user", content: prompt }],
+    }),
+    signal: opts.signal,
+  });
+  if (!r.ok) throw new Error(`Groq ${r.status}`);
+  const data = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
 // Disk cache lives in /tmp so it survives in-process restarts within the same
 // container (dev workflow restarts, autoscale instance reuse). Replit Autoscale
 // instances get a fresh /tmp on cold-start, so this is best-effort persistence
@@ -1403,24 +1432,7 @@ JSON only:
     aiCallsToday++;
     console.log(`AI call #${aiCallsToday} today for ${topic}`);
 
-    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY || '',
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 600,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-
-    if (!aiRes.ok) throw new Error(`AI failed: ${aiRes.status}`);
-
-    const data = await aiRes.json() as any;
-    const text = (data.content?.[0]?.text as string) || '';
+    const text = await callGroq(prompt, 600);
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -2363,29 +2375,9 @@ async function runLabelClustering(
   const limited = texts.slice(0, 30);
   const headlineList = limited.map((t, i) => `${i}: ${t}`).join('\n');
 
-  const apiKey = process.env['ANTHROPIC_API_KEY'];
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY missing');
-
-  const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 600,
-      messages: [{
-        role: 'user',
-        content: `Group these ${topic} news headlines into topic clusters.\n\n${headlineList}\n\nRules:\n- Group only genuinely related stories\n- Each number appears exactly once\n- 3-7 groups maximum\n- Put unrelated singles in "Other"\n- Label each group 2-4 words (e.g. "India-Pakistan Tensions", "Budget 2025", "Tech Layoffs")\n\nReturn JSON only:\n{"groups":[{"label":"topic name","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`,
-      }],
-    }),
-  });
-
-  if (!aiRes.ok) throw new Error(`AI error: ${aiRes.status}`);
-  const data = await aiRes.json() as { content?: { text?: string }[] };
-  const raw = (data.content?.[0]?.text ?? '').replace(/```json|```/g, '').trim();
+  const prompt = `Group these ${topic} news headlines into topic clusters.\n\n${headlineList}\n\nRules:\n- Group only genuinely related stories\n- Each number appears exactly once\n- 3-7 groups maximum\n- Put unrelated singles in "Other"\n- Label each group 2-4 words (e.g. "India-Pakistan Tensions", "Budget 2025", "Tech Layoffs")\n\nReturn JSON only:\n{"groups":[{"label":"topic name","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`;
+  const text = await callGroq(prompt, 600);
+  const raw = text.replace(/```json|```/g, '').trim();
   const parsed = JSON.parse(raw) as { groups?: { label: string; indices: number[] }[] };
   if (!Array.isArray(parsed?.groups)) throw new Error('bad AI response');
 
@@ -2474,8 +2466,7 @@ router.post("/ai-summary", async (req, res) => {
     return;
   }
 
-  const apiKey = process.env["ANTHROPIC_API_KEY"];
-  if (!apiKey) {
+  if (!process.env["GROQ_API_KEY"]) {
     res.status(502).json({ error: "AI not configured" });
     return;
   }
@@ -2483,25 +2474,7 @@ router.post("/ai-summary", async (req, res) => {
   try {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text);
-
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: maxTokens,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-
-    if (!response.ok) throw new Error(`Claude API ${response.status}`);
-
-    const data = await response.json() as { content: Array<{ type: string; text: string }> };
-    const raw = data.content.find(c => c.type === "text")?.text ?? "{}";
+    const raw = (await callGroq(prompt, maxTokens)) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     try { parsed = JSON.parse(raw.replace(/```json|```/g, "").trim()); }
@@ -2602,8 +2575,7 @@ router.post("/deepdive", async (req, res) => {
     return;
   }
 
-  const apiKey = process.env["ANTHROPIC_API_KEY"];
-  if (!apiKey) { res.status(502).json({ error: "AI not configured" }); return; }
+  if (!process.env["GROQ_API_KEY"]) { res.status(502).json({ error: "AI not configured" }); return; }
 
   try {
     const text = paragraphs.slice(0, 25).join(" ").slice(0, 3500);
@@ -2627,43 +2599,22 @@ ${text}
 
 Respond with JSON only.`;
 
-    // Retry once on transient network failure (Render → Anthropic occasionally
-    // throws "fetch failed" with no upstream response). Backs off 800ms before retry.
-    const callClaude = async (): Promise<Response> => {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 25000);
-      try {
-        return await fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify({
-            model: "claude-haiku-4-5-20251001",
-            max_tokens: 1800,
-            messages: [{ role: "user", content: prompt }],
-          }),
-          signal: ctrl.signal,
-        });
-      } finally {
-        clearTimeout(t);
-      }
-    };
-
-    let response: Response;
+    // Retry once on transient network failure.
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 25000);
+    let raw = "";
     try {
-      response = await callClaude();
-    } catch (firstErr) {
-      req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: claude fetch failed, retrying once");
-      await new Promise(r => setTimeout(r, 800));
-      response = await callClaude();
+      try {
+        raw = await callGroq(prompt, 1800, { signal: ctrl.signal });
+      } catch (firstErr) {
+        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
+        await new Promise(r => setTimeout(r, 800));
+        raw = await callGroq(prompt, 1800, { signal: ctrl.signal });
+      }
+    } finally {
+      clearTimeout(t);
     }
-
-    if (!response.ok) throw new Error(`Claude API ${response.status}`);
-    const data = await response.json() as { content: Array<{ type: string; text: string }>; usage?: any };
-    const raw = data.content.find(c => c.type === "text")?.text ?? "{}";
+    if (!raw) raw = "{}";
 
     // Forgiving JSON parse — strip code fences, extract first {...} block
     let parsed: Partial<DeepDiveResult> = {};
@@ -2737,8 +2688,7 @@ router.post("/ask", async (req, res) => {
     return;
   }
 
-  const apiKey = process.env["ANTHROPIC_API_KEY"];
-  if (!apiKey) { res.status(502).json({ error: "AI not configured" }); return; }
+  if (!process.env["GROQ_API_KEY"]) { res.status(502).json({ error: "AI not configured" }); return; }
 
   const context = [headline, summary, narrative].filter(Boolean).join("\n\n").slice(0, 2500);
   const prompt = `You are a knowledgeable, friendly assistant answering a curious reader's follow-up question. Use the story context below as your primary source, and combine it with your own general knowledge to give a complete, useful answer.
@@ -2760,25 +2710,11 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 25000);
-    let response: Response;
-    const callOnce = () => fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 600,
-        messages: [{ role: "user", content: prompt }],
-      }),
-      signal: ctrl.signal,
-    });
+    let answer = "";
     try {
-      try { response = await callOnce(); }
-      catch { await new Promise(r => setTimeout(r, 600)); response = await callOnce(); }
+      try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5 })).trim(); }
+      catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5 })).trim(); }
     } finally { clearTimeout(t); }
-
-    if (!response.ok) throw new Error(`Claude API ${response.status}`);
-    const data = await response.json() as { content: Array<{ type: string; text: string }> };
-    const answer = (data.content.find(c => c.type === "text")?.text ?? "").trim();
     if (!answer) throw new Error("Empty answer");
 
     const entry: AskCacheEntry = { at: Date.now(), answer };

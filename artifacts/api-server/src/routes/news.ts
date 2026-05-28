@@ -1416,19 +1416,25 @@ async function runAIClustering(
       .map((a, i) => `${i}:${a.headline}`)
       .join('\n');
 
-    const prompt = `You are news editor. Group these ${topic} headlines into topic clusters.
+    const prompt = `You are a senior news editor. Group these ${topic} headlines into topic clusters and write SHARP, JOURNALISTIC labels for each.
 
 ${headlines}
 
 Rules:
-- Group only genuinely related stories
-- Each number appears exactly once
-- 4-8 groups maximum
-- Singles go into "other" group
-- Label each group 2-3 words
+- Group only genuinely related stories (same underlying event/situation/entity).
+- Each headline number appears exactly once.
+- 4-8 groups maximum.
+- True singletons (no related story in the set) → assign to "Other".
 
-JSON only:
-{"groups":[{"label":"topic name","indices":[0,1,4]},{"label":"other","indices":[2,3]}]}`;
+LABEL STYLE — write each cluster label like a magazine section title:
+- 3-6 words, Title Case.
+- Lead with the named entity/place when there is one ("Iran-Israel Strikes", "Modi Cabinet Reshuffle", "Apple iPhone 17 Launch", "Tesla Q3 Earnings", "OpenAI Sora 2 Release").
+- Capture the ANGLE, not just the topic: "Fed Holds Rates Amid Inflation Fears" beats "Federal Reserve".
+- No vague labels like "Politics", "Tech", "Updates", "News". No clickbait. No emoji.
+- "Other" is the only allowed generic label, and only for unrelated singletons.
+
+Return JSON only:
+{"groups":[{"label":"<sharp label>","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`;
 
     aiCallsToday++;
     console.log(`AI call #${aiCallsToday} today for ${topic}`);
@@ -2503,7 +2509,25 @@ async function runLabelClustering(
   const limited = texts.slice(0, 30);
   const headlineList = limited.map((t, i) => `${i}: ${t}`).join('\n');
 
-  const prompt = `Group these ${topic} news headlines into topic clusters.\n\n${headlineList}\n\nRules:\n- Group only genuinely related stories\n- Each number appears exactly once\n- 3-7 groups maximum\n- Put unrelated singles in "Other"\n- Label each group 2-4 words (e.g. "India-Pakistan Tensions", "Budget 2025", "Tech Layoffs")\n\nReturn JSON only:\n{"groups":[{"label":"topic name","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`;
+  const prompt = `You are a senior news editor. Group these ${topic} headlines into topic clusters and write SHARP, JOURNALISTIC labels.
+
+${headlineList}
+
+Rules:
+- Group only genuinely related stories (same underlying event / situation / entity).
+- Each number appears exactly once.
+- 3-7 groups maximum.
+- Singletons go into "Other".
+
+LABEL STYLE — like a magazine section title:
+- 3-6 words, Title Case.
+- Lead with the named entity/place ("Iran-Israel Strikes", "Modi Cabinet Reshuffle", "Apple iPhone 17 Launch", "Tesla Q3 Earnings", "OpenAI Sora 2 Release").
+- Capture the ANGLE, not just the topic: "Fed Holds Rates Amid Inflation" beats "Federal Reserve".
+- No vague labels: avoid "Politics", "Tech", "Updates", "News". No emoji. No clickbait.
+- "Other" only for unrelated singletons.
+
+Return JSON only:
+{"groups":[{"label":"<sharp label>","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`;
   const text = await callGroq(prompt, 600);
   const raw = text.replace(/```json|```/g, '').trim();
   const parsed = JSON.parse(raw) as { groups?: { label: string; indices: number[] }[] };

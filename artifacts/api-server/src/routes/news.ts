@@ -2697,11 +2697,11 @@ router.post("/deepdive", async (req, res) => {
     const prompt = `You are transforming a raw news article into a structured, AI-native "story understanding" experience. Read the article and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldrSections": [                                    // 2-4 grouped sections. Each section has a SHORT all-caps thematic heading (5-10 words) and 3-6 substantive bullets (20-30 words each). Use this structure ALWAYS — never return a flat tldr alone. First section heading should summarize the core conflict/event; later sections add context, reactions, or background. Bullets bold key entities + figures inline by surrounding them with ** (e.g. "**Rahul Gandhi** stated, **'A denial is not an answer'**").
-    { "heading": "CORE EVENT OR CONFLICT HEADING", "bullets": ["bullet 1", "bullet 2", "bullet 3", "bullet 4"] },
-    { "heading": "CONTEXT / REACTIONS / BACKGROUND HEADING", "bullets": ["bullet 1", "bullet 2", "bullet 3", "bullet 4", "bullet 5"] }
+  "tldrSections": [                                    // 2-3 grouped sections. TOTAL across all sections MUST be ~300 words (range 280-340). Each section: SHORT all-caps thematic heading (5-10 words) + 4-6 substantive bullets (~25 words each). NEVER return fewer than 10 total bullets. First section = core event/conflict. Second section = context, reactions, or background. Optional third section = stakes / what's next. Bold key entities + figures inline by surrounding them with ** (e.g. "**Rahul Gandhi** stated, **'A denial is not an answer'**").
+    { "heading": "CORE EVENT OR CONFLICT HEADING", "bullets": ["~25-word bullet 1", "~25-word bullet 2", "~25-word bullet 3", "~25-word bullet 4", "~25-word bullet 5"] },
+    { "heading": "CONTEXT / REACTIONS / BACKGROUND HEADING", "bullets": ["~25-word bullet 1", "~25-word bullet 2", "~25-word bullet 3", "~25-word bullet 4", "~25-word bullet 5", "~25-word bullet 6"] }
   ],
-  "tldr": ["fallback flat bullets — same content as tldrSections flattened, in case the renderer needs a flat list"],  // 5-7 bullets, 20-30 words each.
+  "tldr": ["fallback flat bullets — same as tldrSections flattened"],  // 10-12 bullets, ~25 words each, total ~300 words.
   "narrative": "...",                                  // 4-5 short paragraphs (joined by \\n\\n) retelling the story in clear, accessible storytelling voice. Plain text, no markdown. TARGET ~300 words (range 280-340). Lead with the most concrete fact. Cover who/what/when/where, key numbers, context, latest development, and stakes.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
@@ -2724,11 +2724,11 @@ Respond with JSON only.`;
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 1800, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 2400, { signal: ctrl.signal });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 1800, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 2400, { signal: ctrl.signal });
       }
     } finally {
       clearTimeout(t);

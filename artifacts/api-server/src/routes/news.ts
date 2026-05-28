@@ -2752,7 +2752,7 @@ router.post("/deepdive", async (req, res) => {
     { "heading": "CONTEXT / REACTIONS / BACKGROUND HEADING", "bullets": ["~25-word bullet 1", "~25-word bullet 2", "~25-word bullet 3", "~25-word bullet 4", "~25-word bullet 5", "~25-word bullet 6"] }
   ],
   "tldr": ["fallback flat bullets — same as tldrSections flattened"],  // 10-12 bullets, ~25 words each, total ~300 words.
-  "narrative": "...",                                  // 4-5 short paragraphs (joined by \\n\\n) retelling the story in clear, accessible storytelling voice. Plain text, no markdown. TARGET ~300 words (range 280-340). Lead with the most concrete fact. Cover who/what/when/where, key numbers, context, latest development, and stakes.
+  "narrative": "para 1\\n\\npara 2\\n\\npara 3\\n\\npara 4\\n\\npara 5",   // 4-6 paragraphs separated by literal "\\n\\n" (two-character escape sequence — NOT raw newlines inside the JSON string). Plain text, no markdown. MINIMUM 350 words (target 380, range 350-420). Each paragraph 70-100 words. Lead paragraph with the most concrete fact. Cover who/what/when/where, key numbers, context, reactions, latest development, and stakes. Be substantive — no filler.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
@@ -2774,24 +2774,30 @@ Respond with JSON only.`;
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 2400, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 3000, { signal: ctrl.signal });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 2400, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 3000, { signal: ctrl.signal });
       }
     } finally {
       clearTimeout(t);
     }
     if (!raw) raw = "{}";
 
-    // Forgiving JSON parse — strip code fences, extract first {...} block
+    // Forgiving JSON parse — strip code fences, extract first {...} block,
+    // and escape any raw newlines that slipped inside string values.
     let parsed: Partial<DeepDiveResult> = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();
     try { parsed = JSON.parse(cleaned); }
     catch {
-      const m = cleaned.match(/\{[\s\S]*\}/);
-      if (m) { try { parsed = JSON.parse(m[0]); } catch { /* ignore */ } }
+      try {
+        const m = cleaned.match(/\{[\s\S]*\}/);
+        if (m) {
+          const safe = m[0].replace(/("(?:[^"\\]|\\.)*")|(\r?\n)/g, (full, str) => str ? str : "\\n");
+          parsed = JSON.parse(safe);
+        }
+      } catch { /* give up */ }
     }
 
     // Parse tldrSections — sanitize each entry, then fall back to flat tldr if AI skipped sections.

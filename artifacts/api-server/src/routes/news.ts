@@ -2720,7 +2720,7 @@ Respond with JSON only.`;
 
     // Retry once on transient network failure.
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 25000);
+    const t = setTimeout(() => ctrl.abort(), 60000);
     let raw = "";
     try {
       try {
@@ -2848,7 +2848,7 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
 
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 25000);
+    const t = setTimeout(() => ctrl.abort(), 60000);
     let answer = "";
     try {
       try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5 })).trim(); }

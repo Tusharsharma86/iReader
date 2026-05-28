@@ -2467,8 +2467,8 @@ Article: ${text}`,
       return {
         maxTokens: 1100,
         prompt: `Summarize this news article thoroughly. Return ONLY valid JSON:
-{"bullets":["<key point under 30 words>","<key point under 30 words>","<key point under 30 words>","<key point under 30 words>","<key point under 30 words>"],"summary":"<300-400 words, comprehensive and detailed: cover all major facts, named parties, key numbers, timeline, context, reactions, and implications. Write in clear paragraphs separated by blank lines.>"}
-Rules: exactly 5 bullets; summary MUST be at least 300 words (target 350); neutral tone; include all key facts, named parties, figures, timeline, context, reactions. Use multiple paragraphs.
+{"bullets":["<~45-word bullet>","<~45-word bullet>","<~45-word bullet>","<~45-word bullet>","<~45-word bullet>","<~45-word bullet>","<~45-word bullet>"],"summary":""}
+Rules: exactly 7 bullets, each ~45 words (range 35-55), total ~300 words; neutral tone; cover all key facts, named parties, figures, timeline, context, reactions, and implications. Leave "summary" as empty string — bullets carry everything.
 Article: ${text}`,
       };
   }
@@ -2590,12 +2590,23 @@ router.post("/ai-summary", async (req, res) => {
     const raw = (await callGroq(prompt, maxTokens)) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
-    try { parsed = JSON.parse(raw.replace(/```json|```/g, "").trim()); }
-    catch { /* ignore */ }
+    const cleaned = raw.replace(/```json|```/g, "").trim();
+    try { parsed = JSON.parse(cleaned); }
+    catch {
+      // Forgiving recovery: extract the largest {...} block and escape stray
+      // raw newlines inside string values so a model quirk never blanks output.
+      try {
+        const m = cleaned.match(/\{[\s\S]*\}/);
+        if (m) {
+          const safe = m[0].replace(/("(?:[^"\\]|\\.)*")|(\r?\n)/g, (full, str) => str ? str : "\\n");
+          parsed = JSON.parse(safe);
+        }
+      } catch { /* give up */ }
+    }
 
     const result: AiSummaryEntry = {
       at: Date.now(),
-      bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 5) : [],
+      bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 8) : [],
       summary: typeof parsed.summary === "string" ? parsed.summary : "",
       fiveWs: Array.isArray(parsed.fiveWs) ? parsed.fiveWs.slice(0, 5) : [],
       eli5: typeof parsed.eli5 === "string" ? parsed.eli5 : "",

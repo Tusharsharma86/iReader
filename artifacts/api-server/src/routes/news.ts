@@ -1595,8 +1595,59 @@ function refreshInBackground(
 // never double-notify even if a story stays in the cache across multiple
 // refreshes. The fingerprint hashes the cluster's source URLs + headline so it
 // is stable across refreshes (unlike StoryCard.id, which uses Date.now()).
-const sentFingerprints = new Map<string, number>();
+// Persist sent-fingerprints to disk so Render restarts don't replay yesterday's
+// breaking pushes. Map<fp, sentAtMs> with 24h TTL.
+const SENT_FP_PATH = "/tmp/push-sent-fingerprints.json";
 const SENT_TTL_MS = 24 * 60 * 60 * 1000;
+const sentFingerprints = new Map<string, number>(
+  ((): [string, number][] => {
+    try {
+      const raw = readFileSync(SENT_FP_PATH, "utf8");
+      const arr = JSON.parse(raw) as [string, number][];
+      const cutoff = Date.now() - SENT_TTL_MS;
+      return arr.filter(([, t]) => t > cutoff);
+    } catch { return []; }
+  })(),
+);
+function persistSentFingerprints(): void {
+  try {
+    writeFileSync(SENT_FP_PATH, JSON.stringify([...sentFingerprints.entries()]));
+  } catch { /* best effort */ }
+}
+
+// Per-token rate limit: max 5 pushes/hour. In-memory rolling window.
+const PUSH_RATE_PATH = "/tmp/push-rate-window.json";
+const PUSH_RATE_MAX = 5;
+const PUSH_RATE_WINDOW_MS = 60 * 60 * 1000;
+const pushRateWindow = new Map<string, number[]>(
+  ((): [string, number[]][] => {
+    try { return JSON.parse(readFileSync(PUSH_RATE_PATH, "utf8")) as [string, number[]][]; }
+    catch { return []; }
+  })(),
+);
+function persistPushRate(): void {
+  try {
+    writeFileSync(PUSH_RATE_PATH, JSON.stringify([...pushRateWindow.entries()]));
+  } catch {}
+}
+function tokensUnderLimit(tokens: string[]): string[] {
+  const now = Date.now();
+  const cutoff = now - PUSH_RATE_WINDOW_MS;
+  return tokens.filter((t) => {
+    const arr = (pushRateWindow.get(t) ?? []).filter((ts) => ts > cutoff);
+    pushRateWindow.set(t, arr);
+    return arr.length < PUSH_RATE_MAX;
+  });
+}
+function recordPushes(tokens: string[]): void {
+  const now = Date.now();
+  for (const t of tokens) {
+    const arr = pushRateWindow.get(t) ?? [];
+    arr.push(now);
+    pushRateWindow.set(t, arr);
+  }
+  persistPushRate();
+}
 
 function clusterFingerprint(s: StoryCard): string {
   const urls = (s.sources ?? [])
@@ -1617,6 +1668,7 @@ function rememberSent(fp: string): void {
     }
   }
   sentFingerprints.set(fp, Date.now());
+  persistSentFingerprints();
 }
 
 function alreadySent(fp: string): boolean {
@@ -1675,8 +1727,21 @@ async function notifyOnNewClusters(
       srcs: p.favSources.map((s: string) => s.toLowerCase()),
     }));
 
-  for (const { s: cluster, fp } of newClusters) {
-    const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 2;
+  const FRESH_MS = 90 * 60 * 1000;
+  const BATCH_CAP = 5; // Max pushes fanned out per cron run, even if many new clusters.
+
+  // Freshness filter — only push articles published in the last 90 min.
+  // Drops the "Render restart replays old clusters" failure mode.
+  const fresh = newClusters.filter(({ s }) => {
+    const ts = Date.parse((s as { publishedAt?: string }).publishedAt ?? "");
+    return Number.isFinite(ts) && Date.now() - ts < FRESH_MS;
+  });
+
+  // Hard cap so even if 50 fresh clusters land at once, we never blast 50 pushes.
+  const toSend = fresh.slice(0, BATCH_CAP);
+
+  for (const { s: cluster, fp } of toSend) {
+    const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 3;
     const primary = cluster.sources?.[0];
     const articlePayload = {
       id: cluster.id,
@@ -1688,13 +1753,17 @@ async function notifyOnNewClusters(
       publishedAt: (cluster as { publishedAt?: string }).publishedAt ?? "",
     };
 
-    // B) Breaking news: 3+ publisher confirmation
+    // B) Breaking news: 3+ publisher confirmation, rate-limited per-token.
     if (isBreaking && breakingTokens.length > 0) {
-      await sendPushToTokens(breakingTokens, {
-        title: "Breaking",
-        body: cluster.headline,
-        data: { kind: "breaking", clusterId: cluster.id, fp, article: articlePayload },
-      });
+      const allowed = tokensUnderLimit(breakingTokens);
+      if (allowed.length > 0) {
+        await sendPushToTokens(allowed, {
+          title: "Breaking",
+          body: cluster.headline,
+          data: { kind: "breaking", clusterId: cluster.id, fp, article: articlePayload },
+        });
+        recordPushes(allowed);
+      }
     }
 
     // C) Topic alerts: per-user keyword match against headline + category.
@@ -1705,12 +1774,14 @@ async function notifyOnNewClusters(
         if (sub.kws.some((k: string) => haystack.includes(k)))
           matched.push(sub.token);
       }
-      if (matched.length > 0) {
-        await sendPushToTokens(matched, {
+      const allowed = tokensUnderLimit(matched);
+      if (allowed.length > 0) {
+        await sendPushToTokens(allowed, {
           title: "Topic alert",
           body: cluster.headline,
           data: { kind: "topic", clusterId: cluster.id, fp, article: articlePayload },
         });
+        recordPushes(allowed);
       }
     }
 
@@ -1725,19 +1796,25 @@ async function notifyOnNewClusters(
           if (sub.srcs.some((src: string) => clusterSrcs.includes(src)))
             matched.push(sub.token);
         }
-        if (matched.length > 0) {
+        const allowed = tokensUnderLimit(matched);
+        if (allowed.length > 0) {
           const primarySource = (cluster.sources?.[0]?.name as string) ?? "Source";
-          await sendPushToTokens(matched, {
+          await sendPushToTokens(allowed, {
             title: primarySource,
             body: cluster.headline,
             data: { kind: "fav-source", clusterId: cluster.id, fp, article: articlePayload },
           });
+          recordPushes(allowed);
         }
       }
     }
 
     rememberSent(fp);
   }
+
+  // Also remember the skipped (over-cap) clusters so we don't re-evaluate them
+  // every cron tick — otherwise a stuck batch keeps appearing as "new".
+  for (const { fp } of fresh.slice(BATCH_CAP)) rememberSent(fp);
 }
 
 // ----- Cache hydration on boot -----

@@ -1802,24 +1802,39 @@ async function notifyOnNewClusters(
     }
 
     // C) Topic alerts: per-user keyword match. Each keyword entry may be
-    // "keyword|Topic Label" — the label drives the push title so the user
-    // knows which of their starred topics matched. Tokens are grouped by
-    // matched label so the title is meaningful per recipient.
+    // "keyword|Topic Label|stars" — the label drives the push title; stars
+    // (1-5) gate cluster significance:
+    //   5 = always send on any match
+    //   4 = any source
+    //   3 = sourceCount >= 2
+    //   2 = sourceCount >= 3
+    //   1 = sourceCount >= 3 AND breaking
+    //   0 = client should never send this entry; defensive skip here.
+    // Back-compat: 2-field "keyword|label" treated as 3 stars.
     if (topicSubs.length > 0) {
       const haystack = `${cluster.headline} ${cluster.category ?? ""}`.toLowerCase();
       const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const srcCount = cluster.sourceCount ?? cluster.sources?.length ?? 0;
       const labelToTokens = new Map<string, string[]>();
+      const passesTier = (stars: number): boolean => {
+        if (stars >= 5) return true;
+        if (stars === 4) return srcCount >= 1;
+        if (stars === 3) return srcCount >= 2;
+        if (stars === 2) return srcCount >= 3;
+        if (stars === 1) return srcCount >= 3 && isBreaking;
+        return false;
+      };
       for (const sub of topicSubs) {
         let matchedLabel: string | undefined;
         for (const entry of sub.kws as string[]) {
-          const sep = entry.indexOf("|");
-          const kw = (sep >= 0 ? entry.slice(0, sep) : entry).toLowerCase().trim();
-          const label = sep >= 0 ? entry.slice(sep + 1).trim() : "";
-          if (!kw) continue;
-          // Word-boundary match so "ai" matches " AI " but NOT "rain", "aim".
-          // Multi-word keywords (e.g. "machine learning") match as full phrase.
+          const parts = entry.split("|");
+          const kw = (parts[0] ?? "").toLowerCase().trim();
+          const label = (parts[1] ?? "").trim();
+          const starsRaw = parts[2];
+          const stars = starsRaw == null ? 3 : Math.max(0, Math.min(5, parseInt(starsRaw, 10) || 0));
+          if (!kw || stars === 0) continue;
           const re = new RegExp(`(?:^|[^a-z0-9])${escapeRe(kw)}(?:[^a-z0-9]|$)`, "i");
-          if (re.test(haystack)) {
+          if (re.test(haystack) && passesTier(stars)) {
             matchedLabel = label || "Topic alert";
             break;
           }

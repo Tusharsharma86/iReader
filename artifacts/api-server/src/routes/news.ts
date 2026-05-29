@@ -1807,14 +1807,19 @@ async function notifyOnNewClusters(
     // matched label so the title is meaningful per recipient.
     if (topicSubs.length > 0) {
       const haystack = `${cluster.headline} ${cluster.category ?? ""}`.toLowerCase();
+      const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const labelToTokens = new Map<string, string[]>();
       for (const sub of topicSubs) {
         let matchedLabel: string | undefined;
         for (const entry of sub.kws as string[]) {
           const sep = entry.indexOf("|");
-          const kw = (sep >= 0 ? entry.slice(0, sep) : entry).toLowerCase();
+          const kw = (sep >= 0 ? entry.slice(0, sep) : entry).toLowerCase().trim();
           const label = sep >= 0 ? entry.slice(sep + 1).trim() : "";
-          if (kw && haystack.includes(kw)) {
+          if (!kw) continue;
+          // Word-boundary match so "ai" matches " AI " but NOT "rain", "aim".
+          // Multi-word keywords (e.g. "machine learning") match as full phrase.
+          const re = new RegExp(`(?:^|[^a-z0-9])${escapeRe(kw)}(?:[^a-z0-9]|$)`, "i");
+          if (re.test(haystack)) {
             matchedLabel = label || "Topic alert";
             break;
           }

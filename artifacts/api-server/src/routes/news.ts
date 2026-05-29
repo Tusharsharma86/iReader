@@ -92,6 +92,20 @@ export const feedCache = cache; // alias used by other routes
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
 const TECH_CACHE_TTL_MS = 5 * 60 * 1000;
 
+// Title Case for notif titles. Keep common acronyms uppercased.
+const ACRONYMS = new Set(["AI", "ML", "EV", "EVS", "US", "UK", "EU", "UN", "RBI", "GST", "GDP", "IPO", "API", "ISRO", "NASA", "OTT", "TV", "VR", "AR", "SAAS", "NFT", "DEFI", "BJP", "AAP", "NCR", "IIT", "JEE", "NEET", "AIIMS", "OPEC", "NATO", "G7", "G20", "PLA", "IDF", "CBI", "ED", "SC", "HC"]);
+function toTitleCase(s: string): string {
+  return s
+    .split(/(\s+|[-&·•|])/)
+    .map((part) => {
+      if (/^\s+$/.test(part) || /^[-&·•|]$/.test(part)) return part;
+      const up = part.toUpperCase();
+      if (ACRONYMS.has(up)) return up;
+      return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+    })
+    .join("");
+}
+
 function ttlFor(_topic: string): number {
   return DEFAULT_CACHE_TTL_MS;
 }
@@ -1808,7 +1822,7 @@ async function notifyOnNewClusters(
       const allowed = tokensUnderLimit(aiFeedTokens);
       if (allowed.length > 0) {
         await sendPushToTokens(allowed, {
-          title: "✨ AI Feed · Breaking",
+          title: "AI Feed · Breaking",
           body: cluster.headline,
           data: { kind: "ai-feed", clusterId: cluster.id, fp, article: articlePayload },
         });
@@ -1893,7 +1907,7 @@ async function notifyOnNewClusters(
         const allowed = tokensUnderLimit(tokens);
         if (allowed.length === 0) continue;
         await sendPushToTokens(allowed, {
-          title: `📌 ${label}`,
+          title: toTitleCase(label),
           body: cluster.headline,
           data: { kind: "topic", topicLabel: label, clusterId: cluster.id, fp, article: articlePayload },
         });

@@ -1736,9 +1736,18 @@ async function notifyOnNewClusters(
   const aiFeedTokens = allPrefs
     .filter((p) => p.aiFeedEnabled)
     .map((p) => p.token);
+  // Topic subs carry favSources too — when non-empty they AND-gate the
+  // topic match (Option A: "only push topic-matched stories from my fav
+  // publications"). Empty favSources = topic alone fires.
   const topicSubs = allPrefs
     .filter((p) => p.topicsEnabled && p.topicsKeywords.length > 0)
-    .map((p) => ({ token: p.token, kws: p.topicsKeywords }));
+    .map((p) => ({
+      token: p.token,
+      kws: p.topicsKeywords,
+      favSrcs: (p.favSourcesEnabled && Array.isArray(p.favSources))
+        ? p.favSources.map((s: string) => s.toLowerCase())
+        : [],
+    }));
   const favSourceSubs = allPrefs
     .filter((p) => p.favSourcesEnabled && p.favSources.length > 0)
     .map((p) => ({
@@ -1822,6 +1831,9 @@ async function notifyOnNewClusters(
       const headline = (cluster.headline ?? "").toLowerCase();
       const summary = ((cluster as { summary?: string }).summary ?? "").toLowerCase();
       const category = (cluster.category ?? "").toLowerCase();
+      const clusterSrcs = (cluster.sources ?? [])
+        .map((s: { name?: string }) => (s.name ?? "").toLowerCase())
+        .filter(Boolean);
       const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const labelToTokens = new Map<string, string[]>();
 
@@ -1829,6 +1841,12 @@ async function notifyOnNewClusters(
       // Stars come from the label's strongest entry.
       type EntryMatch = { hHits: number; sHits: number; stars: number };
       for (const sub of topicSubs) {
+        // Option A AND-gate: when user has fav sources, topic match must
+        // ALSO come from one of those sources. Empty favSrcs = no filter.
+        if (sub.favSrcs.length > 0) {
+          const hit = clusterSrcs.some((s) => sub.favSrcs.includes(s));
+          if (!hit) continue;
+        }
         const perLabel = new Map<string, EntryMatch>();
         for (const entry of sub.kws as string[]) {
           const parts = entry.split("|");

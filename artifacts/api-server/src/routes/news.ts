@@ -1747,7 +1747,10 @@ async function notifyOnNewClusters(
     }));
 
   const FRESH_MS = 90 * 60 * 1000;
-  const BATCH_CAP = 5;
+  // Non-breaking categories (AI Feed / topic / fav-source) stay capped so we
+  // don't blast 50 pushes. Breaking has no cap — major news shouldn't be
+  // gated by batch size. Per-token hourly rate-limit still protects users.
+  const NONBREAKING_BATCH_CAP = 5;
   const DEVANAGARI = /[ऀ-ॿ]/; // Hindi headlines — out of scope, feed already filters.
 
   // Freshness filter + drop Hindi headlines.
@@ -1759,11 +1762,14 @@ async function notifyOnNewClusters(
     return Number.isFinite(ts) && Date.now() - ts < FRESH_MS;
   });
 
-  // Hard cap so even if 50 fresh clusters land at once, we never blast 50 pushes.
-  const toSend = fresh.slice(0, BATCH_CAP);
+  // Split breaking vs rest so we can apply different caps.
+  let nonbreakingSent = 0;
 
-  for (const { s: cluster, fp } of toSend) {
+  for (const { s: cluster, fp } of fresh) {
     const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 3;
+    // Cap non-breaking categories only. Breaking always flows through.
+    const nonBreakingAllowed = nonbreakingSent < NONBREAKING_BATCH_CAP;
+    let firedNonBreaking = false;
     const primary = cluster.sources?.[0];
     const articlePayload = {
       id: cluster.id,
@@ -1789,7 +1795,7 @@ async function notifyOnNewClusters(
     }
 
     // B2) AI Feed alerts — same trigger, but deeplinks to AI Feed Deep Dive.
-    if (isBreaking && aiFeedTokens.length > 0) {
+    if (isBreaking && aiFeedTokens.length > 0 && nonBreakingAllowed) {
       const allowed = tokensUnderLimit(aiFeedTokens);
       if (allowed.length > 0) {
         await sendPushToTokens(allowed, {
@@ -1798,51 +1804,71 @@ async function notifyOnNewClusters(
           data: { kind: "ai-feed", clusterId: cluster.id, fp, article: articlePayload },
         });
         recordPushes(allowed);
+        firedNonBreaking = true;
       }
     }
 
-    // C) Topic alerts: per-user keyword match. Each keyword entry may be
-    // "keyword|Topic Label|stars" — the label drives the push title; stars
-    // (1-5) gate cluster significance:
-    //   5 = always send on any match
-    //   4 = any source
-    //   3 = sourceCount >= 2
-    //   2 = sourceCount >= 3
-    //   1 = sourceCount >= 3 AND breaking
-    //   0 = client should never send this entry; defensive skip here.
-    // Back-compat: 2-field "keyword|label" treated as 3 stars.
-    if (topicSubs.length > 0) {
-      const haystack = `${cluster.headline} ${cluster.category ?? ""}`.toLowerCase();
+    // C) Topic alerts: stars gate by MATCH STRENGTH (relevance signal), not
+    // by source coverage — so a niche topic (e.g. ISRO) with one publisher
+    // still fires at 5★. Per topic-entry "keyword|Label|stars":
+    //   5★ = any single keyword match (headline OR summary)
+    //   4★ = headline match OR 2+ summary matches
+    //   3★ = headline match required (>=1 in headline)
+    //   2★ = 2+ total matches across headline+summary
+    //   1★ = 3+ total matches AND cluster is breaking-flagged
+    //   0★ = skip
+    // Back-compat: 2-field "keyword|label" treated as 3★.
+    if (topicSubs.length > 0 && nonBreakingAllowed) {
+      const headline = (cluster.headline ?? "").toLowerCase();
+      const summary = ((cluster as { summary?: string }).summary ?? "").toLowerCase();
+      const category = (cluster.category ?? "").toLowerCase();
       const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const srcCount = cluster.sourceCount ?? cluster.sources?.length ?? 0;
       const labelToTokens = new Map<string, string[]>();
-      const passesTier = (stars: number): boolean => {
-        if (stars >= 5) return true;
-        if (stars === 4) return srcCount >= 1;
-        if (stars === 3) return srcCount >= 2;
-        if (stars === 2) return srcCount >= 3;
-        if (stars === 1) return srcCount >= 3 && isBreaking;
-        return false;
-      };
+
+      // Group entries by label so we count matches per topic, not per keyword.
+      // Stars come from the label's strongest entry.
+      type EntryMatch = { hHits: number; sHits: number; stars: number };
       for (const sub of topicSubs) {
-        let matchedLabel: string | undefined;
+        const perLabel = new Map<string, EntryMatch>();
         for (const entry of sub.kws as string[]) {
           const parts = entry.split("|");
           const kw = (parts[0] ?? "").toLowerCase().trim();
-          const label = (parts[1] ?? "").trim();
+          const label = (parts[1] ?? "").trim() || "Topic alert";
           const starsRaw = parts[2];
           const stars = starsRaw == null ? 3 : Math.max(0, Math.min(5, parseInt(starsRaw, 10) || 0));
           if (!kw || stars === 0) continue;
-          const re = new RegExp(`(?:^|[^a-z0-9])${escapeRe(kw)}(?:[^a-z0-9]|$)`, "i");
-          if (re.test(haystack) && passesTier(stars)) {
-            matchedLabel = label || "Topic alert";
-            break;
-          }
+          const re = new RegExp(`(?:^|[^a-z0-9])${escapeRe(kw)}(?:[^a-z0-9]|$)`, "gi");
+          const hHits = (headline.match(re)?.length ?? 0) + (category.match(re)?.length ?? 0);
+          const sHits = summary.match(re)?.length ?? 0;
+          if (hHits === 0 && sHits === 0) continue;
+          const prev = perLabel.get(label) ?? { hHits: 0, sHits: 0, stars };
+          perLabel.set(label, {
+            hHits: prev.hHits + hHits,
+            sHits: prev.sHits + sHits,
+            stars: Math.max(prev.stars, stars),
+          });
         }
-        if (matchedLabel) {
-          const arr = labelToTokens.get(matchedLabel) ?? [];
+
+        // Pick the strongest matched label that also passes its tier.
+        let chosen: string | undefined;
+        let chosenScore = -1;
+        for (const [label, m] of perLabel.entries()) {
+          const total = m.hHits + m.sHits;
+          let pass = false;
+          if (m.stars >= 5) pass = total >= 1;
+          else if (m.stars === 4) pass = m.hHits >= 1 || m.sHits >= 2;
+          else if (m.stars === 3) pass = m.hHits >= 1;
+          else if (m.stars === 2) pass = total >= 2;
+          else if (m.stars === 1) pass = total >= 3 && isBreaking;
+          if (!pass) continue;
+          // Score: prefer higher star, then heavier headline weight.
+          const score = m.stars * 100 + m.hHits * 3 + m.sHits;
+          if (score > chosenScore) { chosenScore = score; chosen = label; }
+        }
+        if (chosen) {
+          const arr = labelToTokens.get(chosen) ?? [];
           arr.push(sub.token);
-          labelToTokens.set(matchedLabel, arr);
+          labelToTokens.set(chosen, arr);
         }
       }
       for (const [label, tokens] of labelToTokens.entries()) {
@@ -1854,11 +1880,12 @@ async function notifyOnNewClusters(
           data: { kind: "topic", topicLabel: label, clusterId: cluster.id, fp, article: articlePayload },
         });
         recordPushes(allowed);
+        firedNonBreaking = true;
       }
     }
 
     // D) Fav-source: any source name in the cluster matches a user's list.
-    if (favSourceSubs.length > 0) {
+    if (favSourceSubs.length > 0 && nonBreakingAllowed) {
       const clusterSrcs = (cluster.sources ?? [])
         .map((s: { name?: string }) => (s.name ?? "").toLowerCase())
         .filter(Boolean);
@@ -1877,16 +1904,18 @@ async function notifyOnNewClusters(
             data: { kind: "fav-source", clusterId: cluster.id, fp, article: articlePayload },
           });
           recordPushes(allowed);
+          firedNonBreaking = true;
         }
       }
     }
 
+    if (firedNonBreaking) nonbreakingSent++;
     rememberSent(fp);
   }
 
-  // Also remember the skipped (over-cap) clusters so we don't re-evaluate them
-  // every cron tick — otherwise a stuck batch keeps appearing as "new".
-  for (const { fp } of fresh.slice(BATCH_CAP)) rememberSent(fp);
+  // No blanket over-cap skip anymore — breaking always flows; non-breaking
+  // already self-skips once nonbreakingSent hits the cap (those clusters
+  // either fire as breaking or get dropped via rememberSent inside the loop).
 }
 
 // ----- Cache hydration on boot -----

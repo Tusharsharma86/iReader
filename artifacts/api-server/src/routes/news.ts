@@ -1817,8 +1817,13 @@ async function notifyOnNewClusters(
       }
     }
 
-    // B2) AI Feed alerts — same trigger, but deeplinks to AI Feed Deep Dive.
-    if (isBreaking && aiFeedTokens.length > 0 && nonBreakingAllowed) {
+    // B2) AI Feed alerts — same breaking trigger, deeplinks to AI Feed Deep
+    // Dive. This is a BREAKING-tier notification (only fires on isBreaking),
+    // so it must NOT be gated by the non-breaking cap — otherwise after 5
+    // topic/fav pushes in a tick, AI Feed breaking would be silently dropped
+    // (which is exactly the "AI feed notifs dead" symptom). Uncapped like
+    // regular breaking; per-token hourly rate-limit still applies.
+    if (isBreaking && aiFeedTokens.length > 0) {
       const allowed = tokensUnderLimit(aiFeedTokens);
       if (allowed.length > 0) {
         await sendPushToTokens(allowed, {
@@ -1827,7 +1832,6 @@ async function notifyOnNewClusters(
           data: { kind: "ai-feed", clusterId: cluster.id, fp, article: articlePayload },
         });
         recordPushes(allowed);
-        firedNonBreaking = true;
       }
     }
 

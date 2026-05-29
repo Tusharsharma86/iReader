@@ -1660,14 +1660,11 @@ function persistPushRate(): void {
     writeFileSync(PUSH_RATE_PATH, JSON.stringify([...pushRateWindow.entries()]));
   } catch {}
 }
+// Per-token hourly rate limit removed by request — no volume caps anywhere.
+// Dedup (rememberSent fingerprint) + freshness window still prevent duplicate
+// and stale sends; this only governs raw volume, which the user wants uncapped.
 function tokensUnderLimit(tokens: string[]): string[] {
-  const now = Date.now();
-  const cutoff = now - PUSH_RATE_WINDOW_MS;
-  return tokens.filter((t) => {
-    const arr = (pushRateWindow.get(t) ?? []).filter((ts) => ts > cutoff);
-    pushRateWindow.set(t, arr);
-    return arr.length < PUSH_RATE_MAX;
-  });
+  return tokens;
 }
 function recordPushes(tokens: string[]): void {
   const now = Date.now();
@@ -1770,10 +1767,9 @@ async function notifyOnNewClusters(
     }));
 
   const FRESH_MS = 90 * 60 * 1000;
-  // Non-breaking categories (AI Feed / topic / fav-source) stay capped so we
-  // don't blast 50 pushes. Breaking has no cap — major news shouldn't be
-  // gated by batch size. Per-token hourly rate-limit still protects users.
-  const NONBREAKING_BATCH_CAP = 5;
+  // No volume caps (per user request): every fresh, non-duplicate cluster that
+  // matches a user's prefs is sent. Dedup fingerprint + 90-min freshness are
+  // the only gates remaining.
   const DEVANAGARI = /[ऀ-ॿ]/; // Hindi headlines — out of scope, feed already filters.
 
   // Freshness filter + drop Hindi headlines.
@@ -1785,14 +1781,9 @@ async function notifyOnNewClusters(
     return Number.isFinite(ts) && Date.now() - ts < FRESH_MS;
   });
 
-  // Split breaking vs rest so we can apply different caps.
-  let nonbreakingSent = 0;
-
+  // No volume caps anywhere (per user request). Dedup + freshness still apply.
   for (const { s: cluster, fp } of fresh) {
     const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 3;
-    // Cap non-breaking categories only. Breaking always flows through.
-    const nonBreakingAllowed = nonbreakingSent < NONBREAKING_BATCH_CAP;
-    let firedNonBreaking = false;
     const primary = cluster.sources?.[0];
     const articlePayload = {
       id: cluster.id,
@@ -1845,7 +1836,7 @@ async function notifyOnNewClusters(
     //   1★ = 3+ total matches AND cluster is breaking-flagged
     //   0★ = skip
     // Back-compat: 2-field "keyword|label" treated as 3★.
-    if (topicSubs.length > 0 && nonBreakingAllowed) {
+    if (topicSubs.length > 0) {
       const headline = (cluster.headline ?? "").toLowerCase();
       const summary = ((cluster as { summary?: string }).summary ?? "").toLowerCase();
       const category = (cluster.category ?? "").toLowerCase();
@@ -1916,12 +1907,11 @@ async function notifyOnNewClusters(
           data: { kind: "topic", topicLabel: label, clusterId: cluster.id, fp, article: articlePayload },
         });
         recordPushes(allowed);
-        firedNonBreaking = true;
       }
     }
 
     // D) Fav-source: any source name in the cluster matches a user's list.
-    if (favSourceSubs.length > 0 && nonBreakingAllowed) {
+    if (favSourceSubs.length > 0) {
       const clusterSrcs = (cluster.sources ?? [])
         .map((s: { name?: string }) => (s.name ?? "").toLowerCase())
         .filter(Boolean);
@@ -1940,18 +1930,12 @@ async function notifyOnNewClusters(
             data: { kind: "fav-source", clusterId: cluster.id, fp, article: articlePayload },
           });
           recordPushes(allowed);
-          firedNonBreaking = true;
         }
       }
     }
 
-    if (firedNonBreaking) nonbreakingSent++;
     rememberSent(fp);
   }
-
-  // No blanket over-cap skip anymore — breaking always flows; non-breaking
-  // already self-skips once nonbreakingSent hits the cap (those clusters
-  // either fire as breaking or get dropped via rememberSent inside the loop).
 }
 
 // ----- Cache hydration on boot -----
@@ -2931,11 +2915,11 @@ router.post("/deepdive", async (req, res) => {
     const prompt = `You are transforming a raw news article into a structured, AI-native "story understanding" experience. Read the article and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldrSections": [                                    // 2-3 grouped sections. TOTAL across all sections MUST be ~300 words (range 280-340). Each section: SHORT all-caps thematic heading (5-10 words) + 4-6 substantive bullets (~25 words each). NEVER return fewer than 10 total bullets. First section = core event/conflict. Second section = context, reactions, or background. Optional third section = stakes / what's next. Bold key entities + figures inline by surrounding them with ** (e.g. "**Rahul Gandhi** stated, **'A denial is not an answer'**").
-    { "heading": "CORE EVENT OR CONFLICT HEADING", "bullets": ["~25-word bullet 1", "~25-word bullet 2", "~25-word bullet 3", "~25-word bullet 4", "~25-word bullet 5"] },
-    { "heading": "CONTEXT / REACTIONS / BACKGROUND HEADING", "bullets": ["~25-word bullet 1", "~25-word bullet 2", "~25-word bullet 3", "~25-word bullet 4", "~25-word bullet 5", "~25-word bullet 6"] }
+  "tldrSections": [                                    // 2-3 grouped sections. EACH section MUST total 200+ words (range 200-260 words per section) — so 2 sections ≈ 420-500 words total, 3 sections ≈ 620-740. Each section: SHORT all-caps thematic heading (5-10 words) + 7-9 substantive bullets (~28-32 words each). NEVER fewer than 7 bullets in any section. First section = core event/conflict. Second section = context, reactions, or background. Optional third section = stakes / what's next. Bold key entities + figures inline by surrounding them with ** (e.g. "**Rahul Gandhi** stated, **'A denial is not an answer'**").
+    { "heading": "CORE EVENT OR CONFLICT HEADING", "bullets": ["~30-word bullet 1", "~30-word bullet 2", "~30-word bullet 3", "~30-word bullet 4", "~30-word bullet 5", "~30-word bullet 6", "~30-word bullet 7"] },
+    { "heading": "CONTEXT / REACTIONS / BACKGROUND HEADING", "bullets": ["~30-word bullet 1", "~30-word bullet 2", "~30-word bullet 3", "~30-word bullet 4", "~30-word bullet 5", "~30-word bullet 6", "~30-word bullet 7"] }
   ],
-  "tldr": ["fallback flat bullets — same as tldrSections flattened"],  // 10-12 bullets, ~25 words each, total ~300 words.
+  "tldr": ["fallback flat bullets — same as tldrSections flattened"],  // 14-18 bullets, ~30 words each.
   "narrative": "para 1\\n\\npara 2\\n\\npara 3\\n\\npara 4\\n\\npara 5",   // 4-6 paragraphs separated by literal "\\n\\n" (two-character escape sequence — NOT raw newlines inside the JSON string). Plain text, no markdown. MINIMUM 350 words (target 380, range 350-420). Each paragraph 70-100 words. Lead paragraph with the most concrete fact. Cover who/what/when/where, key numbers, context, reactions, latest development, and stakes. Be substantive — no filler.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
@@ -2954,15 +2938,15 @@ Respond with JSON only.`;
 
     // Retry once on transient network failure.
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 60000);
+    const t = setTimeout(() => ctrl.abort(), 90000);
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 3000, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 4096, { signal: ctrl.signal });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 3000, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 4096, { signal: ctrl.signal });
       }
     } finally {
       clearTimeout(t);
@@ -2993,15 +2977,15 @@ Respond with JSON only.`;
         const obj = s as { heading?: unknown; bullets?: unknown };
         return {
           heading: typeof obj?.heading === "string" ? obj.heading.slice(0, 120) : "",
-          bullets: Array.isArray(obj?.bullets) ? obj.bullets.slice(0, 8).map(String) : [],
+          bullets: Array.isArray(obj?.bullets) ? obj.bullets.slice(0, 12).map(String) : [],
         };
       })
       .filter((s) => s.heading && s.bullets.length > 0)
       .slice(0, 4);
 
     const flatTldr = Array.isArray(parsed.tldr) && parsed.tldr.length > 0
-      ? parsed.tldr.slice(0, 8).map(String)
-      : tldrSections.flatMap((s) => s.bullets).slice(0, 8);
+      ? parsed.tldr.slice(0, 18).map(String)
+      : tldrSections.flatMap((s) => s.bullets).slice(0, 18);
 
     const result: DeepDiveResult = {
       at: Date.now(),

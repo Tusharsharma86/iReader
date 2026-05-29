@@ -1420,10 +1420,8 @@ async function runAIClustering(
       lastReset = Date.now();
     }
 
-    if (aiCallsToday >= 100) {
-      console.warn('AI limit reached, keyword fallback');
-      return clusterByKeywords(articles);
-    }
+    // Daily AI-call budget cap removed by request — AI clustering always runs.
+    // (Counter kept only for logging/visibility.)
 
     const headlines = articles
       .slice(0, 30)

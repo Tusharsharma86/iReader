@@ -1757,12 +1757,8 @@ async function notifyOnNewClusters(
         ? p.favSources.map((s: string) => s.toLowerCase())
         : [],
     }));
-  const favSourceSubs = allPrefs
-    .filter((p) => p.favSourcesEnabled && p.favSources.length > 0)
-    .map((p) => ({
-      token: p.token,
-      srcs: p.favSources.map((s: string) => s.toLowerCase()),
-    }));
+  // (favSourceSubs removed — fav sources are now only an AND-filter inside
+  // topicSubs, no standalone fav-source notification stream.)
 
   const FRESH_MS = 90 * 60 * 1000;
   // No volume caps (per user request): every fresh, non-duplicate cluster that
@@ -1908,29 +1904,9 @@ async function notifyOnNewClusters(
       }
     }
 
-    // D) Fav-source: any source name in the cluster matches a user's list.
-    if (favSourceSubs.length > 0) {
-      const clusterSrcs = (cluster.sources ?? [])
-        .map((s: { name?: string }) => (s.name ?? "").toLowerCase())
-        .filter(Boolean);
-      if (clusterSrcs.length > 0) {
-        const matched: string[] = [];
-        for (const sub of favSourceSubs) {
-          if (sub.srcs.some((src: string) => clusterSrcs.includes(src)))
-            matched.push(sub.token);
-        }
-        const allowed = tokensUnderLimit(matched);
-        if (allowed.length > 0) {
-          const primarySource = (cluster.sources?.[0]?.name as string) ?? "Source";
-          await sendPushToTokens(allowed, {
-            title: primarySource,
-            body: cluster.headline,
-            data: { kind: "fav-source", clusterId: cluster.id, fp, article: articlePayload },
-          });
-          recordPushes(allowed);
-        }
-      }
-    }
+    // (Standalone fav-source notification stream removed.) Favorite sources
+    // now serve ONLY as an AND-filter on topic alerts (section C) — picking
+    // fav sources no longer blasts every story those publishers post.
 
     rememberSent(fp);
   }

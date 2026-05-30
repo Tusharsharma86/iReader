@@ -1896,7 +1896,9 @@ async function notifyOnNewClusters(
         const allowed = tokensUnderLimit(tokens);
         if (allowed.length === 0) continue;
         await sendPushToTokens(allowed, {
-          title: toTitleCase(label),
+          // Header shows "Topic · Source" so the user sees which starred
+          // topic matched AND which publisher it came from.
+          title: primary?.name ? `${toTitleCase(label)} · ${primary.name}` : toTitleCase(label),
           body: cluster.headline,
           data: { kind: "topic", topicLabel: label, clusterId: cluster.id, fp, article: articlePayload },
         });

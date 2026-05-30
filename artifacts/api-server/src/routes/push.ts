@@ -274,4 +274,56 @@ const digestTickHandler = async (_req: import("express").Request, res: import("e
 router.post("/digest-tick", digestTickHandler);
 router.get("/digest-tick", digestTickHandler);
 
+// ── Diagnostics ─────────────────────────────────────────────────────────────
+// Counts of registered tokens + per-category opt-ins. Lets us confirm a device
+// actually registered + enabled breaking, without exposing tokens.
+router.get("/stats", async (req, res) => {
+  try {
+    const tokens = await db.select().from(pushTokensTable);
+    const prefs = await db.select().from(notificationPrefsTable);
+    res.json({
+      tokens: tokens.length,
+      prefs: prefs.length,
+      breakingEnabled: prefs.filter((p) => p.breakingEnabled).length,
+      aiFeedEnabled: prefs.filter((p) => (p as { aiFeedEnabled?: boolean }).aiFeedEnabled).length,
+      topicsEnabled: prefs.filter((p) => p.topicsEnabled).length,
+      digestEnabled: prefs.filter((p) => p.digestEnabled).length,
+    });
+  } catch (err) {
+    req.log?.error?.({ err }, "push stats failed");
+    res.status(500).json({ error: "stats failed" });
+  }
+});
+
+// Manual test push — isolates the delivery pipeline (token + FCM + device)
+// from the news/cron trigger. ?token=... targets one device; otherwise sends
+// to every device with breakingEnabled. Returns immediately; sends in bg.
+const testPushHandler = async (req: import("express").Request, res: import("express").Response) => {
+  const only = (req.query["token"] as string | undefined)?.trim();
+  res.json({ ok: true, queued: true, target: only ? "single token" : "all breakingEnabled" });
+  (async () => {
+    try {
+      let tokens: string[];
+      if (only) {
+        tokens = [only];
+      } else {
+        const prefs = await db.select().from(notificationPrefsTable);
+        tokens = prefs.filter((p) => p.breakingEnabled).map((p) => p.token);
+      }
+      if (tokens.length === 0) return;
+      const { sendPushToTokens } = await import("../lib/push-sender");
+      await sendPushToTokens(tokens, {
+        title: "Test · Breaking",
+        body: "If you see this, push delivery works. The trigger is the only variable.",
+        data: { kind: "breaking", clusterId: "test", fp: "test", article: {} },
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[push] test push failed", err);
+    }
+  })();
+};
+router.get("/test", testPushHandler);
+router.post("/test", testPushHandler);
+
 export default router;

@@ -2881,7 +2881,7 @@ router.post("/deepdive", async (req, res) => {
     return;
   }
 
-  const cacheKey = `deepdive:${url}`;
+  const cacheKey = `deepdive:v2:${url}`; // v2 — new TL;DR + cited full-story format
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -2900,16 +2900,16 @@ router.post("/deepdive", async (req, res) => {
   if (!process.env["GROQ_API_KEY"]) { res.status(502).json({ error: "AI not configured" }); return; }
 
   try {
-    const text = paragraphs.slice(0, 25).join(" ").slice(0, 3500);
-    const prompt = `You are transforming a raw news article into a structured, AI-native "story understanding" experience. Read the article and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
+    const text = paragraphs.slice(0, 40).join("\n").slice(0, 6000);
+    const prompt = `You are transforming raw news coverage (multiple source excerpts, each tagged like "[Source Name]:") into a structured, AI-native "story understanding" experience. Read ALL excerpts and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldrSections": [                                    // 2-3 grouped sections. EACH section MUST total 200+ words (range 200-260 words per section) — so 2 sections ≈ 420-500 words total, 3 sections ≈ 620-740. Each section: SHORT all-caps thematic heading (5-10 words) + 7-9 substantive bullets (~28-32 words each). NEVER fewer than 7 bullets in any section. First section = core event/conflict. Second section = context, reactions, or background. Optional third section = stakes / what's next. Bold key entities + figures inline by surrounding them with ** (e.g. "**Rahul Gandhi** stated, **'A denial is not an answer'**").
-    { "heading": "CORE EVENT OR CONFLICT HEADING", "bullets": ["~30-word bullet 1", "~30-word bullet 2", "~30-word bullet 3", "~30-word bullet 4", "~30-word bullet 5", "~30-word bullet 6", "~30-word bullet 7"] },
-    { "heading": "CONTEXT / REACTIONS / BACKGROUND HEADING", "bullets": ["~30-word bullet 1", "~30-word bullet 2", "~30-word bullet 3", "~30-word bullet 4", "~30-word bullet 5", "~30-word bullet 6", "~30-word bullet 7"] }
+  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + EXACTLY 3-4 bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets MUST stay within 300-360 words (hard cap 360 — be concise, merge related facts rather than adding more bullets). First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
+    { "heading": "CORE EVENT", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] },
+    { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
-  "tldr": ["fallback flat bullets — same as tldrSections flattened"],  // 14-18 bullets, ~30 words each.
-  "narrative": "para 1\\n\\npara 2\\n\\npara 3\\n\\npara 4\\n\\npara 5",   // 4-6 paragraphs separated by literal "\\n\\n" (two-character escape sequence — NOT raw newlines inside the JSON string). Plain text, no markdown. MINIMUM 350 words (target 380, range 350-420). Each paragraph 70-100 words. Lead paragraph with the most concrete fact. Cover who/what/when/where, key numbers, context, reactions, latest development, and stakes. Be substantive — no filler.
+  "tldr": ["flat fallback — 6-10 complete-sentence bullets, same 300-360 word cap"],
+  "narrative": "para1\\n\\npara2\\n\\npara3\\n\\npara4\\n\\npara5\\n\\npara6",   // THE FULL STORY — comprehensive and rich. NO upper word limit: aim 550-850 words across 6-9 paragraphs separated by literal "\\n\\n" (two-char escape, NOT raw newlines). Synthesise facts from EVERY source excerpt provided, not just the first. Attribute specific facts, figures and quotes to their source INLINE in parentheses using the [Source] tags from the input, e.g. "...effective May 1, 2026 (Times of India)." Use 3+ distinct source attributions where available. Cover who/what/when/where/why, all key numbers, multiple perspectives, background, reactions and what's next. Plain text, no markdown. Substantive — no filler, no repetition.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
@@ -2931,11 +2931,11 @@ Respond with JSON only.`;
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 4096, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 4096, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal });
       }
     } finally {
       clearTimeout(t);

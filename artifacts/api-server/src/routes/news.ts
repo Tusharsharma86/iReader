@@ -2000,16 +2000,16 @@ router.get("/debug/sources", async (_req, res) => {
 // Cheap cron endpoint — fires breaking-feed refresh in background, returns
 // immediately. Designed for cron-job.org (avoids their 30s timeout + body
 // size cap from streaming a full feed response).
+// Poll every topic feed so a newly-published article in ANY category the user
+// cares about (incl. markets + india-politics) gets refreshed → matched →
+// pushed. refreshInBackground fires notifyOnNewClusters on genuinely-new ones.
+const CRON_POLL_TOPICS = ["breaking", "technology", "geopolitics", "business", "markets", "india-politics"];
 router.get("/cron/poll", (req, res) => {
-  for (const topic of ["breaking", "technology", "geopolitics", "business"]) {
-    refreshInBackground(topic, req.log);
-  }
+  for (const topic of CRON_POLL_TOPICS) refreshInBackground(topic, req.log);
   res.json({ ok: true });
 });
 router.post("/cron/poll", (req, res) => {
-  for (const topic of ["breaking", "technology", "geopolitics", "business"]) {
-    refreshInBackground(topic, req.log);
-  }
+  for (const topic of CRON_POLL_TOPICS) refreshInBackground(topic, req.log);
   res.json({ ok: true });
 });
 

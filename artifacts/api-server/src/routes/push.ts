@@ -129,7 +129,7 @@ router.post("/preferences", async (req, res) => {
       .filter((k): k is string => typeof k === "string")
       .map((k) => k.trim().toLowerCase())
       .filter((k) => k.length > 0)
-      .slice(0, 30);
+      .slice(0, 500); // was 30 — the real cap that silently dropped most starred topics
   if (typeof body?.digestEveningEnabled === "boolean")
     update["digestEveningEnabled"] = body.digestEveningEnabled;
   if (

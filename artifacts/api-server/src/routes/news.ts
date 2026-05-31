@@ -2004,13 +2004,26 @@ router.get("/debug/sources", async (_req, res) => {
 // cares about (incl. markets + india-politics) gets refreshed → matched →
 // pushed. refreshInBackground fires notifyOnNewClusters on genuinely-new ones.
 const CRON_POLL_TOPICS = ["breaking", "technology", "geopolitics", "business", "markets", "india-politics"];
+let lastCronPollAt = 0;
+let cronPollCount = 0;
 router.get("/cron/poll", (req, res) => {
+  lastCronPollAt = Date.now(); cronPollCount++;
   for (const topic of CRON_POLL_TOPICS) refreshInBackground(topic, req.log);
   res.json({ ok: true });
 });
 router.post("/cron/poll", (req, res) => {
+  lastCronPollAt = Date.now(); cronPollCount++;
   for (const topic of CRON_POLL_TOPICS) refreshInBackground(topic, req.log);
   res.json({ ok: true });
+});
+// Heartbeat — confirms whether an external cron is actually hitting /cron/poll.
+router.get("/cron/status", (_req, res) => {
+  res.json({
+    lastPollAt: lastCronPollAt ? new Date(lastCronPollAt).toISOString() : null,
+    secondsSinceLastPoll: lastCronPollAt ? Math.round((Date.now() - lastCronPollAt) / 1000) : null,
+    pollsSinceBoot: cronPollCount,
+    bootedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+  });
 });
 
 router.get("/feed", async (req, res) => {

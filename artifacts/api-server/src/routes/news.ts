@@ -301,6 +301,16 @@ function isSportsOrEntertainment(article: NewsDataArticle): boolean {
   return SPORTS_ENTERTAINMENT_RE.test(text);
 }
 
+// NYT's recurring "Here's the Latest" live-briefing roundup is a placeholder,
+// not a story — drop it at the source so it never reaches web or app feeds.
+function isJunkRoundup(article: NewsDataArticle): boolean {
+  const title = (article.title ?? "").toLowerCase();
+  if (!/here.?s the latest|here are the latest/.test(title)) return false;
+  const domain = article.link ? articleDomain(article.link) : "";
+  const src = (article.source_id ?? "").toLowerCase();
+  return /nyt|nytimes|new york times/.test(domain) || /nyt|nytimes|new york times/.test(src);
+}
+
 function matchesTopic(article: NewsDataArticle, topic: string): boolean {
   const kws = TOPIC_KEYWORDS[topic];
   if (!kws) return true;
@@ -437,6 +447,7 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
   }
   const filtered = articles
     .filter(a => !isSportsOrEntertainment(a))
+    .filter(a => !isJunkRoundup(a))
     .filter(a => matchesTopic(a, topic));
 
   filtered.sort((a, b) => {
@@ -1341,6 +1352,7 @@ async function buildBreakingFeed(): Promise<FeedItem[]> {
   // Hard-filter: remove sports/entertainment and gadget-deal noise
   const filtered = raw
     .filter(a => !isSportsOrEntertainment(a))
+    .filter(a => !isJunkRoundup(a))
     .filter(a => {
       const text = `${a.title ?? ""} ${a.description ?? ""}`;
       return !BREAKING_LOWPRIORITY_RE.test(text);

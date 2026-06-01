@@ -1689,36 +1689,10 @@ function clusterFingerprint(s: StoryCard): string {
   return createHash("sha256").update(key).digest("hex");
 }
 
-// Fuzzy de-dup: a reworded headline about the SAME event shares most tokens
-// but produces a different exact fingerprint. Keep recently-sent signatures
-// and reject a new cluster whose tokens overlap heavily (Jaccard) with one we
-// already pushed inside the TTL window. In-memory only — the exact fingerprint
-// (persisted to disk) already covers restarts.
-const sentSignatures: { tokens: Set<string>; at: number }[] = [];
-function jaccard(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) return 0;
-  let inter = 0;
-  for (const t of a) if (b.has(t)) inter++;
-  return inter / (a.size + b.size - inter);
-}
-function isFuzzyDuplicate(tokens: Set<string>): boolean {
-  if (tokens.size === 0) return false;
-  const cutoff = Date.now() - SENT_TTL_MS;
-  for (const entry of sentSignatures) {
-    if (entry.at < cutoff) continue;
-    if (jaccard(tokens, entry.tokens) >= 0.6) return true;
-  }
-  return false;
-}
-function rememberSignature(tokens: Set<string>): void {
-  if (tokens.size === 0) return;
-  const cutoff = Date.now() - SENT_TTL_MS;
-  // Prune expired as we go (keeps array small).
-  for (let i = sentSignatures.length - 1; i >= 0; i--) {
-    if (sentSignatures[i]!.at < cutoff) sentSignatures.splice(i, 1);
-  }
-  sentSignatures.push({ tokens, at: Date.now() });
-}
+// NOTE: the signature-based clusterFingerprint above already de-dups the
+// "same story, more sources joined" case that caused repeating breaking
+// pushes. An additional fuzzy (Jaccard) guard was tried but over-suppressed
+// genuinely-new stories, so it was removed — exact signature dedup only.
 
 function rememberSent(fp: string): void {
   // Cheap GC: prune expired entries when the map grows.
@@ -1813,11 +1787,6 @@ async function notifyOnNewClusters(
 
   // No volume caps anywhere (per user request). Dedup + freshness still apply.
   for (const { s: cluster, fp } of fresh) {
-    // Fuzzy de-dup: skip clusters that are a reworded/re-led version of a
-    // story we already pushed in the TTL window (different exact fingerprint,
-    // but same event). This is the main fix for repeating breaking pushes.
-    const sigTokens = new Set(storySignature(cluster.headline ?? ""));
-    if (isFuzzyDuplicate(sigTokens)) continue;
     const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 3;
     const primary = cluster.sources?.[0];
     const articlePayload = {
@@ -1952,7 +1921,6 @@ async function notifyOnNewClusters(
     // fav sources no longer blasts every story those publishers post.
 
     rememberSent(fp);
-    rememberSignature(sigTokens);
   }
 }
 

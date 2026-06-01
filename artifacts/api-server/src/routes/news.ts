@@ -1068,6 +1068,57 @@ function clusterForMixedFeed(articles: NewsDataArticle[]): number[][] {
   return Array.from(compMap.values()).map(g => g.slice(0, 6));
 }
 
+// AI clustering: ask Groq (Llama) to group article INDICES by same-event,
+// returning number[][] compatible with buildMixedFeed. Falls back to the
+// deterministic token Union-Find on any error/empty so the feed never breaks.
+async function aiClusterGroups(articles: NewsDataArticle[]): Promise<number[][]> {
+  const n = articles.length;
+  if (n === 0) return [];
+  const MAX = 40; // cap prompt size; extras become singletons
+  const subset = articles.slice(0, MAX);
+  try {
+    const lines = subset
+      .map((a, i) => {
+        const sum = (a.description ?? "").replace(/\s+/g, " ").slice(0, 140);
+        return `${i}: ${a.title ?? ""}${sum ? ` | ${sum}` : ""}`;
+      })
+      .join("\n");
+    const prompt = `You are a senior news editor. Group these stories by SAME UNDERLYING EVENT / same ongoing situation involving the same primary entity. Same broad theme (e.g. "tech", "politics") is NOT enough — it must be the same event.
+
+${lines}
+
+Rules:
+- Each index appears in exactly ONE group.
+- Only group stories that are truly the same event; unrelated stories are their own single-item group.
+- Return JSON ONLY, no prose:
+{"groups":[{"indices":[0,3]},{"indices":[1]},{"indices":[2,5,7]}]}`;
+    const text = await callGroq(prompt, 700);
+    const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as {
+      groups?: { indices?: number[] }[];
+    };
+    if (!Array.isArray(parsed?.groups) || parsed.groups.length === 0) throw new Error("empty AI groups");
+    const groups: number[][] = [];
+    const seen = new Set<number>();
+    for (const g of parsed.groups) {
+      const idxs = (g.indices ?? []).filter(
+        (i) => Number.isInteger(i) && i >= 0 && i < subset.length && !seen.has(i),
+      );
+      for (const i of idxs) seen.add(i);
+      if (idxs.length) groups.push(idxs.slice(0, 6));
+    }
+    // Any subset index the model omitted → its own singleton.
+    for (let i = 0; i < subset.length; i++) if (!seen.has(i)) groups.push([i]);
+    // Articles beyond the prompt cap → singletons (kept, not dropped).
+    for (let i = subset.length; i < n; i++) groups.push([i]);
+    if (groups.length === 0) throw new Error("no groups built");
+    return groups;
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("AI clustering failed — falling back to token clustering:", e instanceof Error ? e.message : e);
+    return clusterForMixedFeed(articles);
+  }
+}
+
 // Score and order all groups into a mixed FeedItem[].
 // Groups ≥ 3 become clusters; smaller groups produce standalone FeedArticle items.
 // score = velocity * 0.4 + freshness * 0.35 + relevance * 0.25
@@ -1367,7 +1418,7 @@ async function buildBreakingFeed(): Promise<FeedItem[]> {
 
   const recentDeduped = capBySource(recent, 999);
   await enrichMissingImages(recentDeduped);
-  const groups = clusterForMixedFeed(recentDeduped);
+  const groups = await aiClusterGroups(recentDeduped);
   return buildMixedFeed(recentDeduped, groups);
 }
 
@@ -1558,7 +1609,7 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   // Deduplicate by canonical URL before clustering — prevents same-URL articles
   // from landing in the same cluster and generating identical MD5 IDs.
   const deduped = capBySource(articles, 999);
-  const groups = clusterForMixedFeed(deduped);
+  const groups = await aiClusterGroups(deduped);
   rawFeedCache.set(topic, { articles: deduped, groups, at: Date.now() });
   return buildMixedFeed(deduped, groups);
 }

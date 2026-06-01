@@ -81,7 +81,7 @@ type FeedArticle = StoryCard & { type: "article" };
 type FeedItem = FeedCluster | FeedArticle;
 
 // Raw article + cluster-group cache (RSS fetch + clustering, 10-min TTL)
-type RawFeedEntry = { articles: NewsDataArticle[]; groups: number[][]; at: number };
+type RawFeedEntry = { articles: NewsDataArticle[]; groups: number[][]; summaries: Record<number, string>; at: number };
 const rawFeedCache = new Map<string, RawFeedEntry>();
 const RAW_FEED_TTL_MS = 10 * 60 * 1000;
 
@@ -1071,15 +1071,22 @@ function clusterForMixedFeed(articles: NewsDataArticle[]): number[][] {
 // AI clustering: ask Groq (Llama) to group article INDICES by same-event,
 // returning number[][] compatible with buildMixedFeed. Falls back to the
 // deterministic token Union-Find on any error/empty so the feed never breaks.
-async function aiClusterGroups(articles: NewsDataArticle[]): Promise<number[][]> {
+// Returns index groups AND, for multi-article groups, a ≤25-word AI synthesis
+// covering ALL stories in the group (keyed by the group's first index).
+interface AiClusterResult { groups: number[][]; summaries: Record<number, string>; }
+function clampToWords(text: string, n: number): string {
+  const w = (text || "").trim().replace(/\s+/g, " ").split(" ");
+  return w.length <= n ? w.join(" ") : w.slice(0, n).join(" ") + "…";
+}
+async function aiClusterGroups(articles: NewsDataArticle[]): Promise<AiClusterResult> {
   const n = articles.length;
-  if (n === 0) return [];
+  if (n === 0) return { groups: [], summaries: {} };
   const MAX = 40; // cap prompt size; extras become singletons
   const subset = articles.slice(0, MAX);
   try {
     const lines = subset
       .map((a, i) => {
-        const sum = (a.description ?? "").replace(/\s+/g, " ").slice(0, 140);
+        const sum = (a.description ?? "").replace(/\s+/g, " ").slice(0, 160);
         return `${i}: ${a.title ?? ""}${sum ? ` | ${sum}` : ""}`;
       })
       .join("\n");
@@ -1087,42 +1094,50 @@ async function aiClusterGroups(articles: NewsDataArticle[]): Promise<number[][]>
 
 ${lines}
 
+For EACH group, also write a "summary": a single neutral sentence of AT MOST 25 words that synthesises what ALL the stories in that group collectively report (not just the first). No source names, no markdown.
+
 Rules:
 - Each index appears in exactly ONE group.
 - Only group stories that are truly the same event; unrelated stories are their own single-item group.
 - Return JSON ONLY, no prose:
-{"groups":[{"indices":[0,3]},{"indices":[1]},{"indices":[2,5,7]}]}`;
-    const text = await callGroq(prompt, 700);
+{"groups":[{"indices":[0,3],"summary":"..."},{"indices":[1],"summary":"..."},{"indices":[2,5,7],"summary":"..."}]}`;
+    const text = await callGroq(prompt, 900);
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as {
-      groups?: { indices?: number[] }[];
+      groups?: { indices?: number[]; summary?: string }[];
     };
     if (!Array.isArray(parsed?.groups) || parsed.groups.length === 0) throw new Error("empty AI groups");
     const groups: number[][] = [];
+    const summaries: Record<number, string> = {};
     const seen = new Set<number>();
     for (const g of parsed.groups) {
       const idxs = (g.indices ?? []).filter(
         (i) => Number.isInteger(i) && i >= 0 && i < subset.length && !seen.has(i),
       );
       for (const i of idxs) seen.add(i);
-      if (idxs.length) groups.push(idxs.slice(0, 6));
+      if (!idxs.length) continue;
+      const trimmed = idxs.slice(0, 6);
+      groups.push(trimmed);
+      if (typeof g.summary === "string" && g.summary.trim()) {
+        summaries[trimmed[0]!] = clampToWords(g.summary, 25);
+      }
     }
     // Any subset index the model omitted → its own singleton.
     for (let i = 0; i < subset.length; i++) if (!seen.has(i)) groups.push([i]);
     // Articles beyond the prompt cap → singletons (kept, not dropped).
     for (let i = subset.length; i < n; i++) groups.push([i]);
     if (groups.length === 0) throw new Error("no groups built");
-    return groups;
+    return { groups, summaries };
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("AI clustering failed — falling back to token clustering:", e instanceof Error ? e.message : e);
-    return clusterForMixedFeed(articles);
+    return { groups: clusterForMixedFeed(articles), summaries: {} };
   }
 }
 
 // Score and order all groups into a mixed FeedItem[].
 // Groups ≥ 3 become clusters; smaller groups produce standalone FeedArticle items.
 // score = velocity * 0.4 + freshness * 0.35 + relevance * 0.25
-function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedItem[] {
+function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], summaries: Record<number, string> = {}): FeedItem[] {
   const now = Date.now();
   const scored: Array<{ item: FeedItem; score: number }> = [];
 
@@ -1146,7 +1161,10 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedIt
       const cards = buildFallbackStories(ga);
       const topicTitle = feedClusterLabel(ga);
       const rep = ga[0]!;
-      const topicSummary = naiveParagraph(
+      // Prefer the AI 25-word synthesis of ALL clustered stories; fall back to
+      // the lead article's description if the AI summary is missing.
+      const aiSummary = summaries[group[0]!];
+      const topicSummary = aiSummary || naiveParagraph(
         stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim()),
       );
       scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
@@ -1418,8 +1436,8 @@ async function buildBreakingFeed(): Promise<FeedItem[]> {
 
   const recentDeduped = capBySource(recent, 999);
   await enrichMissingImages(recentDeduped);
-  const groups = await aiClusterGroups(recentDeduped);
-  return buildMixedFeed(recentDeduped, groups);
+  const { groups, summaries } = await aiClusterGroups(recentDeduped);
+  return buildMixedFeed(recentDeduped, groups, summaries);
 }
 
 // ----- AI clustering (stale-while-revalidate, 30-min TTL) -----
@@ -1587,7 +1605,7 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   // Reuse cluster assignments when only scores need updating (saves RSS round-trip).
   const rawEntry = rawFeedCache.get(topic);
   if (rawEntry && Date.now() - rawEntry.at < RAW_FEED_TTL_MS) {
-    return buildMixedFeed(rawEntry.articles, rawEntry.groups);
+    return buildMixedFeed(rawEntry.articles, rawEntry.groups, rawEntry.summaries ?? {});
   }
 
   let articles: NewsDataArticle[];
@@ -1609,9 +1627,9 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   // Deduplicate by canonical URL before clustering — prevents same-URL articles
   // from landing in the same cluster and generating identical MD5 IDs.
   const deduped = capBySource(articles, 999);
-  const groups = await aiClusterGroups(deduped);
-  rawFeedCache.set(topic, { articles: deduped, groups, at: Date.now() });
-  return buildMixedFeed(deduped, groups);
+  const { groups, summaries } = await aiClusterGroups(deduped);
+  rawFeedCache.set(topic, { articles: deduped, groups, summaries, at: Date.now() });
+  return buildMixedFeed(deduped, groups, summaries);
 }
 
 const inflightFeed = new Map<string, Promise<FeedItem[]>>();

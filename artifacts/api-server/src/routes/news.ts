@@ -2117,6 +2117,35 @@ router.get("/cron/status", (_req, res) => {
   });
 });
 
+// Live Groq quota — makes a 1-token call and returns the rate-limit headers.
+router.get("/groq-quota", async (_req, res) => {
+  const key = process.env["GROQ_API_KEY"];
+  if (!key) { res.status(502).json({ error: "GROQ_API_KEY missing" }); return; }
+  try {
+    const r = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ model: GROQ_MODEL, max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
+    });
+    const h = r.headers;
+    res.json({
+      model: GROQ_MODEL,
+      status: r.status,
+      limits: {
+        requestsPerDay: h.get("x-ratelimit-limit-requests"),
+        requestsRemaining: h.get("x-ratelimit-remaining-requests"),
+        requestsReset: h.get("x-ratelimit-reset-requests"),
+        tokensPerMin: h.get("x-ratelimit-limit-tokens"),
+        tokensRemaining: h.get("x-ratelimit-remaining-tokens"),
+        tokensReset: h.get("x-ratelimit-reset-tokens"),
+        retryAfter: h.get("retry-after"),
+      },
+    });
+  } catch (err) {
+    res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 router.get("/feed", async (req, res) => {
   const topic = String(req.query["topic"] ?? "top").toLowerCase();
   const refresh = req.query["refresh"] === "1";

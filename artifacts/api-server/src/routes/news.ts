@@ -2855,11 +2855,13 @@ router.get("/image", async (req, res) => {
 // Returns: { tldr[], narrative, insight, questions[], tags[] } — all in ONE
 // Claude call. Cached aggressively (memory + disk) to keep cost down.
 interface TldrSection { heading: string; bullets: string[]; }
+interface StorySection { heading: string; body: string; }
 interface DeepDiveResult {
   at: number;
   tldr: string[];
   tldrSections: TldrSection[];
   narrative: string;
+  storySections: StorySection[];
   insight: string;
   questions: string[];
   tags: string[];
@@ -2881,7 +2883,7 @@ router.post("/deepdive", async (req, res) => {
     return;
   }
 
-  const cacheKey = `deepdive:v2:${url}`; // v2 — new TL;DR + cited full-story format
+  const cacheKey = `deepdive:v3:${url}`; // v3 — labelled full-story sections
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -2909,7 +2911,18 @@ router.post("/deepdive", async (req, res) => {
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
   "tldr": ["flat fallback — 6-10 complete-sentence bullets, same 300-360 word cap"],
-  "narrative": "para1\\n\\npara2\\n\\npara3\\n\\npara4\\n\\npara5\\n\\npara6",   // THE FULL STORY — comprehensive and rich. NO upper word limit: aim 550-850 words across 6-9 paragraphs separated by literal "\\n\\n" (two-char escape, NOT raw newlines). Synthesise facts from EVERY source excerpt provided, not just the first. Attribute specific facts, figures and quotes to their source INLINE in parentheses using the [Source] tags from the input, e.g. "...effective May 1, 2026 (Times of India)." Use 3+ distinct source attributions where available. Cover who/what/when/where/why, all key numbers, multiple perspectives, background, reactions and what's next. Plain text, no markdown. Substantive — no filler, no repetition.
+  "storySections": [                                   // THE FULL STORY, broken into 4-6 LABELLED sections. TOTAL 450-800 words across all sections (hard minimum 400 — never less). Each "body" is 1-3 paragraphs of plain prose, paragraphs separated by literal "\\n\\n" (two-char escape, NOT raw newlines). Synthesise facts from EVERY source excerpt, not just the first. Attribute specific facts/figures/quotes to their source INLINE in parentheses using the [Source] tags, e.g. "...effective May 1, 2026 (Times of India)." Use 3+ distinct source attributions where available. No markdown, no repetition, no filler.
+    // Choose the sections that FIT this story from this menu (always include the first two; add others when the material supports them). Use these exact ALL-CAPS headings:
+    //   "WHAT HAPPENED"      — the core event, who/what/when/where. (required)
+    //   "THE CONTEXT"        — background, how we got here, prior events. (required)
+    //   "WHY IT MATTERS"     — significance, stakes, who is affected and how.
+    //   "REACTIONS"          — responses from key parties, officials, markets, critics.
+    //   "WHAT'S NEXT"        — likely next steps, timeline, future impact, things to watch.
+    { "heading": "WHAT HAPPENED", "body": "para1\\n\\npara2" },
+    { "heading": "THE CONTEXT", "body": "para1" },
+    { "heading": "WHY IT MATTERS", "body": "para1" },
+    { "heading": "WHAT'S NEXT", "body": "para1" }
+  ],
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
@@ -2976,11 +2989,34 @@ Respond with JSON only.`;
       ? parsed.tldr.slice(0, 18).map(String)
       : tldrSections.flatMap((s) => s.bullets).slice(0, 18);
 
+    // Parse the labelled full-story sections.
+    const rawStory = Array.isArray((parsed as { storySections?: unknown }).storySections)
+      ? ((parsed as { storySections: unknown[] }).storySections)
+      : [];
+    const storySections: StorySection[] = rawStory
+      .map((s) => {
+        const obj = s as { heading?: unknown; body?: unknown };
+        return {
+          heading: typeof obj?.heading === "string" ? obj.heading.slice(0, 80) : "",
+          body: typeof obj?.body === "string" ? obj.body : "",
+        };
+      })
+      .filter((s) => s.heading && s.body.trim())
+      .slice(0, 6);
+
+    // Back-compat narrative: prefer the model's narrative if it sent one,
+    // otherwise stitch the section bodies into one string so older clients
+    // (and the existing APK) still render a full story.
+    const narrative = typeof parsed.narrative === "string" && parsed.narrative.trim()
+      ? parsed.narrative
+      : storySections.map((s) => s.body).join("\n\n");
+
     const result: DeepDiveResult = {
       at: Date.now(),
       tldr: flatTldr,
       tldrSections,
-      narrative: typeof parsed.narrative === "string" ? parsed.narrative : "",
+      narrative,
+      storySections,
       insight: typeof parsed.insight === "string" ? parsed.insight : "",
       questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 5).map(String) : [],
       tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 8).map(String) : [],

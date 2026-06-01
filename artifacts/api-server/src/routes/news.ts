@@ -2883,7 +2883,7 @@ router.post("/deepdive", async (req, res) => {
     return;
   }
 
-  const cacheKey = `deepdive:v3:${url}`; // v3 — labelled full-story sections
+  const cacheKey = `deepdive:v4:${url}`; // v4 — TL;DR cap raised to 450 words
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -2906,11 +2906,11 @@ router.post("/deepdive", async (req, res) => {
     const prompt = `You are transforming raw news coverage (multiple source excerpts, each tagged like "[Source Name]:") into a structured, AI-native "story understanding" experience. Read ALL excerpts and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + EXACTLY 3-4 bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets MUST stay within 300-360 words (hard cap 360 — be concise, merge related facts rather than adding more bullets). First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
+  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + EXACTLY 3-4 bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ~400-450 words (hard cap 450 — be thorough but don't pad). First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
     { "heading": "CORE EVENT", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] },
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
-  "tldr": ["flat fallback — 6-10 complete-sentence bullets, same 300-360 word cap"],
+  "tldr": ["flat fallback — 6-10 complete-sentence bullets, same ~400-450 word cap"],
   "storySections": [                                   // THE FULL STORY, broken into 4-6 LABELLED sections. TOTAL 450-800 words across all sections (hard minimum 400 — never less). Each "body" is 1-3 paragraphs of plain prose, paragraphs separated by literal "\\n\\n" (two-char escape, NOT raw newlines). Synthesise facts from EVERY source excerpt, not just the first. Attribute specific facts/figures/quotes to their source INLINE in parentheses using the [Source] tags, e.g. "...effective May 1, 2026 (Times of India)." Use 3+ distinct source attributions where available. No markdown, no repetition, no filler.
     // Choose the sections that FIT this story from this menu (always include the first two; add others when the material supports them). Use these exact ALL-CAPS headings:
     //   "WHAT HAPPENED"      — the core event, who/what/when/where. (required)

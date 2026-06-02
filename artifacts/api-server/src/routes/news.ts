@@ -32,7 +32,10 @@ async function callGroq(
     }),
     signal: opts.signal,
   });
-  if (!r.ok) throw new Error(`Groq ${r.status}`);
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`Groq ${r.status}: ${body.slice(0, 300)}`);
+  }
   const data = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
   return data.choices?.[0]?.message?.content ?? "";
 }

@@ -1114,31 +1114,60 @@ function clampToWords(text: string, n: number): string {
   const w = (text || "").trim().replace(/\s+/g, " ").split(" ");
   return w.length <= n ? w.join(" ") : w.slice(0, n).join(" ") + "…";
 }
-// Cache AI cluster results by article-set fingerprint. The cron re-polls every
-// few minutes but the article set rarely changes, so without this we'd re-call
-// Groq every poll × every topic and blow the daily token budget (TPD). Keyed by
-// a hash of the article titles; 45-min TTL.
-const aiClusterCache = new Map<string, { result: AiClusterResult; at: number }>();
-const AI_CLUSTER_TTL_MS = 45 * 60 * 1000;
-function clusterSetFingerprint(articles: NewsDataArticle[]): string {
-  const key = articles.slice(0, 40).map(a => (a.link ?? a.title ?? "").slice(0, 60)).join("|");
-  return createHash("md5").update(key).digest("hex");
+
+// Per-TOPIC time throttle. The cron re-polls every ~5 min and breaking news
+// churns constantly, so a content-based cache misses on every poll and re-calls
+// Groq — which exhausts the daily token budget (TPD) and starves Deep Dive.
+// Instead we call Groq at most once per TTL per topic, and BETWEEN calls reuse
+// the last AI grouping, remapped onto the current articles by article id (new
+// articles become their own singleton). This bounds clustering to ~6 topics ×
+// ~16/day ≈ 96 Groq calls/day, leaving the budget for Deep Dive.
+const AI_CLUSTER_TTL_MS = 90 * 60 * 1000; // 90 min per topic
+interface TopicClusterCache { at: number; idToCluster: Map<string, number>; summaryByCluster: Record<number, string>; }
+const aiTopicClusterCache = new Map<string, TopicClusterCache>();
+function articleKey(a: NewsDataArticle): string { return (a.link ?? a.title ?? "").slice(0, 140); }
+
+// Build the buildMixedFeed-shaped result (index groups + summaries keyed by each
+// group's first index) from a stored id→cluster assignment, applied to the
+// CURRENT article list. Articles with no stored cluster get their own singleton.
+function clustersFromAssignment(
+  articles: NewsDataArticle[],
+  idToCluster: Map<string, number>,
+  summaryByCluster: Record<number, string>,
+): AiClusterResult {
+  const clusterToIdx = new Map<number, number[]>();
+  let nextNew = 1_000_000; // singleton ids for unknown (new) articles
+  articles.forEach((a, idx) => {
+    const k = articleKey(a);
+    let c = idToCluster.get(k);
+    if (c === undefined) c = nextNew++;
+    const arr = clusterToIdx.get(c) ?? [];
+    arr.push(idx);
+    clusterToIdx.set(c, arr);
+  });
+  const groups: number[][] = [];
+  const summaries: Record<number, string> = {};
+  for (const [c, idxs] of clusterToIdx) {
+    const trimmed = idxs.slice(0, 6);
+    groups.push(trimmed);
+    const s = summaryByCluster[c];
+    if (s) summaries[trimmed[0]!] = s;
+  }
+  return { groups, summaries };
 }
 
-async function aiClusterGroups(articles: NewsDataArticle[]): Promise<AiClusterResult> {
+async function aiClusterGroups(articles: NewsDataArticle[], topic: string): Promise<AiClusterResult> {
   const n = articles.length;
   if (n === 0) return { groups: [], summaries: {} };
-  const MAX = 40; // cap prompt size; extras become singletons
-  const subset = articles.slice(0, MAX);
 
-  // Reuse a recent result if the article set is unchanged — avoids re-calling
-  // Groq on every cron poll (the main daily-token drain).
-  const fp = clusterSetFingerprint(articles);
-  const cachedCluster = aiClusterCache.get(fp);
-  if (cachedCluster && Date.now() - cachedCluster.at < AI_CLUSTER_TTL_MS) {
-    return cachedCluster.result;
+  // Within the throttle window → reuse the last AI grouping (no Groq call).
+  const cached = aiTopicClusterCache.get(topic);
+  if (cached && Date.now() - cached.at < AI_CLUSTER_TTL_MS) {
+    return clustersFromAssignment(articles, cached.idToCluster, cached.summaryByCluster);
   }
 
+  const MAX = 40; // cap prompt size; extras become singletons
+  const subset = articles.slice(0, MAX);
   try {
     const lines = subset
       .map((a, i) => {
@@ -1162,9 +1191,12 @@ Rules:
       groups?: { indices?: number[]; summary?: string }[];
     };
     if (!Array.isArray(parsed?.groups) || parsed.groups.length === 0) throw new Error("empty AI groups");
-    const groups: number[][] = [];
-    const summaries: Record<number, string> = {};
+
+    // Build a stable id→cluster assignment so it can be reused next poll.
+    const idToCluster = new Map<string, number>();
+    const summaryByCluster: Record<number, string> = {};
     const seen = new Set<number>();
+    let cid = 0;
     for (const g of parsed.groups) {
       const idxs = (g.indices ?? []).filter(
         (i) => Number.isInteger(i) && i >= 0 && i < subset.length && !seen.has(i),
@@ -1172,27 +1204,22 @@ Rules:
       for (const i of idxs) seen.add(i);
       if (!idxs.length) continue;
       const trimmed = idxs.slice(0, 6);
-      groups.push(trimmed);
-      if (typeof g.summary === "string" && g.summary.trim()) {
-        summaries[trimmed[0]!] = clampToWords(g.summary, 25);
-      }
+      for (const i of trimmed) idToCluster.set(articleKey(subset[i]!), cid);
+      if (typeof g.summary === "string" && g.summary.trim()) summaryByCluster[cid] = clampToWords(g.summary, 25);
+      cid++;
     }
-    // Any subset index the model omitted → its own singleton.
-    for (let i = 0; i < subset.length; i++) if (!seen.has(i)) groups.push([i]);
-    // Articles beyond the prompt cap → singletons (kept, not dropped).
-    for (let i = subset.length; i < n; i++) groups.push([i]);
-    if (groups.length === 0) throw new Error("no groups built");
-    const result: AiClusterResult = { groups, summaries };
-    aiClusterCache.set(fp, { result, at: Date.now() });
-    return result;
+    // Subset indices the model omitted → each its own singleton cluster.
+    for (let i = 0; i < subset.length; i++) if (!seen.has(i)) idToCluster.set(articleKey(subset[i]!), cid++);
+
+    aiTopicClusterCache.set(topic, { at: Date.now(), idToCluster, summaryByCluster });
+    return clustersFromAssignment(articles, idToCluster, summaryByCluster);
   } catch (e) {
     // eslint-disable-next-line no-console
-    console.error("AI clustering failed — falling back to token clustering:", e instanceof Error ? e.message : e);
-    // Cache the fallback too — if Groq is rate-limited (TPD), this stops us
-    // hammering it with 429s every poll until the budget resets.
-    const result: AiClusterResult = { groups: clusterForMixedFeed(articles), summaries: {} };
-    aiClusterCache.set(fp, { result, at: Date.now() });
-    return result;
+    console.error(`AI clustering failed for ${topic}:`, e instanceof Error ? e.message : e);
+    // Prefer reusing the last AI grouping (even if stale) over a sudden switch
+    // to algorithmic — keeps the feed consistent during a Groq outage / 429.
+    if (cached) return clustersFromAssignment(articles, cached.idToCluster, cached.summaryByCluster);
+    return { groups: clusterForMixedFeed(articles), summaries: {} };
   }
 }
 
@@ -1498,7 +1525,7 @@ async function buildBreakingFeed(): Promise<FeedItem[]> {
 
   const recentDeduped = capBySource(recent, 999);
   await enrichMissingImages(recentDeduped);
-  const { groups, summaries } = await aiClusterGroups(recentDeduped);
+  const { groups, summaries } = await aiClusterGroups(recentDeduped, "breaking");
   return buildMixedFeed(recentDeduped, groups, summaries);
 }
 
@@ -1689,7 +1716,7 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   // Deduplicate by canonical URL before clustering — prevents same-URL articles
   // from landing in the same cluster and generating identical MD5 IDs.
   const deduped = capBySource(articles, 999);
-  const { groups, summaries } = await aiClusterGroups(deduped);
+  const { groups, summaries } = await aiClusterGroups(deduped, topic);
   rawFeedCache.set(topic, { articles: deduped, groups, summaries, at: Date.now() });
   return buildMixedFeed(deduped, groups, summaries);
 }

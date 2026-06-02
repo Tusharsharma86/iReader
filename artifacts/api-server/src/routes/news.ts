@@ -1081,11 +1081,31 @@ function clampToWords(text: string, n: number): string {
   const w = (text || "").trim().replace(/\s+/g, " ").split(" ");
   return w.length <= n ? w.join(" ") : w.slice(0, n).join(" ") + "…";
 }
+// Cache AI cluster results by article-set fingerprint. The cron re-polls every
+// few minutes but the article set rarely changes, so without this we'd re-call
+// Groq every poll × every topic and blow the daily token budget (TPD). Keyed by
+// a hash of the article titles; 45-min TTL.
+const aiClusterCache = new Map<string, { result: AiClusterResult; at: number }>();
+const AI_CLUSTER_TTL_MS = 45 * 60 * 1000;
+function clusterSetFingerprint(articles: NewsDataArticle[]): string {
+  const key = articles.slice(0, 40).map(a => (a.link ?? a.title ?? "").slice(0, 60)).join("|");
+  return createHash("md5").update(key).digest("hex");
+}
+
 async function aiClusterGroups(articles: NewsDataArticle[]): Promise<AiClusterResult> {
   const n = articles.length;
   if (n === 0) return { groups: [], summaries: {} };
   const MAX = 40; // cap prompt size; extras become singletons
   const subset = articles.slice(0, MAX);
+
+  // Reuse a recent result if the article set is unchanged — avoids re-calling
+  // Groq on every cron poll (the main daily-token drain).
+  const fp = clusterSetFingerprint(articles);
+  const cachedCluster = aiClusterCache.get(fp);
+  if (cachedCluster && Date.now() - cachedCluster.at < AI_CLUSTER_TTL_MS) {
+    return cachedCluster.result;
+  }
+
   try {
     const lines = subset
       .map((a, i) => {
@@ -1104,7 +1124,7 @@ Rules:
 - Only group stories that are truly the same event; unrelated stories are their own single-item group.
 - Return JSON ONLY, no prose:
 {"groups":[{"indices":[0,3],"summary":"..."},{"indices":[1],"summary":"..."},{"indices":[2,5,7],"summary":"..."}]}`;
-    const text = await callGroq(prompt, 900);
+    const text = await callGroq(prompt, 700);
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as {
       groups?: { indices?: number[]; summary?: string }[];
     };
@@ -1129,11 +1149,17 @@ Rules:
     // Articles beyond the prompt cap → singletons (kept, not dropped).
     for (let i = subset.length; i < n; i++) groups.push([i]);
     if (groups.length === 0) throw new Error("no groups built");
-    return { groups, summaries };
+    const result: AiClusterResult = { groups, summaries };
+    aiClusterCache.set(fp, { result, at: Date.now() });
+    return result;
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("AI clustering failed — falling back to token clustering:", e instanceof Error ? e.message : e);
-    return { groups: clusterForMixedFeed(articles), summaries: {} };
+    // Cache the fallback too — if Groq is rate-limited (TPD), this stops us
+    // hammering it with 429s every poll until the budget resets.
+    const result: AiClusterResult = { groups: clusterForMixedFeed(articles), summaries: {} };
+    aiClusterCache.set(fp, { result, at: Date.now() });
+    return result;
   }
 }
 
@@ -3067,11 +3093,11 @@ Respond with JSON only.`;
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 3200, { signal: ctrl.signal });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 3200, { signal: ctrl.signal });
       }
     } finally {
       clearTimeout(t);

@@ -36,8 +36,41 @@ async function callGroq(
     const body = await r.text().catch(() => "");
     throw new Error(`Groq ${r.status}: ${body.slice(0, 300)}`);
   }
-  const data = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  const data = (await r.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { total_tokens?: number };
+  };
+  if (typeof data.usage?.total_tokens === "number") addGroqTokens(data.usage.total_tokens);
   return data.choices?.[0]?.message?.content ?? "";
+}
+
+// ----- Daily Groq token usage tracker (for the in-app quota gauge) -----
+// Sums actual tokens (prompt+completion) reported by Groq per UTC day. The free
+// tier TPD for llama-4-scout is 500k. In-memory + best-effort /tmp persistence,
+// so it survives in-process restarts but resets on a fresh container.
+const GROQ_TPD_LIMIT = 500000;
+const GROQ_TPD_PATH = "/tmp/groq-tpd.json";
+let groqTokenDay = new Date().toISOString().slice(0, 10);
+let groqTokensUsed = 0;
+(() => {
+  try {
+    const raw = readFileSync(GROQ_TPD_PATH, "utf8");
+    const j = JSON.parse(raw) as { day?: string; used?: number };
+    if (j.day === groqTokenDay && typeof j.used === "number") groqTokensUsed = j.used;
+  } catch { /* no prior file */ }
+})();
+let groqTpdPersistTimer: NodeJS.Timeout | null = null;
+function addGroqTokens(n: number): void {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== groqTokenDay) { groqTokenDay = today; groqTokensUsed = 0; }
+  groqTokensUsed += n;
+  // Debounced disk write (avoid hammering /tmp on every AI call).
+  if (!groqTpdPersistTimer) {
+    groqTpdPersistTimer = setTimeout(() => {
+      groqTpdPersistTimer = null;
+      try { writeFileSync(GROQ_TPD_PATH, JSON.stringify({ day: groqTokenDay, used: groqTokensUsed })); } catch { /* ignore */ }
+    }, 5000);
+  }
 }
 
 // Disk cache lives in /tmp so it survives in-process restarts within the same
@@ -2160,6 +2193,11 @@ router.get("/groq-quota", async (_req, res) => {
     res.json({
       model: GROQ_MODEL,
       status: r.status,
+      daily: {
+        tokensUsed: groqTokensUsed,
+        tokensLimit: GROQ_TPD_LIMIT,
+        day: groqTokenDay,
+      },
       limits: {
         requestsPerDay: h.get("x-ratelimit-limit-requests"),
         requestsRemaining: h.get("x-ratelimit-remaining-requests"),

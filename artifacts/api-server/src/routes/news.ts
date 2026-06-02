@@ -3021,6 +3021,35 @@ interface DeepDiveResult {
 const deepDiveCache = new Map<string, DeepDiveResult>();
 const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+// Non-AI Deep Dive built straight from the source excerpts — used when Groq is
+// unavailable / rate-limited so the screen still shows real content. Strips the
+// "[Source]:" tags for readability and derives a few key-point bullets.
+function buildFallbackDeepDive(headline: string, paragraphs: string[]): DeepDiveResult {
+  const clean = (paragraphs ?? [])
+    .map((p) => stripHtml(String(p)).replace(/^\[[^\]]+\]:\s*/, "").trim())
+    .filter((p) => p.length > 0);
+  const joined = clean.join("\n\n");
+  const sentences = joined
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 30);
+  const tldr = sentences.slice(0, 5);
+  return {
+    at: Date.now(),
+    tldr,
+    tldrSections: tldr.length ? [{ heading: "KEY POINTS", bullets: tldr }] : [],
+    narrative: joined || headline,
+    storySections: clean.length ? [{ heading: "FULL STORY", body: joined }] : [],
+    insight: "",
+    questions: [],
+    tags: [],
+    keyPeople: [],
+    keyCompanies: [],
+    topics: [],
+  };
+}
+
 router.post("/deepdive", async (req, res) => {
   const { url, headline, paragraphs } = req.body as {
     url?: string;
@@ -3174,10 +3203,14 @@ Respond with JSON only.`;
       topics: Array.isArray(parsed.topics) ? parsed.topics.slice(0, 8).map(String) : [],
     };
 
-    // Return whatever we got — even partial data is useful. Only fail on total emptiness.
+    // Return whatever we got — even partial data is useful. If the AI gave us
+    // nothing parseable, fall back to a non-AI dive from the source text rather
+    // than failing — this keeps Deep Dive usable when Groq is down or the daily
+    // token budget (TPD) is exhausted.
     if (!result.tldr.length && !result.narrative && !result.insight && !result.questions.length) {
-      req.log.error({ raw: raw.slice(0, 500) }, "deepdive: empty parse");
-      res.status(502).json({ error: "AI returned no parseable content", raw: raw.slice(0, 200) });
+      req.log.error({ raw: raw.slice(0, 500) }, "deepdive: empty parse → non-AI fallback");
+      const fb = buildFallbackDeepDive(headline ?? "", paragraphs);
+      res.json({ ...fb, cached: false, degraded: true }); // not cached → regenerates with AI later
       return;
     }
 
@@ -3185,7 +3218,12 @@ Respond with JSON only.`;
     safeWriteJson(diskPath, result);
     res.json({ ...result, cached: false });
   } catch (err) {
-    req.log.error({ err: err instanceof Error ? err.message : String(err) }, "deepdive failed");
+    req.log.error({ err: err instanceof Error ? err.message : String(err) }, "deepdive failed → non-AI fallback");
+    // Don't 502 — serve a basic dive synthesised from the source text so the
+    // user still sees content. Not cached, so it upgrades to the AI version
+    // once Groq is available again.
+    const fb = buildFallbackDeepDive(headline ?? "", paragraphs);
+    if (fb.narrative) { res.json({ ...fb, cached: false, degraded: true }); return; }
     res.status(502).json({ error: "Deep Dive unavailable", detail: err instanceof Error ? err.message : String(err) });
   }
 });

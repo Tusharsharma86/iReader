@@ -3248,7 +3248,7 @@ Respond with JSON only.`;
     if (!result.tldr.length && !result.narrative && !result.insight && !result.questions.length) {
       req.log.error({ raw: raw.slice(0, 500) }, "deepdive: empty parse → non-AI fallback");
       const fb = buildFallbackDeepDive(headline ?? "", paragraphs);
-      res.json({ ...fb, cached: false, degraded: true }); // not cached → regenerates with AI later
+      res.json({ ...fb, cached: false, degraded: true, _dbg: "empty-parse", _rawHead: raw.slice(0, 160) }); // not cached → regenerates with AI later
       return;
     }
 
@@ -3261,7 +3261,7 @@ Respond with JSON only.`;
     // user still sees content. Not cached, so it upgrades to the AI version
     // once Groq is available again.
     const fb = buildFallbackDeepDive(headline ?? "", paragraphs);
-    if (fb.narrative) { res.json({ ...fb, cached: false, degraded: true }); return; }
+    if (fb.narrative) { res.json({ ...fb, cached: false, degraded: true, _dbg: "catch:" + (err instanceof Error ? err.message : String(err)) }); return; }
     res.status(502).json({ error: "Deep Dive unavailable", detail: err instanceof Error ? err.message : String(err) });
   }
 });

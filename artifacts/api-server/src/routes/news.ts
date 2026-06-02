@@ -22,24 +22,51 @@ const GROQ_MODEL_DEEPDIVE = "llama-3.3-70b-versatile";
 async function callGroq(
   prompt: string,
   maxTokens: number,
-  opts: { temperature?: number; signal?: AbortSignal; model?: string } = {},
+  opts: { temperature?: number; signal?: AbortSignal; model?: string; task?: string } = {},
 ): Promise<string> {
   const key = process.env["GROQ_API_KEY"];
   if (!key) throw new Error("GROQ_API_KEY missing");
+  const model = opts.model ?? GROQ_MODEL;
   const r = await fetch(GROQ_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify({
-      model: opts.model ?? GROQ_MODEL,
+      model,
       max_tokens: maxTokens,
       temperature: opts.temperature ?? 0.3,
       messages: [{ role: "user", content: prompt }],
     }),
     signal: opts.signal,
   });
-  if (!r.ok) throw new Error(`Groq ${r.status}`);
-  const data = (await r.json()) as { choices?: Array<{ message?: { content?: string } }> };
+  if (!r.ok) { recordAiUsage(model, opts.task ?? "other", 0, false); throw new Error(`Groq ${r.status}`); }
+  const data = (await r.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+    usage?: { total_tokens?: number };
+  };
+  recordAiUsage(model, opts.task ?? "other", data.usage?.total_tokens ?? 0, true);
   return data.choices?.[0]?.message?.content ?? "";
+}
+
+// ── Per-model / per-task AI usage tracker (for the in-app dashboard) ─────────
+// Sums real tokens (prompt+completion) Groq reports, grouped by model and task,
+// per UTC day. In-memory (resets on container cold start) — best-effort gauge.
+const GROQ_TPD_LIMITS: Record<string, number> = {
+  "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
+  "llama-3.1-8b-instant": 500000,
+  "llama-3.3-70b-versatile": 100000,
+};
+interface TaskUsage { tokens: number; calls: number; errors: number; }
+interface ModelUsage { tokens: number; calls: number; errors: number; tasks: Record<string, TaskUsage>; }
+let aiUsageDay = new Date().toISOString().slice(0, 10);
+const aiUsageByModel: Record<string, ModelUsage> = {};
+function recordAiUsage(model: string, task: string, tokens: number, ok: boolean): void {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== aiUsageDay) { aiUsageDay = today; for (const k of Object.keys(aiUsageByModel)) delete aiUsageByModel[k]; }
+  const m = (aiUsageByModel[model] ??= { tokens: 0, calls: 0, errors: 0, tasks: {} });
+  const t = (m.tasks[task] ??= { tokens: 0, calls: 0, errors: 0 });
+  m.calls++; t.calls++;
+  m.tokens += tokens; t.tokens += tokens;
+  if (!ok) { m.errors++; t.errors++; }
 }
 
 // Disk cache lives in /tmp so it survives in-process restarts within the same
@@ -1103,7 +1130,7 @@ async function generateClusterSummary(sig: string, ga: NewsDataArticle[]): Promi
       .map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`)
       .join("\n");
     const prompt = `These news articles all cover the SAME story. Write ONE neutral sentence (AT MOST 25 words) summarising what they collectively report. No source names, no markdown, no preamble.\n\n${lines}\n\nSummary:`;
-    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_FAST })).trim().replace(/^summary:\s*/i, "");
+    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "cluster-summary" })).trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
     if (summary) {
       clusterSummaryCache.set(sig, { summary, at: Date.now() });
@@ -1535,7 +1562,7 @@ Return JSON only:
     aiCallsToday++;
     console.log(`AI call #${aiCallsToday} today for ${topic}`);
 
-    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST });
+    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "clustering" });
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -2109,6 +2136,37 @@ router.get("/cron/status", (_req, res) => {
     pollsSinceBoot: cronPollCount,
     bootedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
   });
+});
+
+// AI usage dashboard — per-model + per-task token totals for today (UTC).
+router.get("/ai-usage", (_req, res) => {
+  const TASK_LABELS: Record<string, string> = {
+    deepdive: "Deep Dive", "cluster-summary": "Cluster summaries",
+    "cluster-labels": "Cluster labels", "article-summary": "Article summary (5Ws/ELI5)",
+    qna: "Follow-up Q&A", clustering: "AI clustering", other: "Other",
+  };
+  const MODEL_ROLE: Record<string, string> = {
+    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (flagship)",
+    "llama-3.3-70b-versatile": "Deep Dive (temporary)",
+    "llama-3.1-8b-instant": "Summaries · Labels · Q&A",
+  };
+  const models = Object.entries(aiUsageByModel).map(([model, m]) => {
+    const limit = GROQ_TPD_LIMITS[model] ?? null;
+    return {
+      model,
+      role: MODEL_ROLE[model] ?? "—",
+      tokensUsed: m.tokens,
+      tokensLimit: limit,
+      pct: limit ? Math.min(100, Math.round((m.tokens / limit) * 100)) : null,
+      calls: m.calls,
+      errors: m.errors,
+      tasks: Object.entries(m.tasks)
+        .map(([task, t]) => ({ task, label: TASK_LABELS[task] ?? task, tokens: t.tokens, calls: t.calls, errors: t.errors }))
+        .sort((a, b) => b.tokens - a.tokens),
+    };
+  }).sort((a, b) => b.tokensUsed - a.tokensUsed);
+  const totalTokens = models.reduce((s, m) => s + m.tokensUsed, 0);
+  res.json({ day: aiUsageDay, totalTokens, models, note: "In-memory; resets on server restart. Limits are free-tier TPD (approx)." });
 });
 
 router.get("/feed", async (req, res) => {
@@ -2770,7 +2828,7 @@ LABEL STYLE — like a magazine section title:
 
 Return JSON only:
 {"groups":[{"label":"<sharp label>","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`;
-  const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST });
+  const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "cluster-labels" });
   const raw = text.replace(/```json|```/g, '').trim();
   const parsed = JSON.parse(raw) as { groups?: { label: string; indices: number[] }[] };
   if (!Array.isArray(parsed?.groups)) throw new Error('bad AI response');
@@ -2868,7 +2926,7 @@ router.post("/ai-summary", async (req, res) => {
   try {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text);
-    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST })) || "{}";
+    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST, task: "article-summary" })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();
@@ -3029,11 +3087,11 @@ Respond with JSON only.`;
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, model: GROQ_MODEL_DEEPDIVE });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, model: GROQ_MODEL_DEEPDIVE, task: "deepdive" });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, model: GROQ_MODEL_DEEPDIVE });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, model: GROQ_MODEL_DEEPDIVE, task: "deepdive" });
       }
     } finally {
       clearTimeout(t);
@@ -3185,8 +3243,8 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     const t = setTimeout(() => ctrl.abort(), 60000);
     let answer = "";
     try {
-      try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_FAST })).trim(); }
-      catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_FAST })).trim(); }
+      try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_FAST, task: "qna" })).trim(); }
+      catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_FAST, task: "qna" })).trim(); }
     } finally { clearTimeout(t); }
     if (!answer) throw new Error("Empty answer");
 

@@ -1068,6 +1068,62 @@ function clusterForMixedFeed(articles: NewsDataArticle[]): number[][] {
   return Array.from(compMap.values()).map(g => g.slice(0, 6));
 }
 
+// ── Cached AI cluster summaries ─────────────────────────────────────────────
+// A 25-word AI synthesis per CLUSTER (not per article). Clustering itself stays
+// algorithmic (free); only the short summary is AI. Generated lazily and cached
+// per cluster-signature so it runs ~once per distinct cluster, NOT every cron
+// poll — this is what keeps it from draining the daily Groq token budget. On a
+// rate-limit/error it backs off globally for 15 min so it can't hammer Groq.
+const clusterSummaryCache = new Map<string, { summary: string; at: number }>();
+const CLUSTER_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
+const clusterSummaryInflight = new Set<string>();
+let clusterSummaryPausedUntil = 0;
+
+function clampWords25(text: string): string {
+  const w = (text || "").trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
+  return w.length <= 25 ? w.join(" ") : w.slice(0, 25).join(" ") + "…";
+}
+function clusterSignature(ga: NewsDataArticle[]): string {
+  const key = ga
+    .slice(0, 4)
+    .map((a) => (a.link ? canonicalizeUrl(a.link) : "") || a.title || "")
+    .sort()
+    .join("|");
+  return createHash("md5").update(key).digest("hex");
+}
+async function generateClusterSummary(sig: string, ga: NewsDataArticle[]): Promise<void> {
+  try {
+    const lines = ga
+      .slice(0, 6)
+      .map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`)
+      .join("\n");
+    const prompt = `These news articles all cover the SAME story. Write ONE neutral sentence (AT MOST 25 words) summarising what they collectively report. No source names, no markdown, no preamble.\n\n${lines}\n\nSummary:`;
+    const text = (await callGroq(prompt, 80)).trim().replace(/^summary:\s*/i, "");
+    const summary = clampWords25(stripHtml(text));
+    if (summary) {
+      clusterSummaryCache.set(sig, { summary, at: Date.now() });
+    }
+  } catch {
+    // Back off on any failure (e.g. Groq 429 / daily budget) so we don't spam
+    // requests for every cluster on every poll during an outage.
+    clusterSummaryPausedUntil = Date.now() + 15 * 60 * 1000;
+  } finally {
+    clusterSummaryInflight.delete(sig);
+  }
+}
+// Returns the cached AI summary if we have it; otherwise null AND kicks off a
+// background generation (deduped) so it's ready next time. Never blocks.
+function clusterAiSummary(ga: NewsDataArticle[]): string | null {
+  const sig = clusterSignature(ga);
+  const cached = clusterSummaryCache.get(sig);
+  if (cached && Date.now() - cached.at < CLUSTER_SUMMARY_TTL_MS) return cached.summary;
+  if (Date.now() > clusterSummaryPausedUntil && !clusterSummaryInflight.has(sig)) {
+    clusterSummaryInflight.add(sig);
+    void generateClusterSummary(sig, ga);
+  }
+  return null;
+}
+
 // Score and order all groups into a mixed FeedItem[].
 // Groups ≥ 3 become clusters; smaller groups produce standalone FeedArticle items.
 // score = velocity * 0.4 + freshness * 0.35 + relevance * 0.25
@@ -1095,9 +1151,11 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedIt
       const cards = buildFallbackStories(ga);
       const topicTitle = feedClusterLabel(ga);
       const rep = ga[0]!;
-      const topicSummary = naiveParagraph(
-        stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim()),
-      );
+      // Prefer the cached 25-word AI synthesis of the whole cluster; until it's
+      // generated (or if Groq is unavailable) fall back to the lead description.
+      const topicSummary =
+        clusterAiSummary(ga) ||
+        naiveParagraph(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim()));
       scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
     } else {
       for (const a of ga) {

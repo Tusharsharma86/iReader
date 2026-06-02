@@ -2152,6 +2152,7 @@ router.get("/ai-usage", (_req, res) => {
   };
   const models = Object.entries(aiUsageByModel).map(([model, m]) => {
     const limit = GROQ_TPD_LIMITS[model] ?? null;
+    const REQ_LIMIT = 1000; // free-tier requests/day per model (approx)
     return {
       model,
       role: MODEL_ROLE[model] ?? "—",
@@ -2159,6 +2160,7 @@ router.get("/ai-usage", (_req, res) => {
       tokensLimit: limit,
       pct: limit ? Math.min(100, Math.round((m.tokens / limit) * 100)) : null,
       calls: m.calls,
+      requestsLimit: REQ_LIMIT,
       errors: m.errors,
       tasks: Object.entries(m.tasks)
         .map(([task, t]) => ({ task, label: TASK_LABELS[task] ?? task, tokens: t.tokens, calls: t.calls, errors: t.errors }))

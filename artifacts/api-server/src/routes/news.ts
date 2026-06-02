@@ -15,6 +15,10 @@ const router: IRouter = Router();
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive (flagship) — dedicated daily budget
 const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks — separate daily budget
+// TEMP (today only): scout's daily token budget is exhausted, so Deep Dive runs
+// on a model with a separate, untouched budget. Revert to GROQ_MODEL once scout
+// recovers — delete this const and the `model:` arg on the two deepdive calls.
+const GROQ_MODEL_DEEPDIVE = "llama-3.3-70b-versatile";
 async function callGroq(
   prompt: string,
   maxTokens: number,
@@ -3025,11 +3029,11 @@ Respond with JSON only.`;
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, model: GROQ_MODEL_DEEPDIVE });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, model: GROQ_MODEL_DEEPDIVE });
       }
     } finally {
       clearTimeout(t);

@@ -13,11 +13,12 @@ const router: IRouter = Router();
 // than Claude, similar quality for structured JSON. ANTHROPIC_API_KEY kept as
 // optional fallback for now (some routes still call Claude until migrated).
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
+const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive (flagship) — dedicated daily budget
+const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks — separate daily budget
 async function callGroq(
   prompt: string,
   maxTokens: number,
-  opts: { temperature?: number; signal?: AbortSignal } = {},
+  opts: { temperature?: number; signal?: AbortSignal; model?: string } = {},
 ): Promise<string> {
   const key = process.env["GROQ_API_KEY"];
   if (!key) throw new Error("GROQ_API_KEY missing");
@@ -25,7 +26,7 @@ async function callGroq(
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
     body: JSON.stringify({
-      model: GROQ_MODEL,
+      model: opts.model ?? GROQ_MODEL,
       max_tokens: maxTokens,
       temperature: opts.temperature ?? 0.3,
       messages: [{ role: "user", content: prompt }],
@@ -1098,7 +1099,7 @@ async function generateClusterSummary(sig: string, ga: NewsDataArticle[]): Promi
       .map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`)
       .join("\n");
     const prompt = `These news articles all cover the SAME story. Write ONE neutral sentence (AT MOST 25 words) summarising what they collectively report. No source names, no markdown, no preamble.\n\n${lines}\n\nSummary:`;
-    const text = (await callGroq(prompt, 80)).trim().replace(/^summary:\s*/i, "");
+    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_FAST })).trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
     if (summary) {
       clusterSummaryCache.set(sig, { summary, at: Date.now() });
@@ -1530,7 +1531,7 @@ Return JSON only:
     aiCallsToday++;
     console.log(`AI call #${aiCallsToday} today for ${topic}`);
 
-    const text = await callGroq(prompt, 600);
+    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST });
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -2765,7 +2766,7 @@ LABEL STYLE — like a magazine section title:
 
 Return JSON only:
 {"groups":[{"label":"<sharp label>","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`;
-  const text = await callGroq(prompt, 600);
+  const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST });
   const raw = text.replace(/```json|```/g, '').trim();
   const parsed = JSON.parse(raw) as { groups?: { label: string; indices: number[] }[] };
   if (!Array.isArray(parsed?.groups)) throw new Error('bad AI response');
@@ -2863,7 +2864,7 @@ router.post("/ai-summary", async (req, res) => {
   try {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text);
-    const raw = (await callGroq(prompt, maxTokens)) || "{}";
+    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();
@@ -3180,8 +3181,8 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     const t = setTimeout(() => ctrl.abort(), 60000);
     let answer = "";
     try {
-      try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5 })).trim(); }
-      catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5 })).trim(); }
+      try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_FAST })).trim(); }
+      catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_FAST })).trim(); }
     } finally { clearTimeout(t); }
     if (!answer) throw new Error("Empty answer");
 

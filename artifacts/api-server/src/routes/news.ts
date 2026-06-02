@@ -3160,11 +3160,11 @@ Respond with JSON only.`;
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 3200, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 3200, { signal: ctrl.signal });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal });
       }
     } finally {
       clearTimeout(t);

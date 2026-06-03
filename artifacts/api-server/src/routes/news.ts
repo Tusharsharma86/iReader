@@ -1149,16 +1149,20 @@ function clusterEnrichment(ga: NewsDataArticle[]): { label: string; summary: str
   return null;
 }
 
-// — Article: 25-word summary —
+// — Article: 25-word summary (card-based; applied only to TOP feed cards) —
+// Keyed by the card's source URL so it survives re-clustering. Only the top N
+// ranked cards are ever asked (see buildMixedFeed) so 70b's budget isn't blown
+// trying to summarise the full ~300-article feed.
 const articleSummaryCache = new Map<string, { summary: string; at: number }>();
 const articleSummaryInflight = new Set<string>();
-function articleSignature(a: NewsDataArticle): string {
-  return createHash("md5").update((a.link ? canonicalizeUrl(a.link) : "") || a.title || "").digest("hex");
+function cardSignature(card: StoryCard): string {
+  const url = card.sources?.[0]?.url ?? "";
+  return createHash("md5").update((url ? canonicalizeUrl(url) : "") || card.headline || "").digest("hex");
 }
-async function generateArticleSummary(sig: string, a: NewsDataArticle): Promise<void> {
+async function generateCardSummary(sig: string, card: StoryCard): Promise<void> {
   try {
-    const body = stripHtml((a.description ?? a.content ?? "").slice(0, 600));
-    const prompt = `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${a.title ?? ""}\n${body}\n\nSummary:`;
+    const body = stripHtml((card.summary ?? "").slice(0, 600));
+    const prompt = `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${card.headline ?? ""}\n${body}\n\nSummary:`;
     const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_ENRICH, task: "article-summary-feed" })).trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
     if (summary) articleSummaryCache.set(sig, { summary, at: Date.now() });
@@ -1168,13 +1172,13 @@ async function generateArticleSummary(sig: string, a: NewsDataArticle): Promise<
     articleSummaryInflight.delete(sig);
   }
 }
-function articleAiSummary(a: NewsDataArticle): string | null {
-  const sig = articleSignature(a);
+function cardAiSummary(card: StoryCard): string | null {
+  const sig = cardSignature(card);
   const c = articleSummaryCache.get(sig);
   if (c && Date.now() - c.at < ENRICH_TTL_MS) return c.summary;
   if (Date.now() > enrichPausedUntil && !articleSummaryInflight.has(sig)) {
     articleSummaryInflight.add(sig);
-    void generateArticleSummary(sig, a);
+    void generateCardSummary(sig, card);
   }
   return null;
 }
@@ -1228,7 +1232,21 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedIt
   }
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.map(s => s.item);
+  const items = scored.map(s => s.item);
+  // 25-word AI summary ONLY for the top-ranked solo cards (what users see
+  // first). Bounded so 70b's daily budget isn't blown on the full ~300-item
+  // feed. Lazy + cached; falls back to the raw summary until ready.
+  const TOP_AI_SUMMARIES = 24;
+  let done = 0;
+  for (const item of items) {
+    if (done >= TOP_AI_SUMMARIES) break;
+    if (item.type === "article") {
+      const ai = cardAiSummary(item);
+      if (ai) item.aiSummary = ai;
+      done++;
+    }
+  }
+  return items;
 }
 
 // Extract all StoryCards from a FeedItem array (used for publisher counting,
@@ -1355,7 +1373,6 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
       imageUrl: a.image_url ?? null,
       publishedAt: a.pubDate ?? new Date().toISOString(),
       summary: first50Words(text),
-      aiSummary: articleAiSummary(a) ?? undefined, // 25-word AI summary (lazy, cached); raw `summary` kept for Deep Dive input
       summaries: {
         fiveWs,
         eli5: paragraph,

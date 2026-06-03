@@ -14,11 +14,8 @@ const router: IRouter = Router();
 // optional fallback for now (some routes still call Claude until migrated).
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive (flagship) — dedicated daily budget
-const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks — separate daily budget
-// TEMP (today only): scout's daily token budget is exhausted, so Deep Dive runs
-// on a model with a separate, untouched budget. Revert to GROQ_MODEL once scout
-// recovers — delete this const and the `model:` arg on the two deepdive calls.
-const GROQ_MODEL_DEEPDIVE = "llama-3.3-70b-versatile";
+const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks (article tools, Q&A) — separate budget
+const GROQ_MODEL_ENRICH = "llama-3.3-70b-versatile"; // feed enrichment: cluster headlines + 25-word summaries — separate budget (~100k/day)
 async function callGroq(
   prompt: string,
   maxTokens: number,
@@ -90,6 +87,7 @@ type StoryCard = {
   imageUrl: string | null;
   publishedAt: string;
   summary: string;
+  aiSummary?: string;
   summaries: {
     fiveWs: string[];
     eli5: string;
@@ -1100,58 +1098,83 @@ function clusterForMixedFeed(articles: NewsDataArticle[]): number[][] {
   return Array.from(compMap.values()).map(g => g.slice(0, 6));
 }
 
-// ── Cached AI cluster summaries ─────────────────────────────────────────────
-// A 25-word AI synthesis per CLUSTER (not per article). Clustering itself stays
-// algorithmic (free); only the short summary is AI. Generated lazily and cached
-// per cluster-signature so it runs ~once per distinct cluster, NOT every cron
-// poll — this is what keeps it from draining the daily Groq token budget. On a
-// rate-limit/error it backs off globally for 15 min so it can't hammer Groq.
-const clusterSummaryCache = new Map<string, { summary: string; at: number }>();
-const CLUSTER_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
-const clusterSummaryInflight = new Set<string>();
-let clusterSummaryPausedUntil = 0;
-
+// ── Cached AI feed enrichment (on the GROQ_MODEL_ENRICH model) ───────────────
+// Makes the feed feel AI-curated WITHOUT AI clustering (which is algorithmic /
+// free). For each CLUSTER: a meaningful Title-Case headline + a 25-word summary
+// (one combined call). For each ARTICLE: a 25-word summary. All generated lazily
+// and cached per signature so each runs ~once, NOT every cron poll. A shared
+// 15-min back-off on any rate-limit/error stops it hammering or draining Groq;
+// when it backs off the feed just falls back to the non-AI text.
+const ENRICH_TTL_MS = 24 * 60 * 60 * 1000;
+let enrichPausedUntil = 0;
 function clampWords25(text: string): string {
   const w = (text || "").trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
   return w.length <= 25 ? w.join(" ") : w.slice(0, 25).join(" ") + "…";
 }
+
+// — Cluster: label + 25-word summary —
+const clusterEnrichCache = new Map<string, { label: string; summary: string; at: number }>();
+const clusterEnrichInflight = new Set<string>();
 function clusterSignature(ga: NewsDataArticle[]): string {
-  const key = ga
-    .slice(0, 4)
-    .map((a) => (a.link ? canonicalizeUrl(a.link) : "") || a.title || "")
-    .sort()
-    .join("|");
+  const key = ga.slice(0, 4).map((a) => (a.link ? canonicalizeUrl(a.link) : "") || a.title || "").sort().join("|");
   return createHash("md5").update(key).digest("hex");
 }
-async function generateClusterSummary(sig: string, ga: NewsDataArticle[]): Promise<void> {
+async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Promise<void> {
   try {
-    const lines = ga
-      .slice(0, 6)
-      .map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`)
-      .join("\n");
-    const prompt = `These news articles all cover the SAME story. Write ONE neutral sentence (AT MOST 25 words) summarising what they collectively report. No source names, no markdown, no preamble.\n\n${lines}\n\nSummary:`;
-    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "cluster-summary" })).trim().replace(/^summary:\s*/i, "");
-    const summary = clampWords25(stripHtml(text));
-    if (summary) {
-      clusterSummaryCache.set(sig, { summary, at: Date.now() });
-    }
+    const lines = ga.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`).join("\n");
+    const prompt = `These news articles all cover the SAME story. Return JSON ONLY (no markdown):
+{"label":"a sharp 3-6 word Title Case headline leading with the key entity/place","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
+
+${lines}`;
+    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_ENRICH, task: "cluster-enrich" })).replace(/```json|```/g, "").trim();
+    const m = raw.match(/\{[\s\S]*\}/);
+    const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
+    const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 80) : "";
+    const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : ""));
+    if (label || summary) clusterEnrichCache.set(sig, { label, summary, at: Date.now() });
   } catch {
-    // Back off on any failure (e.g. Groq 429 / daily budget) so we don't spam
-    // requests for every cluster on every poll during an outage.
-    clusterSummaryPausedUntil = Date.now() + 15 * 60 * 1000;
+    enrichPausedUntil = Date.now() + 15 * 60 * 1000;
   } finally {
-    clusterSummaryInflight.delete(sig);
+    clusterEnrichInflight.delete(sig);
   }
 }
-// Returns the cached AI summary if we have it; otherwise null AND kicks off a
-// background generation (deduped) so it's ready next time. Never blocks.
-function clusterAiSummary(ga: NewsDataArticle[]): string | null {
+function clusterEnrichment(ga: NewsDataArticle[]): { label: string; summary: string } | null {
   const sig = clusterSignature(ga);
-  const cached = clusterSummaryCache.get(sig);
-  if (cached && Date.now() - cached.at < CLUSTER_SUMMARY_TTL_MS) return cached.summary;
-  if (Date.now() > clusterSummaryPausedUntil && !clusterSummaryInflight.has(sig)) {
-    clusterSummaryInflight.add(sig);
-    void generateClusterSummary(sig, ga);
+  const c = clusterEnrichCache.get(sig);
+  if (c && Date.now() - c.at < ENRICH_TTL_MS) return { label: c.label, summary: c.summary };
+  if (Date.now() > enrichPausedUntil && !clusterEnrichInflight.has(sig)) {
+    clusterEnrichInflight.add(sig);
+    void generateClusterEnrichment(sig, ga);
+  }
+  return null;
+}
+
+// — Article: 25-word summary —
+const articleSummaryCache = new Map<string, { summary: string; at: number }>();
+const articleSummaryInflight = new Set<string>();
+function articleSignature(a: NewsDataArticle): string {
+  return createHash("md5").update((a.link ? canonicalizeUrl(a.link) : "") || a.title || "").digest("hex");
+}
+async function generateArticleSummary(sig: string, a: NewsDataArticle): Promise<void> {
+  try {
+    const body = stripHtml((a.description ?? a.content ?? "").slice(0, 600));
+    const prompt = `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${a.title ?? ""}\n${body}\n\nSummary:`;
+    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_ENRICH, task: "article-summary-feed" })).trim().replace(/^summary:\s*/i, "");
+    const summary = clampWords25(stripHtml(text));
+    if (summary) articleSummaryCache.set(sig, { summary, at: Date.now() });
+  } catch {
+    enrichPausedUntil = Date.now() + 15 * 60 * 1000;
+  } finally {
+    articleSummaryInflight.delete(sig);
+  }
+}
+function articleAiSummary(a: NewsDataArticle): string | null {
+  const sig = articleSignature(a);
+  const c = articleSummaryCache.get(sig);
+  if (c && Date.now() - c.at < ENRICH_TTL_MS) return c.summary;
+  if (Date.now() > enrichPausedUntil && !articleSummaryInflight.has(sig)) {
+    articleSummaryInflight.add(sig);
+    void generateArticleSummary(sig, a);
   }
   return null;
 }
@@ -1181,12 +1204,14 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedIt
       const score = velocity * 0.4 + freshness * 0.35 + relevance * 0.25;
 
       const cards = buildFallbackStories(ga);
-      const topicTitle = feedClusterLabel(ga);
       const rep = ga[0]!;
-      // Prefer the cached 25-word AI synthesis of the whole cluster; until it's
-      // generated (or if Groq is unavailable) fall back to the lead description.
+      // AI feed enrichment (cached): a meaningful cluster headline + 25-word
+      // summary. Falls back to the algorithmic label / lead description until
+      // generated or if Groq's enrich budget is unavailable.
+      const enrich = clusterEnrichment(ga);
+      const topicTitle = (enrich?.label) || feedClusterLabel(ga);
       const topicSummary =
-        clusterAiSummary(ga) ||
+        (enrich?.summary) ||
         naiveParagraph(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim()));
       scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
     } else {
@@ -1330,6 +1355,7 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
       imageUrl: a.image_url ?? null,
       publishedAt: a.pubDate ?? new Date().toISOString(),
       summary: first50Words(text),
+      aiSummary: articleAiSummary(a) ?? undefined, // 25-word AI summary (lazy, cached); raw `summary` kept for Deep Dive input
       summaries: {
         fiveWs,
         eli5: paragraph,
@@ -2141,14 +2167,17 @@ router.get("/cron/status", (_req, res) => {
 // AI usage dashboard — per-model + per-task token totals for today (UTC).
 router.get("/ai-usage", (_req, res) => {
   const TASK_LABELS: Record<string, string> = {
-    deepdive: "Deep Dive", "cluster-summary": "Cluster summaries",
-    "cluster-labels": "Cluster labels", "article-summary": "Article summary (5Ws/ELI5)",
-    qna: "Follow-up Q&A", clustering: "AI clustering", other: "Other",
+    deepdive: "Deep Dive",
+    "cluster-enrich": "Cluster headlines + summaries",
+    "article-summary-feed": "Article 25-word summaries",
+    "cluster-summary": "Cluster summaries (old)", "cluster-labels": "Cluster labels (For You)",
+    "article-summary": "Article summary (5Ws/ELI5)", qna: "Follow-up Q&A",
+    clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (flagship)",
-    "llama-3.3-70b-versatile": "Deep Dive (temporary)",
-    "llama-3.1-8b-instant": "Summaries · Labels · Q&A",
+    "llama-3.3-70b-versatile": "Feed enrichment (headlines + summaries)",
+    "llama-3.1-8b-instant": "Article tools · Q&A",
   };
   const models = Object.entries(aiUsageByModel).map(([model, m]) => {
     const limit = GROQ_TPD_LIMITS[model] ?? null;
@@ -3089,11 +3118,11 @@ Respond with JSON only.`;
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, model: GROQ_MODEL_DEEPDIVE, task: "deepdive" });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, task: "deepdive" });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, model: GROQ_MODEL_DEEPDIVE, task: "deepdive" });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, task: "deepdive" });
       }
     } finally {
       clearTimeout(t);

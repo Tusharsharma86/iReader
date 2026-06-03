@@ -1161,8 +1161,12 @@ function cardSignature(card: StoryCard): string {
 }
 async function generateCardSummary(sig: string, card: StoryCard): Promise<void> {
   try {
-    const body = stripHtml((card.summary ?? "").slice(0, 600));
-    const prompt = `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${card.headline ?? ""}\n${body}\n\nSummary:`;
+    const body = stripUrlJunk(stripHtml((card.summary ?? "").slice(0, 600)));
+    // When there's no usable body (e.g. a Hacker News item that was only links),
+    // ask the model to characterise the article from its headline instead.
+    const prompt = body.length > 12
+      ? `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${card.headline ?? ""}\n${body}\n\nSummary:`
+      : `Write ONE neutral, informative sentence of AT MOST 25 words describing what this article is most likely about, based on its headline. No preamble, no markdown, no speculation beyond the headline.\n\nHeadline: ${card.headline ?? ""}\n\nSummary:`;
     const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_ENRICH, task: "article-summary-feed" })).trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
     if (summary) articleSummaryCache.set(sig, { summary, at: Date.now() });
@@ -1216,7 +1220,7 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedIt
       const topicTitle = (enrich?.label) || feedClusterLabel(ga);
       const topicSummary =
         (enrich?.summary) ||
-        naiveParagraph(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim()));
+        naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim())));
       scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
     } else {
       for (const a of ga) {
@@ -1242,7 +1246,12 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedIt
     if (done >= TOP_AI_SUMMARIES) break;
     if (item.type === "article") {
       const ai = cardAiSummary(item);
-      if (ai) item.aiSummary = ai;
+      if (ai) {
+        item.aiSummary = ai;
+        // Also fill the plain summary when it was empty (junk-only source) so
+        // clients that don't yet read aiSummary still show the AI text.
+        if (!item.summary || item.summary.length < 12) item.summary = ai;
+      }
       done++;
     }
   }
@@ -1355,9 +1364,27 @@ function first50Words(text: string): string {
   return words.slice(0, 50).join(" ") + "…";
 }
 
+// Strip aggregator boilerplate (Hacker News etc.) and bare URLs from a
+// description so we never display "Article URL: … Comments URL: … Points: …".
+function stripUrlJunk(text: string): string {
+  return (text || "")
+    .replace(/Article URL:\s*\S+/gi, "")
+    .replace(/Comments URL:\s*\S+/gi, "")
+    .replace(/#\s*Comments?:\s*\d+/gi, "")
+    .replace(/\bPoints?:\s*\d+/gi, "")
+    .replace(/https?:\/\/\S+/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
   return articles.map((a, idx) => {
-    const text = (a.description ?? a.content ?? a.title ?? "").trim();
+    const rawText = (a.description ?? a.content ?? a.title ?? "").trim();
+    // Drop "Article URL: … Comments URL: … Points: …" aggregator boilerplate so
+    // raw links never show as the summary; falls back to the title if nothing
+    // meaningful remains (e.g. a Hacker News item with only links).
+    const cleaned = stripUrlJunk(rawText);
+    const text = cleaned.length > 12 ? cleaned : (a.title ?? "").trim();
     const sourceName = a.source_name ?? a.source_id ?? "Unknown";
     const sourceUrl = a.link ?? "";
     const sourceType = classifySource(sourceUrl, sourceName);
@@ -1372,7 +1399,9 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
       category: pickCategory(a),
       imageUrl: a.image_url ?? null,
       publishedAt: a.pubDate ?? new Date().toISOString(),
-      summary: first50Words(text),
+      // Display summary = cleaned description only (empty if it was just links/
+      // points — top cards then get an AI summary post-sort).
+      summary: first50Words(cleaned),
       summaries: {
         fiveWs,
         eli5: paragraph,

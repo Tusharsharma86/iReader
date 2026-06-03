@@ -3106,7 +3106,7 @@ router.post("/deepdive", async (req, res) => {
     return;
   }
 
-  const cacheKey = `deepdive:v5:${url}`; // v5 — full story: 5 fixed sections (incl. Different Angles)
+  const cacheKey = `deepdive:v6:${url}`; // v6 — full story: 5 non-overlapping sections, zero repetition
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -3134,12 +3134,14 @@ router.post("/deepdive", async (req, res) => {
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
   "tldr": ["flat fallback — 6-10 complete-sentence bullets, same ~400-450 word cap"],
-  "storySections": [                                   // THE FULL STORY. EXACTLY these 5 sections, IN THIS ORDER, every time. Each "body" is ONE well-developed paragraph (~90-160 words) of plain prose (no markdown). TOTAL 500-900 words across all five (hard minimum 450). Synthesise from EVERY source excerpt, not just the first. Attribute specific facts/figures/quotes to their source INLINE in parentheses using the [Source] tags, e.g. "...228 people died (Reuters)." No repetition, no filler.
-    //   1. "WHAT HAPPENED"     — the core event ONLY. Plain, verified facts that ALL sources agree on — the spine of the story. NO opinion, NO framing, NO analysis.
-    //   2. "THE DETAILS"       — how / when / where: exact numbers, timeline, names, locations. Where sources agree on a fact, state it; where they DIFFER, note the discrepancy.
-    //   3. "DIFFERENT ANGLES"  — the key value: how the COVERAGE varies. Explicitly contrast what each source emphasises (e.g. "Reuters focused on the financial penalty, while BBC stressed the legal precedent and Indian outlets highlighted the Indian victims"). Name the sources. If only one source, say what it foregrounds vs omits.
-    //   4. "CONTEXT & BACKGROUND" — why this matters NOW: prior events, what led here, the bigger pattern or precedent.
-    //   5. "WHAT'S NEXT"       — forward look: expected developments, pending decisions, appeals, awaited reactions, things to watch.
+  "storySections": [                                   // THE FULL STORY. EXACTLY these 5 sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (~90-160 words) of engaging plain prose (no markdown). TOTAL 500-900 words (min 450). Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
+    // ── ABSOLUTE RULE: ZERO REPETITION. Each section must contain information that appears in NO other section. NEVER restate a fact, figure, name, quote or sentence you already used. If a section would repeat something, REPLACE it with new detail, analysis, or implication. A reader must learn something NEW in every section. Vary sentence openings; do not start multiple sections the same way.
+    // Each section has a STRICT, NON-OVERLAPPING scope:
+    //   1. "WHAT HAPPENED"     — ONLY the single core event in 2-3 sentences: who did what, the headline outcome. No numbers-dump, no background, no consequences. The spine, nothing else.
+    //   2. "THE DETAILS"       — ONLY concrete specifics NOT in section 1: exact figures, dates, the sequence of events, names/titles, locations, the mechanism/how. Pure factual texture. No consequences, no framing.
+    //   3. "DIFFERENT ANGLES"  — ONLY a META-COMMENTARY on the COVERAGE itself — do NOT restate story facts here. Contrast what each named outlet EMPHASISES, frames, or omits (e.g. "Reuters leads on the financial penalty; the BBC frames it as legal precedent; Indian outlets centre the Indian victims"). If all excerpts are one outlet/very similar, instead analyse the framing/tone used and the key questions left UNANSWERED.
+    //   4. "CONTEXT & BACKGROUND" — ONLY history and the bigger picture: prior events, how we got here, precedent, the pattern this fits, stakes for the wider field. NO restating today's event.
+    //   5. "WHAT'S NEXT"       — ONLY the forward look: concrete expected next steps, pending decisions, appeals, timelines, awaited reactions, what to watch. Future tense only; no recap.
     { "heading": "WHAT HAPPENED", "body": "one paragraph" },
     { "heading": "THE DETAILS", "body": "one paragraph" },
     { "heading": "DIFFERENT ANGLES", "body": "one paragraph" },
@@ -3167,11 +3169,11 @@ Respond with JSON only.`;
     let raw = "";
     try {
       try {
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, task: "deepdive" });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
         await new Promise(r => setTimeout(r, 800));
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, task: "deepdive" });
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
       }
     } finally {
       clearTimeout(t);

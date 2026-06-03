@@ -1237,23 +1237,26 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedIt
 
   scored.sort((a, b) => b.score - a.score);
   const items = scored.map(s => s.item);
-  // 25-word AI summary ONLY for the top-ranked solo cards (what users see
-  // first). Bounded so 70b's daily budget isn't blown on the full ~300-item
-  // feed. Lazy + cached; falls back to the raw summary until ready.
-  const TOP_AI_SUMMARIES = 24;
+  // 25-word AI summary for solo cards — bounded so 70b's daily budget isn't
+  // blown on the full ~300-item feed. PRIORITISE cards whose summary is empty
+  // (junk-only sources like Hacker News) since they have nothing else to show,
+  // then fill remaining slots with the top-ranked cards. Lazy + cached.
+  const AI_SUMMARY_BUDGET = 36;
+  const articleItems = items.filter((i): i is StoryCard => i.type === "article");
+  const isEmpty = (s?: string) => !s || s.length < 12;
+  const ordered = [
+    ...articleItems.filter(i => isEmpty(i.summary)),
+    ...articleItems.filter(i => !isEmpty(i.summary)),
+  ];
   let done = 0;
-  for (const item of items) {
-    if (done >= TOP_AI_SUMMARIES) break;
-    if (item.type === "article") {
-      const ai = cardAiSummary(item);
-      if (ai) {
-        item.aiSummary = ai;
-        // Also fill the plain summary when it was empty (junk-only source) so
-        // clients that don't yet read aiSummary still show the AI text.
-        if (!item.summary || item.summary.length < 12) item.summary = ai;
-      }
-      done++;
+  for (const item of ordered) {
+    if (done >= AI_SUMMARY_BUDGET) break;
+    const ai = cardAiSummary(item);
+    if (ai) {
+      item.aiSummary = ai;
+      if (isEmpty(item.summary)) item.summary = ai; // clients without aiSummary still show it
     }
+    done++;
   }
   return items;
 }

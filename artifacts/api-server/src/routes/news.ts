@@ -1098,6 +1098,81 @@ function clusterForMixedFeed(articles: NewsDataArticle[]): number[][] {
   return Array.from(compMap.values()).map(g => g.slice(0, 6));
 }
 
+// ── AI (semantic) clustering — groups same-event stories across outlets ──────
+// Lexical clustering above misses cross-outlet coverage (different wording), so
+// most clusters end up single-source. This groups by MEANING via Groq. To avoid
+// the token-drain that got it rolled back before, it is THROTTLED per topic:
+// Groq is called at most once per topic per TTL; between calls the last grouping
+// is reused, remapped onto the current articles by article-id (new articles =
+// their own singleton). Runs on the cheap 8B model's own budget; on any error
+// it reuses the last grouping or falls back to lexical clustering.
+const AI_CLUSTER_TTL_MS = 90 * 60 * 1000;
+const aiTopicClusterCache = new Map<string, { at: number; idToCluster: Map<string, number> }>();
+function clusterArticleKey(a: NewsDataArticle): string {
+  return ((a.link ? canonicalizeUrl(a.link) : "") || a.title || "").slice(0, 160);
+}
+function groupsFromAssignment(articles: NewsDataArticle[], idToCluster: Map<string, number>): number[][] {
+  const clusterToIdx = new Map<number, number[]>();
+  let nextNew = 1_000_000; // singleton ids for new/unknown articles
+  articles.forEach((a, idx) => {
+    const k = clusterArticleKey(a);
+    let c = idToCluster.get(k);
+    if (c === undefined) c = nextNew++;
+    const arr = clusterToIdx.get(c) ?? [];
+    arr.push(idx);
+    clusterToIdx.set(c, arr);
+  });
+  return Array.from(clusterToIdx.values()).map((g) => g.slice(0, 6));
+}
+async function aiClusterGroups(articles: NewsDataArticle[], topic: string): Promise<number[][]> {
+  const n = articles.length;
+  if (n === 0) return [];
+  const cached = aiTopicClusterCache.get(topic);
+  if (cached && Date.now() - cached.at < AI_CLUSTER_TTL_MS) {
+    return groupsFromAssignment(articles, cached.idToCluster);
+  }
+  const MAX = 40; // cap prompt size; extras become singletons
+  const subset = articles.slice(0, MAX);
+  try {
+    const lines = subset
+      .map((a, i) => {
+        const sum = (a.description ?? "").replace(/\s+/g, " ").slice(0, 140);
+        return `${i}: ${a.title ?? ""}${sum ? ` | ${sum}` : ""}`;
+      })
+      .join("\n");
+    const prompt = `You are a senior news editor. Group these stories by SAME UNDERLYING EVENT / same ongoing situation involving the same primary entity. A shared broad theme (e.g. "tech", "politics") is NOT enough — it must be the same specific event, even if the outlets word the headline differently.
+
+${lines}
+
+Rules:
+- Each index appears in exactly ONE group.
+- Group together coverage of the SAME event from different outlets; unrelated stories are their own single-item group.
+- Return JSON ONLY, no prose:
+{"groups":[{"indices":[0,3]},{"indices":[1]},{"indices":[2,5,7]}]}`;
+    const text = await callGroq(prompt, 700, { model: GROQ_MODEL_FAST, task: "clustering" });
+    const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { groups?: { indices?: number[] }[] };
+    if (!Array.isArray(parsed?.groups) || parsed.groups.length === 0) throw new Error("empty AI groups");
+    const idToCluster = new Map<string, number>();
+    const seen = new Set<number>();
+    let cid = 0;
+    for (const g of parsed.groups) {
+      const idxs = (g.indices ?? []).filter((i) => Number.isInteger(i) && i >= 0 && i < subset.length && !seen.has(i));
+      for (const i of idxs) seen.add(i);
+      if (!idxs.length) continue;
+      for (const i of idxs.slice(0, 6)) idToCluster.set(clusterArticleKey(subset[i]!), cid);
+      cid++;
+    }
+    for (let i = 0; i < subset.length; i++) if (!seen.has(i)) idToCluster.set(clusterArticleKey(subset[i]!), cid++);
+    aiTopicClusterCache.set(topic, { at: Date.now(), idToCluster });
+    return groupsFromAssignment(articles, idToCluster);
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`AI clustering failed for ${topic}:`, e instanceof Error ? e.message : e);
+    if (cached) return groupsFromAssignment(articles, cached.idToCluster);
+    return clusterForMixedFeed(articles);
+  }
+}
+
 // ── Cached AI feed enrichment (on the GROQ_MODEL_ENRICH model) ───────────────
 // Makes the feed feel AI-curated WITHOUT AI clustering (which is algorithmic /
 // free). For each CLUSTER: a meaningful Title-Case headline + a 25-word summary
@@ -1532,7 +1607,7 @@ async function buildBreakingFeed(): Promise<FeedItem[]> {
 
   const recentDeduped = capBySource(recent, 999);
   await enrichMissingImages(recentDeduped);
-  const groups = clusterForMixedFeed(recentDeduped);
+  const groups = await aiClusterGroups(recentDeduped, "breaking");
   return buildMixedFeed(recentDeduped, groups);
 }
 
@@ -1723,7 +1798,7 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   // Deduplicate by canonical URL before clustering — prevents same-URL articles
   // from landing in the same cluster and generating identical MD5 IDs.
   const deduped = capBySource(articles, 999);
-  const groups = clusterForMixedFeed(deduped);
+  const groups = await aiClusterGroups(deduped, topic);
   rawFeedCache.set(topic, { articles: deduped, groups, at: Date.now() });
   return buildMixedFeed(deduped, groups);
 }

@@ -3074,7 +3074,7 @@ router.post("/deepdive", async (req, res) => {
     return;
   }
 
-  const cacheKey = `deepdive:v4:${url}`; // v4 — TL;DR cap raised to 450 words
+  const cacheKey = `deepdive:v5:${url}`; // v5 — full story: 5 fixed sections (incl. Different Angles)
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -3102,17 +3102,17 @@ router.post("/deepdive", async (req, res) => {
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
   "tldr": ["flat fallback — 6-10 complete-sentence bullets, same ~400-450 word cap"],
-  "storySections": [                                   // THE FULL STORY, broken into 4-6 LABELLED sections. TOTAL 450-800 words across all sections (hard minimum 400 — never less). Each "body" is 1-3 paragraphs of plain prose, paragraphs separated by literal "\\n\\n" (two-char escape, NOT raw newlines). Synthesise facts from EVERY source excerpt, not just the first. Attribute specific facts/figures/quotes to their source INLINE in parentheses using the [Source] tags, e.g. "...effective May 1, 2026 (Times of India)." Use 3+ distinct source attributions where available. No markdown, no repetition, no filler.
-    // Choose the sections that FIT this story from this menu (always include the first two; add others when the material supports them). Use these exact ALL-CAPS headings:
-    //   "WHAT HAPPENED"      — the core event, who/what/when/where. (required)
-    //   "THE CONTEXT"        — background, how we got here, prior events. (required)
-    //   "WHY IT MATTERS"     — significance, stakes, who is affected and how.
-    //   "REACTIONS"          — responses from key parties, officials, markets, critics.
-    //   "WHAT'S NEXT"        — likely next steps, timeline, future impact, things to watch.
-    { "heading": "WHAT HAPPENED", "body": "para1\\n\\npara2" },
-    { "heading": "THE CONTEXT", "body": "para1" },
-    { "heading": "WHY IT MATTERS", "body": "para1" },
-    { "heading": "WHAT'S NEXT", "body": "para1" }
+  "storySections": [                                   // THE FULL STORY. EXACTLY these 5 sections, IN THIS ORDER, every time. Each "body" is ONE well-developed paragraph (~90-160 words) of plain prose (no markdown). TOTAL 500-900 words across all five (hard minimum 450). Synthesise from EVERY source excerpt, not just the first. Attribute specific facts/figures/quotes to their source INLINE in parentheses using the [Source] tags, e.g. "...228 people died (Reuters)." No repetition, no filler.
+    //   1. "WHAT HAPPENED"     — the core event ONLY. Plain, verified facts that ALL sources agree on — the spine of the story. NO opinion, NO framing, NO analysis.
+    //   2. "THE DETAILS"       — how / when / where: exact numbers, timeline, names, locations. Where sources agree on a fact, state it; where they DIFFER, note the discrepancy.
+    //   3. "DIFFERENT ANGLES"  — the key value: how the COVERAGE varies. Explicitly contrast what each source emphasises (e.g. "Reuters focused on the financial penalty, while BBC stressed the legal precedent and Indian outlets highlighted the Indian victims"). Name the sources. If only one source, say what it foregrounds vs omits.
+    //   4. "CONTEXT & BACKGROUND" — why this matters NOW: prior events, what led here, the bigger pattern or precedent.
+    //   5. "WHAT'S NEXT"       — forward look: expected developments, pending decisions, appeals, awaited reactions, things to watch.
+    { "heading": "WHAT HAPPENED", "body": "one paragraph" },
+    { "heading": "THE DETAILS", "body": "one paragraph" },
+    { "heading": "DIFFERENT ANGLES", "body": "one paragraph" },
+    { "heading": "CONTEXT & BACKGROUND", "body": "one paragraph" },
+    { "heading": "WHAT'S NEXT", "body": "one paragraph" }
   ],
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"

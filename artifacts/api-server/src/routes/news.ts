@@ -3095,18 +3095,33 @@ interface DeepDiveResult {
 const deepDiveCache = new Map<string, DeepDiveResult>();
 const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+// Fetch + extract the full readable text of one article. Returns "" on failure
+// (paywall, JS-only page, timeout) so callers can fall back to summaries.
+async function fetchArticleText(u: string): Promise<string> {
+  try {
+    const html = await fetchArticleHtml(u);
+    const { bodyHtml } = extractArticleBody(html);
+    let paras = htmlToParagraphs(bodyHtml);
+    if (paras.length < 2) paras = htmlToParagraphs(html);
+    return paras.join("\n\n").trim();
+  } catch {
+    return "";
+  }
+}
+
 router.post("/deepdive", async (req, res) => {
-  const { url, headline, paragraphs } = req.body as {
+  const { url, headline, paragraphs, sourceUrls } = req.body as {
     url?: string;
     headline?: string;
     paragraphs?: string[];
+    sourceUrls?: string[];
   };
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
     return;
   }
 
-  const cacheKey = `deepdive:v7:${url}`; // v7 — synthesise from the FULL fetched lead article + source summaries
+  const cacheKey = `deepdive:v8:${url}`; // v8 — read FULL text of all sources (multi-source)
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -3125,24 +3140,31 @@ router.post("/deepdive", async (req, res) => {
   if (!process.env["GROQ_API_KEY"]) { res.status(502).json({ error: "AI not configured" }); return; }
 
   try {
-    // RICHER INPUT: fetch the FULL text of the lead article (not just the short
-    // summaries the app already has) so the synthesis is grounded in the actual
-    // reporting. Falls back to summaries alone if the fetch fails (paywall/block).
-    let leadFull = "";
-    try {
-      const html = await fetchArticleHtml(url);
-      const { bodyHtml } = extractArticleBody(html);
-      let paras = htmlToParagraphs(bodyHtml);
-      if (paras.length < 2) paras = htmlToParagraphs(html);
-      leadFull = paras.join("\n\n").trim();
-    } catch { /* paywall / fetch blocked → summaries only */ }
-
+    // RICHER INPUT: for a multi-source story, READ THE FULL TEXT OF EVERY SOURCE
+    // (capped for latency/tokens), not just the short summaries the app already
+    // has. Each source is fetched in parallel; any that block (paywall/JS-only)
+    // fall back to their summary. This is what makes the synthesis genuinely
+    // "read all the articles".
+    const MAX_FETCH = 5;
+    const urlsToRead = Array.from(new Set([url, ...(Array.isArray(sourceUrls) ? sourceUrls : [])].filter(Boolean))).slice(0, MAX_FETCH) as string[];
+    const fetched = await Promise.all(
+      urlsToRead.map(async (u) => {
+        let host = u;
+        try { host = new URL(u).hostname.replace(/^www\./, ""); } catch { /* keep url */ }
+        const body = await fetchArticleText(u);
+        return { host, body };
+      }),
+    );
+    const fullArticles = fetched
+      .filter((f) => f.body.length > 200)
+      .map((f) => `=== FULL ARTICLE (${f.host}) ===\n${f.body.slice(0, 6000)}`)
+      .join("\n\n");
     const summaries = paragraphs.slice(0, 40).join("\n");
     const text = (
-      leadFull.length > 200
-        ? `FULL TEXT OF THE LEAD ARTICLE — read this in full and ground the story in it:\n${leadFull.slice(0, 8500)}\n\n=====\n\nSHORT SUMMARIES FROM OTHER SOURCES covering the same story (use for additional facts and for the DIFFERENT ANGLES section):\n${summaries}`
+      fullArticles.length > 200
+        ? `You have the FULL text of ${fetched.filter(f => f.body.length > 200).length} source article(s) covering the SAME story, plus short summaries from any sources that couldn't be fetched. Read them ALL.\n\n${fullArticles}\n\n=== OTHER SOURCE SUMMARIES ===\n${summaries}`
         : summaries
-    ).slice(0, 11000);
+    ).slice(0, 14000);
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {

@@ -3106,7 +3106,7 @@ router.post("/deepdive", async (req, res) => {
     return;
   }
 
-  const cacheKey = `deepdive:v6:${url}`; // v6 — full story: 5 non-overlapping sections, zero repetition
+  const cacheKey = `deepdive:v7:${url}`; // v7 — synthesise from the FULL fetched lead article + source summaries
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -3125,8 +3125,25 @@ router.post("/deepdive", async (req, res) => {
   if (!process.env["GROQ_API_KEY"]) { res.status(502).json({ error: "AI not configured" }); return; }
 
   try {
-    const text = paragraphs.slice(0, 40).join("\n").slice(0, 6000);
-    const prompt = `You are transforming raw news coverage (multiple source excerpts, each tagged like "[Source Name]:") into a structured, AI-native "story understanding" experience. Read ALL excerpts and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
+    // RICHER INPUT: fetch the FULL text of the lead article (not just the short
+    // summaries the app already has) so the synthesis is grounded in the actual
+    // reporting. Falls back to summaries alone if the fetch fails (paywall/block).
+    let leadFull = "";
+    try {
+      const html = await fetchArticleHtml(url);
+      const { bodyHtml } = extractArticleBody(html);
+      let paras = htmlToParagraphs(bodyHtml);
+      if (paras.length < 2) paras = htmlToParagraphs(html);
+      leadFull = paras.join("\n\n").trim();
+    } catch { /* paywall / fetch blocked → summaries only */ }
+
+    const summaries = paragraphs.slice(0, 40).join("\n");
+    const text = (
+      leadFull.length > 200
+        ? `FULL TEXT OF THE LEAD ARTICLE — read this in full and ground the story in it:\n${leadFull.slice(0, 8500)}\n\n=====\n\nSHORT SUMMARIES FROM OTHER SOURCES covering the same story (use for additional facts and for the DIFFERENT ANGLES section):\n${summaries}`
+        : summaries
+    ).slice(0, 11000);
+    const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
   "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + EXACTLY 3-4 bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ~400-450 words (hard cap 450 — be thorough but don't pad). First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").

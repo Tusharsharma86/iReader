@@ -1235,7 +1235,7 @@ async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Pr
 {"label":"a sharp 3-6 word Title Case headline leading with the key entity/place","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
 
 ${lines}`;
-    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_ENRICH, task: "cluster-enrich" })).replace(/```json|```/g, "").trim();
+    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich" })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
     const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 80) : "";
@@ -1374,13 +1374,33 @@ const BIZ_THEME_RULES: ThemeRule[] = [
   { name: "Dividends & Buybacks", re: /\b(dividend|buyback|bonus (issue|share)|stock split)\b/i },
   { name: "Markets & Indices", re: /\b(sensex|nifty|nasdaq|\bdow\b|s&p|stock market|\bindex\b|yields?)\b/i },
 ];
-const THEME_TOPICS = new Set(["technology", "business", "markets"]);
+// Politics / world themes — for breaking (the cross-domain firehose) + the
+// india-politics / geopolitics feeds, which the tech/biz maps don't cover.
+const WORLD_THEME_RULES: ThemeRule[] = [
+  { name: "Trump & US Politics", re: /\b(trump|white house|\bgop\b|republican|democrat|\bcongress\b|\bsenate\b|capitol|\bmaga\b)\b/i },
+  { name: "India Politics", re: /\b(\bmodi\b|\bbjp\b|congress party|parliament|lok sabha|rajya sabha|rahul gandhi|kejriwal|mamata|amit shah)\b/i },
+  { name: "Israel & Gaza", re: /\b(israel|\bgaza\b|hamas|netanyahu|\bidf\b|palestinian|west bank|hezbollah)\b/i },
+  { name: "Iran", re: /\b(\biran\b|tehran|\birgc\b|ayatollah)\b/i },
+  { name: "Russia–Ukraine", re: /\b(russia|ukraine|\bputin\b|zelensky|\bkyiv\b|moscow|kremlin)\b/i },
+  { name: "China", re: /\b(\bchina\b|beijing|xi jinping|\bccp\b|taiwan)\b/i },
+  { name: "Elections", re: /\b(election|\bballot\b|polling booth|campaign trail|by-election|exit poll)\b/i },
+  { name: "Courts & Law", re: /\b(supreme court|high court|\bverdict\b|\bruling\b|sentenced|indicted|\bplea\b)\b/i },
+  { name: "Immigration", re: /\b(immigration|deportation|migrants?|asylum)\b/i },
+  { name: "Protests & Unrest", re: /\b(protests?|\briot|clashes?|\bunrest\b|demonstration)\b/i },
+  { name: "Defence & Military", re: /\b(\bmilitary\b|defence ministry|airstrike|\btroops?\b|warship|drone strike)\b/i },
+  { name: "Disasters & Weather", re: /\b(earthquake|\bflood|wildfire|hurricane|cyclone|monsoon|landslide)\b/i },
+  { name: "Crime & Police", re: /\b(\bmurder\b|shooting|\barrested\b|\bkidnap|\bassault\b)\b/i },
+];
+const THEME_TOPICS = new Set(["technology", "business", "markets", "breaking", "india-politics", "geopolitics"]);
 function themeRulesFor(topic: string): ThemeRule[] {
   if (topic === "technology") return [...TECH_THEME_RULES, ...COMPANY_RULES];
   if (topic === "business") return [...BIZ_THEME_RULES, ...COMPANY_RULES];
   // Markets: drop the catch-all "Markets & Indices" — in a markets feed it would
   // swallow nearly everything and stop being a useful rail.
   if (topic === "markets") return [...BIZ_THEME_RULES.filter(r => r.name !== "Markets & Indices"), ...COMPANY_RULES];
+  if (topic === "india-politics" || topic === "geopolitics") return [...WORLD_THEME_RULES];
+  // breaking = firehose across every domain → all maps, politics/world first.
+  if (topic === "breaking") return [...WORLD_THEME_RULES, ...TECH_THEME_RULES, ...BIZ_THEME_RULES.filter(r => r.name !== "Markets & Indices"), ...COMPANY_RULES];
   return [];
 }
 function themeNamesFor(topic: string): string[] { return themeRulesFor(topic).map(r => r.name); }
@@ -1410,7 +1430,7 @@ async function generateThemeAssignments(topic: string, untagged: NewsDataArticle
 ${lines}
 
 Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"Quantum Computing"},{"i":2,"t":"none"}]}`;
-    const text = await callGroq(prompt, 800, { model: GROQ_MODEL_ENRICH, task: "theme-assign" });
+    const text = await callGroq(prompt, 800, { model: GROQ_MODEL_FAST, task: "theme-assign" });
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { a?: { i?: number; t?: string }[] };
     const idToTheme = new Map<string, string>();
     for (const e of parsed.a ?? []) {
@@ -1519,7 +1539,14 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
   const claimed = new Set<NewsDataArticle>();
   if (THEME_TOPICS.has(topic)) {
     const COLLECTION_CAP = 8;
-    for (const { theme, arts } of buildThemeGroups(singletonArts, topic)) {
+    // Cross-domain firehoses make tons of rails — cap how many for those so the
+    // feed isn't all carousels. Tech/Business/Markets stay uncapped (by request).
+    const MAX_RAILS: Record<string, number> = { breaking: 12, "india-politics": 8, geopolitics: 8 };
+    const maxRails = MAX_RAILS[topic] ?? Infinity;
+    const themeGroups = buildThemeGroups(singletonArts, topic)
+      .sort((a, b) => b.arts.length - a.arts.length) // biggest themes first when capping
+      .slice(0, maxRails);
+    for (const { theme, arts } of themeGroups) {
       const display = arts.slice(0, COLLECTION_CAP);
       if (display.length < 3) continue;
       for (const a of display) claimed.add(a);
@@ -1549,7 +1576,7 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
   // blown on the full ~300-item feed. PRIORITISE cards whose summary is empty
   // (junk-only sources like Hacker News) since they have nothing else to show,
   // then fill remaining slots with the top-ranked cards. Lazy + cached.
-  const AI_SUMMARY_BUDGET = 36;
+  const AI_SUMMARY_BUDGET = 14; // trimmed from 36 to keep the per-build 8B burst under the RPM ceiling
   const articleItems = items.filter((i): i is StoryCard => i.type === "article");
   const isEmpty = (s?: string) => !s || s.length < 12;
   const ordered = [
@@ -2534,8 +2561,8 @@ router.get("/ai-usage", (_req, res) => {
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (flagship)",
-    "llama-3.3-70b-versatile": "Cluster headlines, summaries + theme discovery",
-    "llama-3.1-8b-instant": "Clustering · card summaries · Q&A",
+    "llama-3.3-70b-versatile": "Spare (free-tier RPD too low for feed work)",
+    "llama-3.1-8b-instant": "Clustering · headlines · summaries · themes · Q&A",
   };
   const models = Object.entries(aiUsageByModel).map(([model, m]) => {
     const limit = GROQ_TPD_LIMITS[model] ?? null;

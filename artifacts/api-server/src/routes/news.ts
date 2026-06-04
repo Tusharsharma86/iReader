@@ -1260,13 +1260,13 @@ async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Pr
   try {
     const lines = ga.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`).join("\n");
     const prompt = `These news articles all cover the SAME story. Return JSON ONLY (no markdown):
-{"label":"a sharp 3-6 word Title Case headline leading with the key entity/place","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
+{"label":"a complete, specific 5-9 word Title Case news headline stating WHAT HAPPENED — lead with the key entity/place, and make it a real headline a reader understands on its own, NOT a 2-3 word fragment","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
 
 ${lines}`;
     const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich", background: true })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
-    const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 80) : "";
+    const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 110) : "";
     const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : ""));
     if (label || summary) clusterEnrichCache.set(sig, { label, summary, at: Date.now() });
   } catch {

@@ -1416,9 +1416,11 @@ function buildThemeGroups(singletons: NewsDataArticle[], topic: string): { theme
 }
 
 // Deterministic ~25-word digest for a theme collection: the freshest few
-// headlines, cleaned of trailing source/section cruft, joined.
+// headlines, cleaned of a trailing " - Source" / " | Section" attribution only
+// (whitespace-delimited, so hyphenated words like "Ex-banker" survive).
 function themeDigest(arts: NewsDataArticle[]): string {
-  const parts = arts.slice(0, 3).map(a => (a.title ?? "").replace(/\s*[-|–:][^-|–:]*$/, "").trim()).filter(Boolean);
+  const clean = (t: string) => (t || "").replace(/\s+[|–—-]\s+[^|–—-]+$/, "").trim();
+  const parts = arts.slice(0, 3).map(a => clean(a.title ?? "")).filter(Boolean);
   return clampWords25(parts.join(" · "));
 }
 

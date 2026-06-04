@@ -845,7 +845,7 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
     return tb - ta;
   });
 
-  const top = articles.slice(0, 300);
+  const top = articles.slice(0, 500); // tech pool ceiling (raised 300→500 for a longer tech feed)
 
   await enrichMissingImages(top);
   return top;

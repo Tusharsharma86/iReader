@@ -1115,15 +1115,18 @@ function cleanClusterHeadline(raw: string): string {
   // Drop a trailing subtitle/elaboration clause; keep the lead clause if substantial.
   const lead = t.split(/\s*[:;–—]\s+/)[0]!.trim();
   if (lead.split(/\s+/).length >= 3) t = lead;
+  // Cluster titles want a TIGHT 3-5 word topic label, not a full headline.
+  // Cut at the first natural break (preposition/connective like "to", "of",
+  // "approves", "after"), else hard-cap at 5 words.
   const words = t.split(/\s+/);
-  // If long, cut at the first natural clause break — a secondary connective
-  // ("... as ...", "... after ...", "... amid ...") — so the title reads as a whole
-  // phrase. Otherwise a hard 10-word cap.
-  if (words.length > 9) {
-    const CONN = new Set(["as", "after", "amid", "while", "with", "but", "over", "despite", "following", "saying", "because", "since"]);
-    let cut = 10;
-    for (let i = 5; i <= Math.min(words.length - 1, 10); i++) {
-      if (CONN.has(words[i]!.toLowerCase().replace(/[^a-z]/g, ""))) { cut = i; break; }
+  if (words.length > 5) {
+    const BREAK = new Set([
+      "to","of","for","as","after","amid","while","with","but","over","despite","following","since","because","that","by","in","on","at","from","over","into","says","said","approves","approved","plans","plan","launches","launched","announces","announced","unveils","reveals","reports","reported","files","filed","raises","raised","secures","secured","aims","seeks","wants",
+    ]);
+    let cut = 5;
+    for (let i = 3; i <= Math.min(words.length - 1, 5); i++) {
+      const w = words[i]!.toLowerCase().replace(/[^a-z]/g, "");
+      if (BREAK.has(w)) { cut = i; break; }
     }
     t = words.slice(0, cut).join(" ");
   }
@@ -1341,7 +1344,7 @@ async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Pr
   try {
     const lines = ga.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`).join("\n");
     const prompt = `These news articles all cover the SAME story. Return JSON ONLY (no markdown):
-{"label":"a clear 6-10 word Title Case news headline of what happened, leading with the key entity","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
+{"label":"a TIGHT 3-5 word Title Case topic label naming the event, leading with the key entity (e.g. \"Trump Iran War Vote\", \"AVI Polymers Bonus Issue\", \"Israel-Lebanon Ceasefire Deal\"). NOT a full sentence, NOT an article headline — a category-style label.","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
 
 ${lines}`;
     // Gated — un-gating caused 92% 429s when a feed build fired ~60 enrich calls

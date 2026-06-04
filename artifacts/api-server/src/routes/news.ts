@@ -1268,7 +1268,9 @@ Rules:
     // eslint-disable-next-line no-console
     console.error(`AI clustering failed for ${topic}:`, e instanceof Error ? e.message : e);
     if (cached) return groupsFromAssignment(articles, cached.idToCluster);
-    return clusterForMixedFeed(articles);
+    // No AI grouping available — lexically cluster with title+body so different-
+    // worded same-event coverage (e.g. the Shokz OpenDots 2 launch) still groups.
+    return clusterForMixedFeed(articles, { useDesc: true });
   }
 }
 

@@ -1351,6 +1351,28 @@ function clusterEnrichment(ga: NewsDataArticle[]): { label: string; summary: str
   return null;
 }
 
+// Synchronous AWAIT variant — used during feed builds (cron poll path) so every
+// cluster gets a real AI label before the feed is cached. Capped at 8s per call
+// so a stuck cluster can't block the whole build. Falls back to whatever the
+// sync read returns (cache hit or null).
+async function clusterEnrichmentAwait(ga: NewsDataArticle[]): Promise<{ label: string; summary: string } | null> {
+  const sig = clusterSignature(ga);
+  const c = clusterEnrichCache.get(sig);
+  if (c && Date.now() - c.at < ENRICH_TTL_MS) return { label: c.label, summary: c.summary };
+  if (Date.now() <= enrichPausedUntil) return null;
+  if (!clusterEnrichInflight.has(sig)) {
+    clusterEnrichInflight.add(sig);
+    try {
+      await Promise.race([
+        generateClusterEnrichment(sig, ga),
+        new Promise<void>((res) => setTimeout(res, 8000)),
+      ]);
+    } catch { /* swallow — fall through to cache read */ }
+  }
+  const fresh = clusterEnrichCache.get(sig);
+  return fresh ? { label: fresh.label, summary: fresh.summary } : null;
+}
+
 // — Article: 25-word summary (card-based; applied only to TOP feed cards) —
 // Keyed by the card's source URL so it survives re-clustering. Only the top N
 // ranked cards are ever asked (see buildMixedFeed) so 70b's budget isn't blown
@@ -1587,11 +1609,13 @@ function themeDigest(arts: NewsDataArticle[]): string {
   return clampWords25(parts.join(" · "));
 }
 
-function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic = ""): FeedItem[] {
+async function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic = ""): Promise<FeedItem[]> {
   const now = Date.now();
   const scored: Array<{ item: FeedItem; score: number }> = [];
   const singletonArts: NewsDataArticle[] = []; // one-off articles, grouped into theme collections below
 
+  // Build clusters first, AWAITING AI enrichment so every cluster gets a real
+  // synthesis label/summary before the feed is cached (per user request).
   for (const group of groups) {
     const ga = group.map(i => articles[i]!).filter(Boolean);
     if (ga.length === 0) continue;
@@ -1611,13 +1635,11 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
 
       const cards = buildFallbackStories(ga);
       const rep = ga[0]!;
-      // AI feed enrichment (cached): a meaningful cluster headline + 25-word
-      // summary. Falls back to the algorithmic label / lead description until
-      // generated or if Groq's enrich budget is unavailable.
-      const enrich = clusterEnrichment(ga);
-      // Headline priority: AI synthesis label → the lead article's REAL headline
-      // (always a full, journalist-written headline) → terse algorithmic label.
-      // This kills the "3-word fragment" problem even when AI enrich isn't ready.
+      // AWAIT the AI enrichment (cluster-enrich) so the cluster ships with a
+      // real AI-written label + 25-word summary. 8s per-cluster cap; rate-gate
+      // throttles globally; cached for 24h. Only falls back to the cleaned hero
+      // headline if Groq is paused/erroring — should be rare with the gate.
+      const enrich = await clusterEnrichmentAwait(ga);
       const topicTitle = cleanClusterHeadline(enrich?.label || rep.title || "") || feedClusterLabel(ga);
       const topicSummary =
         (enrich?.summary) ||
@@ -1968,7 +1990,7 @@ async function buildBreakingFeed(): Promise<FeedItem[]> {
   const recentDeduped = capBySource(recent, 999);
   await enrichMissingImages(recentDeduped);
   const groups = await aiClusterGroups(recentDeduped, "breaking");
-  return buildMixedFeed(recentDeduped, groups, "breaking");
+  return await buildMixedFeed(recentDeduped, groups, "breaking");
 }
 
 // ----- AI clustering (stale-while-revalidate, 30-min TTL) -----
@@ -2136,7 +2158,7 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   // Reuse cluster assignments when only scores need updating (saves RSS round-trip).
   const rawEntry = rawFeedCache.get(topic);
   if (rawEntry && Date.now() - rawEntry.at < RAW_FEED_TTL_MS) {
-    return buildMixedFeed(rawEntry.articles, rawEntry.groups, topic);
+    return await buildMixedFeed(rawEntry.articles, rawEntry.groups, topic);
   }
 
   let articles: NewsDataArticle[];
@@ -2160,7 +2182,7 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   const deduped = capBySource(articles, 999);
   const groups = await aiClusterGroups(deduped, topic);
   rawFeedCache.set(topic, { articles: deduped, groups, at: Date.now() });
-  return buildMixedFeed(deduped, groups, topic);
+  return await buildMixedFeed(deduped, groups, topic);
 }
 
 const inflightFeed = new Map<string, Promise<FeedItem[]>>();

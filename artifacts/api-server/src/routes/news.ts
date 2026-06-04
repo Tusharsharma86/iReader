@@ -1604,7 +1604,7 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
   // blown on the full ~300-item feed. PRIORITISE cards whose summary is empty
   // (junk-only sources like Hacker News) since they have nothing else to show,
   // then fill remaining slots with the top-ranked cards. Lazy + cached.
-  const AI_SUMMARY_BUDGET = 14; // trimmed from 36 to keep the per-build 8B burst under the RPM ceiling
+  const AI_SUMMARY_BUDGET = 8; // lowest-priority enrichment — kept small so headlines (queued first) drain quickly through the rate gate
   const articleItems = items.filter((i): i is StoryCard => i.type === "article");
   const isEmpty = (s?: string) => !s || s.length < 12;
   const ordered = [

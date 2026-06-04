@@ -1124,6 +1124,34 @@ function groupsFromAssignment(articles: NewsDataArticle[], idToCluster: Map<stri
   });
   return Array.from(clusterToIdx.values()).map((g) => g.slice(0, 6));
 }
+// Coherence guard: the 8B model sometimes lumps unrelated stories into one
+// group (a shared broad theme, not the same event). Split an AI group into
+// connected components where members share >=2 title tokens; stories that don't
+// genuinely overlap fall out as their own singletons. Same-event coverage
+// always shares the primary entity (e.g. "iran", "kuwait"), so real clusters
+// survive while junk groups collapse to singletons.
+function splitIncoherent(indices: number[], subset: NewsDataArticle[]): number[][] {
+  const m = indices.length;
+  if (m <= 1) return [indices];
+  const toks = indices.map(i => titleTokens(subset[i]?.title ?? ""));
+  const parent = Array.from({ length: m }, (_, i) => i);
+  const find = (x: number): number => { while (parent[x] !== x) { parent[x] = parent[parent[x]!]!; x = parent[x]!; } return x; };
+  for (let i = 0; i < m; i++) {
+    for (let j = i + 1; j < m; j++) {
+      let shared = 0;
+      for (const t of toks[i]!) if (toks[j]!.has(t)) shared++;
+      if (shared >= 2) { const a = find(i), b = find(j); if (a !== b) parent[a] = b; }
+    }
+  }
+  const comp = new Map<number, number[]>();
+  for (let i = 0; i < m; i++) {
+    const r = find(i);
+    const arr = comp.get(r) ?? [];
+    arr.push(indices[i]!);
+    comp.set(r, arr);
+  }
+  return Array.from(comp.values());
+}
 async function aiClusterGroups(articles: NewsDataArticle[], topic: string): Promise<number[][]> {
   const n = articles.length;
   if (n === 0) return [];
@@ -1159,8 +1187,11 @@ Rules:
       const idxs = (g.indices ?? []).filter((i) => Number.isInteger(i) && i >= 0 && i < subset.length && !seen.has(i));
       for (const i of idxs) seen.add(i);
       if (!idxs.length) continue;
-      for (const i of idxs.slice(0, 6)) idToCluster.set(clusterArticleKey(subset[i]!), cid);
-      cid++;
+      // Split any over-grouped AI clusters into lexically-coherent subgroups.
+      for (const sg of splitIncoherent(idxs, subset)) {
+        for (const i of sg.slice(0, 6)) idToCluster.set(clusterArticleKey(subset[i]!), cid);
+        cid++;
+      }
     }
     for (let i = 0; i < subset.length; i++) if (!seen.has(i)) idToCluster.set(clusterArticleKey(subset[i]!), cid++);
     aiTopicClusterCache.set(topic, { at: Date.now(), idToCluster });
@@ -1181,7 +1212,9 @@ Rules:
 // 15-min back-off on any rate-limit/error stops it hammering or draining Groq;
 // when it backs off the feed just falls back to the non-AI text.
 const ENRICH_TTL_MS = 24 * 60 * 60 * 1000;
-let enrichPausedUntil = 0;
+let enrichPausedUntil = 0;          // cluster-enrich backoff (70B)
+let articleSummaryPausedUntil = 0;  // per-card summary backoff (8B) — kept SEPARATE so
+                                    // article-summary rate-limits never pause cluster enrichment
 function clampWords25(text: string): string {
   const w = (text || "").trim().replace(/\s+/g, " ").split(" ").filter(Boolean);
   return w.length <= 25 ? w.join(" ") : w.slice(0, 25).join(" ") + "…";
@@ -1242,11 +1275,11 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
     const prompt = body.length > 12
       ? `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${card.headline ?? ""}\n${body}\n\nSummary:`
       : `Write ONE neutral, informative sentence of AT MOST 25 words describing what this article is most likely about, based on its headline. No preamble, no markdown, no speculation beyond the headline.\n\nHeadline: ${card.headline ?? ""}\n\nSummary:`;
-    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_ENRICH, task: "article-summary-feed" })).trim().replace(/^summary:\s*/i, "");
+    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed" })).trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
     if (summary) articleSummaryCache.set(sig, { summary, at: Date.now() });
   } catch {
-    enrichPausedUntil = Date.now() + 15 * 60 * 1000;
+    articleSummaryPausedUntil = Date.now() + 15 * 60 * 1000;
   } finally {
     articleSummaryInflight.delete(sig);
   }
@@ -1255,7 +1288,7 @@ function cardAiSummary(card: StoryCard): string | null {
   const sig = cardSignature(card);
   const c = articleSummaryCache.get(sig);
   if (c && Date.now() - c.at < ENRICH_TTL_MS) return c.summary;
-  if (Date.now() > enrichPausedUntil && !articleSummaryInflight.has(sig)) {
+  if (Date.now() > articleSummaryPausedUntil && !articleSummaryInflight.has(sig)) {
     articleSummaryInflight.add(sig);
     void generateCardSummary(sig, card);
   }
@@ -2300,8 +2333,8 @@ router.get("/ai-usage", (_req, res) => {
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (flagship)",
-    "llama-3.3-70b-versatile": "Feed enrichment (headlines + summaries)",
-    "llama-3.1-8b-instant": "Article tools · Q&A",
+    "llama-3.3-70b-versatile": "Cluster headlines + summaries",
+    "llama-3.1-8b-instant": "Clustering · card summaries · Q&A",
   };
   const models = Object.entries(aiUsageByModel).map(([model, m]) => {
     const limit = GROQ_TPD_LIMITS[model] ?? null;

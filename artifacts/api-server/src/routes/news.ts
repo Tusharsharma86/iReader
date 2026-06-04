@@ -1308,33 +1308,71 @@ function cardAiSummary(card: StoryCard): string | null {
 // a theme (e.g. "AI Agents") wins over a single company when both match.
 type ThemeRule = { name: string; re: RegExp };
 const COMPANY_RULES: ThemeRule[] = [
-  { name: "Apple",     re: /\b(apple|iphone|ipad|macbook|macos|ios|siri|app store|airpods|vision pro|tim cook|cupertino)\b/i },
-  { name: "Google",    re: /\b(google|alphabet|android|pixel|chrome|deepmind|gemini|gemma|waymo)\b/i },
-  { name: "Meta",      re: /\b(meta|facebook|instagram|whatsapp|zuckerberg|threads|reality labs|oculus)\b/i },
-  { name: "Microsoft", re: /\b(microsoft|windows|azure|copilot|\bxbox\b|satya)\b/i },
-  { name: "Nvidia",    re: /\b(nvidia|jensen huang|cuda|geforce|\bgpus?\b)\b/i },
+  { name: "Apple",     re: /\b(apple|iphone|ipad|macbook|macos|\bios\b|siri|app store|airpods|vision pro|tim cook|cupertino)\b/i },
+  { name: "Google",    re: /\b(google|alphabet|android|pixel|chrome|deepmind|gemini|gemma|waymo|sundar pichai)\b/i },
+  { name: "Meta",      re: /\b(\bmeta\b|facebook|instagram|whatsapp|zuckerberg|threads|reality labs|oculus)\b/i },
+  { name: "Microsoft", re: /\b(microsoft|windows \d|azure|copilot|\bxbox\b|satya nadella)\b/i },
+  { name: "Nvidia",    re: /\b(nvidia|jensen huang|\bcuda\b|geforce|blackwell)\b/i },
   { name: "OpenAI",    re: /\b(openai|chatgpt|sam altman)\b/i },
-  { name: "Amazon",    re: /\b(amazon|\baws\b|alexa|jeff bezos)\b/i },
-  { name: "Tesla",     re: /\b(tesla|elon musk|cybertruck)\b/i },
-  { name: "Samsung",   re: /\b(samsung|galaxy s\d|galaxy z)\b/i },
+  { name: "Amazon",    re: /\b(amazon|\baws\b|alexa|jeff bezos|prime video)\b/i },
+  { name: "Tesla",     re: /\b(tesla|elon musk|cybertruck|full self-driving)\b/i },
+  { name: "Samsung",   re: /\b(samsung|galaxy s\d|galaxy z|galaxy fold)\b/i },
+  { name: "Anthropic", re: /\b(anthropic|\bclaude\b)\b/i },
+  { name: "xAI",       re: /\b(\bxai\b|\bgrok\b)\b/i },
+  { name: "Intel",     re: /\b(\bintel\b|core ultra|\bxeon\b)\b/i },
+  { name: "AMD",       re: /\b(\bamd\b|ryzen|radeon|lisa su)\b/i },
+  { name: "TSMC",      re: /\b(\btsmc\b|taiwan semiconductor)\b/i },
+  { name: "Qualcomm",  re: /\b(qualcomm|snapdragon)\b/i },
+  { name: "Netflix",   re: /\b(netflix)\b/i },
+  { name: "Spotify",   re: /\b(spotify)\b/i },
+  { name: "TikTok",    re: /\b(tiktok|bytedance)\b/i },
+  { name: "Reddit",    re: /\b(reddit)\b/i },
+  { name: "Oracle",    re: /\b(\boracle\b)\b/i },
+  { name: "Salesforce",re: /\b(salesforce)\b/i },
+  { name: "Adobe",     re: /\b(\badobe\b)\b/i },
+  { name: "IBM",       re: /\b(\bibm\b)\b/i },
+  { name: "Sony",      re: /\b(\bsony\b|playstation)\b/i },
+  { name: "Nintendo",  re: /\b(nintendo|switch 2)\b/i },
 ];
 const TECH_THEME_RULES: ThemeRule[] = [
   { name: "AI Agents",  re: /\b(ai agents?|agentic|autonomous agents?)\b/i },
-  { name: "New AI Models", re: /\b(gpt-?\d|large language model|foundation model|open-?weight|new ai model|model release|llama \d|claude \d|mistral|deepseek|\bqwen|\bgrok\b)\b/i },
-  { name: "Chips & Semiconductors", re: /\b(semiconductor|chipmaker|tsmc|\bchips?\b|wafer|foundry|\beuv\b|nanometer)\b/i },
-  { name: "AR / VR",    re: /\b(augmented reality|virtual reality|mixed reality|vr headset|ar glasses|metaverse|quest \d)\b/i },
-  { name: "Cybersecurity", re: /\b(ransomware|data breach|malware|zero-day|vulnerabilit|hacked|cyberattack|phishing)\b/i },
-  { name: "Crypto & Web3", re: /\b(crypto|bitcoin|ethereum|blockchain|stablecoin|web3)\b/i },
-  { name: "EVs & Autonomy", re: /\b(electric vehicle|\bevs?\b|self-driving|robotaxi|autonomous vehicle)\b/i },
-  { name: "Space",      re: /\b(spacex|\bnasa\b|rocket launch|satellite|starship)\b/i },
+  { name: "New AI Models", re: /\b(gpt-?\d|large language model|\bllm\b|foundation model|open-?weight|new ai model|model release|llama \d|claude \d|mistral|deepseek|\bqwen\b|reasoning model)\b/i },
+  { name: "Chips & Semiconductors", re: /\b(semiconductor|chipmaker|\bchips?\b|wafer|foundry|\beuv\b|nanometer|\bfabs?\b)\b/i },
+  { name: "Quantum Computing", re: /\b(quantum comput|\bqubits?\b|quantum processor|quantum supremacy)\b/i },
+  { name: "Robotics", re: /\b(\brobots?\b|robotics|humanoid|boston dynamics)\b/i },
+  { name: "AR / VR", re: /\b(augmented reality|virtual reality|mixed reality|vr headset|ar glasses|metaverse|quest \d|smart glasses)\b/i },
+  { name: "Cybersecurity", re: /\b(ransomware|data breach|malware|zero-day|vulnerabilit|hacked|cyberattack|phishing|spyware)\b/i },
+  { name: "Crypto & Web3", re: /\b(crypto|bitcoin|ethereum|blockchain|stablecoin|web3|\bnft\b)\b/i },
+  { name: "EVs & Autonomy", re: /\b(electric vehicle|\bevs?\b|self-driving|robotaxi|autonomous vehicle|ev charging)\b/i },
+  { name: "Space", re: /\b(spacex|\bnasa\b|rocket launch|satellite|starship|blue origin)\b/i },
+  { name: "Layoffs & Hiring", re: /\b(layoffs?|job cuts?|\bfired\b|hiring freeze|restructuring|workforce reduction)\b/i },
+  { name: "Antitrust & Regulation", re: /\b(antitrust|monopoly|\bftc\b|\bdoj\b|regulat|\beu fine|lawsuit|\bsued\b|probe)\b/i },
+  { name: "Privacy & Data", re: /\b(privacy|data protection|surveillance|tracking|\bgdpr\b|age verification)\b/i },
+  { name: "Social Media", re: /\b(social media|content moderation|misinformation|deepfakes?|going viral)\b/i },
+  { name: "Gaming", re: /\b(video game|game pass|\bconsole\b|esports)\b/i },
+  { name: "Streaming & Media", re: /\b(streaming|subscribers?|box office|original series)\b/i },
+  { name: "Fintech & Payments", re: /\b(fintech|\bpayments?\b|digital wallet|\bupi\b|neobank)\b/i },
+  { name: "Health & Biotech", re: /\b(biotech|health tech|\bdrug\b|\bfda\b|clinical trial|genom)\b/i },
+  { name: "Climate & Energy", re: /\b(climate tech|renewable|solar power|\bbattery\b|nuclear|carbon)\b/i },
 ];
 const BIZ_THEME_RULES: ThemeRule[] = [
   { name: "Earnings",   re: /\b(earnings|quarterly results|q[1-4] (results|profit)|net profit|profit (jump|rise|fall|down|up)|guidance)\b/i },
   { name: "IPOs & Listings", re: /\b(\bipo\b|listing|market debut|goes public|drhp|grey market premium|\bgmp\b)\b/i },
   { name: "Banking & Rates", re: /\b(\bbank\b|\brbi\b|\bfed\b|interest rate|\bloans?\b|deposit|\bnpa\b|repo rate)\b/i },
   { name: "Mergers & Deals", re: /\b(acquir|acquisition|merger|takeover|buyout|\bstake\b|block deal)\b/i },
-  { name: "Startups & Funding", re: /\b(startup|\bfunding\b|raises? \$|series [a-e]\b|valuation|venture capital)\b/i },
-  { name: "Markets & Indices", re: /\b(sensex|nifty|nasdaq|\bdow\b|s&p|stock market|\bshares?\b|\bindex\b|yields?)\b/i },
+  { name: "Startups & Funding", re: /\b(startup|\bfunding\b|raises? \$|series [a-e]\b|valuation|venture capital|\bvc\b)\b/i },
+  { name: "Oil & Energy", re: /\b(crude|oil price|\bopec\b|natural gas|\bpetrol\b|diesel)\b/i },
+  { name: "Gold & Commodities", re: /\b(\bgold\b|\bsilver\b|commodit|bullion)\b/i },
+  { name: "Real Estate", re: /\b(real estate|\bproperty\b|housing|realty|homebuilder)\b/i },
+  { name: "Auto & EVs", re: /\b(auto sales|carmaker|vehicle sales|automaker)\b/i },
+  { name: "Pharma & Healthcare", re: /\b(pharma|drugmaker|\busfda\b|healthcare|\bvaccine\b)\b/i },
+  { name: "Aviation", re: /\b(airline|aviation|\bairport\b|aircraft|boeing|airbus|indigo)\b/i },
+  { name: "Inflation & Economy", re: /\b(inflation|\bgdp\b|recession|unemployment|jobs report)\b/i },
+  { name: "Tariffs & Trade", re: /\b(tariffs?|trade war|import duty|\bwto\b)\b/i },
+  { name: "Currency & Rupee", re: /\b(\brupee\b|dollar index|\bforex\b|exchange rate)\b/i },
+  { name: "Tax & Policy", re: /\b(\btax\b|\bgst\b|\bbudget\b|fiscal|\bsebi\b)\b/i },
+  { name: "Dividends & Buybacks", re: /\b(dividend|buyback|bonus (issue|share)|stock split)\b/i },
+  { name: "Markets & Indices", re: /\b(sensex|nifty|nasdaq|\bdow\b|s&p|stock market|\bindex\b|yields?)\b/i },
 ];
 const THEME_TOPICS = new Set(["technology", "business", "markets"]);
 function themeRulesFor(topic: string): ThemeRule[] {
@@ -1360,23 +1398,25 @@ const themeAssignCache = new Map<string, { at: number; idToTheme: Map<string, st
 const themeAssignInflight = new Set<string>();
 async function generateThemeAssignments(topic: string, untagged: NewsDataArticle[]): Promise<void> {
   try {
-    const names = themeNamesFor(topic);
-    const subset = untagged.slice(0, 30);
+    const preferred = themeNamesFor(topic);
+    const subset = untagged.slice(0, 36);
     const lines = subset.map((a, i) => `${i}: ${a.title ?? ""}`).join("\n");
-    const prompt = `You are a ${topic} news editor. Assign each story to ONE theme from this list if it clearly fits, otherwise "none".
-Themes: ${names.join(", ")}.
+    // OPEN-ENDED discovery — the model names the themes itself (not limited to a
+    // fixed list), so anything recurring (quantum computing, layoffs, tariffs,
+    // a company we never hard-coded…) can form a rail. Keyword names are only a
+    // preference for consistent spelling.
+    const prompt = `You are a ${topic} news editor building "what's happening with X" rails. Below are today's one-off headlines. DISCOVER the recurring themes — each is a specific company (e.g. Apple, Nvidia, TSMC, Anthropic), a technology (e.g. quantum computing, AI agents, robotics), or a topic (e.g. layoffs, antitrust, tariffs, oil prices). Assign each headline to ONE concise theme it clearly belongs to, or "none" if it stands alone. Use a 1-3 word Title Case name and REUSE the exact same name for related stories. Prefer these names when they fit: ${preferred.join(", ")}.
 
 ${lines}
 
-Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"none"}]}`;
-    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "theme-assign" });
+Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"Quantum Computing"},{"i":2,"t":"none"}]}`;
+    const text = await callGroq(prompt, 800, { model: GROQ_MODEL_FAST, task: "theme-assign" });
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { a?: { i?: number; t?: string }[] };
     const idToTheme = new Map<string, string>();
-    const valid = new Set(names);
     for (const e of parsed.a ?? []) {
       if (typeof e.i !== "number" || e.i < 0 || e.i >= subset.length) continue;
-      const t = (e.t ?? "").trim();
-      if (t && t !== "none" && valid.has(t)) idToTheme.set(clusterArticleKey(subset[e.i]!), t);
+      const t = (e.t ?? "").trim().replace(/\s+/g, " ").slice(0, 28);
+      if (t && t.toLowerCase() !== "none" && t.length >= 2) idToTheme.set(clusterArticleKey(subset[e.i]!), t);
     }
     themeAssignCache.set(topic, { at: Date.now(), idToTheme });
   } catch {
@@ -1400,19 +1440,27 @@ function cachedThemeAssign(topic: string, untagged: NewsDataArticle[]): Map<stri
 function buildThemeGroups(singletons: NewsDataArticle[], topic: string): { theme: string; arts: NewsDataArticle[] }[] {
   const rules = themeRulesFor(topic);
   if (rules.length === 0) return [];
-  const byTheme = new Map<string, NewsDataArticle[]>();
-  const push = (t: string, a: NewsDataArticle) => { const arr = byTheme.get(t) ?? []; arr.push(a); byTheme.set(t, arr); };
+  // Canonicalise so keyword + AI-discovered names merge (case-insensitive),
+  // preferring the keyword map's spelling when one matches.
+  const known = new Map(rules.map(r => [r.name.toLowerCase(), r.name] as const));
+  const byKey = new Map<string, { name: string; arts: NewsDataArticle[] }>();
+  const add = (rawTheme: string, a: NewsDataArticle) => {
+    const key = rawTheme.trim().toLowerCase();
+    if (!key) return;
+    const g = byKey.get(key) ?? { name: known.get(key) ?? rawTheme.trim(), arts: [] };
+    g.arts.push(a); byKey.set(key, g);
+  };
   const untagged: NewsDataArticle[] = [];
   for (const a of singletons) {
     const th = detectTheme(a, rules);
-    if (th) push(th, a); else untagged.push(a);
+    if (th) add(th, a); else untagged.push(a);
   }
   const aiThemes = cachedThemeAssign(topic, untagged);
-  if (aiThemes.size > 0) for (const a of untagged) { const th = aiThemes.get(clusterArticleKey(a)); if (th) push(th, a); }
+  if (aiThemes.size > 0) for (const a of untagged) { const th = aiThemes.get(clusterArticleKey(a)); if (th) add(th, a); }
   const ts = (a: NewsDataArticle) => (a.pubDate ? Date.parse(a.pubDate) : 0);
-  return Array.from(byTheme.entries())
-    .filter(([, arts]) => arts.length >= 3)
-    .map(([theme, arts]) => ({ theme, arts: arts.sort((x, y) => ts(y) - ts(x)) }));
+  return Array.from(byKey.values())
+    .filter(g => g.arts.length >= 3)
+    .map(g => ({ theme: g.name, arts: g.arts.sort((x, y) => ts(y) - ts(x)) }));
 }
 
 // Deterministic ~25-word digest for a theme collection: the freshest few

@@ -1089,33 +1089,38 @@ function feedClusterLabel(articles: NewsDataArticle[]): string {
   return rep.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || "News";
 }
 
-// Turn an article headline into a concise cluster title: strip the " - Source"
-// suffix, drop the ": subtitle" / "; elaboration" tail when the headline is long
-// (keeping the lead clause if it's substantial), and hard-cap the length so a
-// cluster card never shows a 4-line hero headline.
+// Turn a headline into a SHORT cluster title (~6-10 words). Strips the
+// " - Source" suffix, drops the ": subtitle" / "; aside" / "— aside" tail, then
+// trims to ~10 words (preferring a comma break) so a cluster card shows a tight
+// label, never a 4-line hero headline. Used for both the AI label and the
+// fallback article headline.
 function cleanClusterHeadline(raw: string): string {
   let t = stripUrlJunk((raw ?? "").trim()).replace(/\s+[|–—-]\s+[^|–—-]+$/, "").trim();
-  if (t.split(/\s+/).length > 10) {
-    const lead = t.split(/\s*[:;–—]\s+/)[0]!.trim();
-    if (lead.split(/\s+/).length >= 5) t = lead;
-  }
+  // Drop a trailing subtitle/elaboration clause; keep the lead clause if substantial.
+  const lead = t.split(/\s*[:;–—]\s+/)[0]!.trim();
+  if (lead.split(/\s+/).length >= 4) t = lead;
   const words = t.split(/\s+/);
-  if (words.length > 13) t = words.slice(0, 13).join(" ") + "…";
-  return words.length >= 4 ? t : "";
+  // If long, cut at the first natural clause break — a secondary connective
+  // ("... as ...", "... after ...", "... amid ...") — so the title reads as a whole
+  // phrase. Otherwise a hard 10-word cap.
+  if (words.length > 9) {
+    const CONN = new Set(["as", "after", "amid", "while", "with", "but", "over", "despite", "following", "saying", "because", "since"]);
+    let cut = 10;
+    for (let i = 5; i <= Math.min(words.length - 1, 10); i++) {
+      if (CONN.has(words[i]!.toLowerCase().replace(/[^a-z]/g, ""))) { cut = i; break; }
+    }
+    t = words.slice(0, cut).join(" ");
+  }
+  // Tidy trailing punctuation and dangling prepositions/conjunctions.
+  t = t.replace(/[\s,:;–—-]+$/, "").replace(/\s+(for|and|to|of|the|a|an|in|on|with|as|its|that|by)$/i, "").trim();
+  return t.split(/\s+/).length >= 3 ? t : "";
 }
 
 // Union-Find clustering: articles sharing 2+ non-stopword title tokens are
 // grouped. Returns array of groups (each is an array of article indices).
 // Same-domain articles never merge. Groups are capped at 8 members.
-function clusterForMixedFeed(articles: NewsDataArticle[], opts: { useDesc?: boolean } = {}): number[][] {
-  // useDesc: also fold in description tokens — catches same-event stories whose
-  // HEADLINES differ a lot (e.g. two outlets on the Shokz OpenDots 2 launch share
-  // only "shokz"/"earbuds" in the title but both say "OpenDots" in the body).
-  const tokenSets = articles.map(a => {
-    const t = titleTokens(a.title ?? "");
-    if (opts.useDesc) for (const x of titleTokens(stripHtml(a.description ?? "").slice(0, 120))) t.add(x);
-    return t;
-  });
+function clusterForMixedFeed(articles: NewsDataArticle[]): number[][] {
+  const tokenSets = articles.map(a => titleTokens(a.title ?? ""));
   const n = articles.length;
   const parent = Array.from({ length: n }, (_, i) => i);
   const rank = new Array<number>(n).fill(0);
@@ -1172,23 +1177,18 @@ function groupsFromAssignment(articles: NewsDataArticle[], idToCluster: Map<stri
     arr.push(idx);
     clusterToIdx.set(c, arr);
   });
-  const groups: number[][] = [];
-  // Keep the AI's genuine multi-source clusters; pool every SINGLETON (AI ones it
-  // didn't group + fresh articles that arrived between runs) and run a lexical
-  // re-pass over them. That title+body pass catches same-event coverage the AI
-  // split or missed — e.g. two outlets on the Shokz OpenDots 2 launch.
-  const singletonIdx: number[] = [...unknownIdx];
-  for (const idxs of clusterToIdx.values()) {
-    if (idxs.length >= 2) groups.push(idxs.slice(0, 6));
-    else singletonIdx.push(...idxs);
-  }
-  if (singletonIdx.length > 1) {
-    const pool = singletonIdx.map((i) => articles[i]!);
-    for (const lg of clusterForMixedFeed(pool, { useDesc: true })) {
-      groups.push(lg.map((li) => singletonIdx[li]!).slice(0, 6));
+  const groups = Array.from(clusterToIdx.values()).map((g) => g.slice(0, 6));
+  // Fresh/unknown articles (arrived between AI runs): cluster them by TITLE only
+  // (>=3 shared title tokens, different domains) — conservative, never chains
+  // unrelated stories. Body-token clustering was tried and over-merged badly, so
+  // we accept that a rare different-worded pair stays split.
+  if (unknownIdx.length > 1) {
+    const pool = unknownIdx.map((i) => articles[i]!);
+    for (const lg of clusterForMixedFeed(pool)) {
+      groups.push(lg.map((li) => unknownIdx[li]!).slice(0, 6));
     }
-  } else if (singletonIdx.length === 1) {
-    groups.push([singletonIdx[0]!]);
+  } else if (unknownIdx.length === 1) {
+    groups.push([unknownIdx[0]!]);
   }
   return groups;
 }
@@ -1268,9 +1268,7 @@ Rules:
     // eslint-disable-next-line no-console
     console.error(`AI clustering failed for ${topic}:`, e instanceof Error ? e.message : e);
     if (cached) return groupsFromAssignment(articles, cached.idToCluster);
-    // No AI grouping available — lexically cluster with title+body so different-
-    // worded same-event coverage (e.g. the Shokz OpenDots 2 launch) still groups.
-    return clusterForMixedFeed(articles, { useDesc: true });
+    return clusterForMixedFeed(articles);
   }
 }
 
@@ -1594,7 +1592,7 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       // Headline priority: AI synthesis label → the lead article's REAL headline
       // (always a full, journalist-written headline) → terse algorithmic label.
       // This kills the "3-word fragment" problem even when AI enrich isn't ready.
-      const topicTitle = (enrich?.label) || cleanClusterHeadline(rep.title ?? "") || feedClusterLabel(ga);
+      const topicTitle = cleanClusterHeadline(enrich?.label || rep.title || "") || feedClusterLabel(ga);
       const topicSummary =
         (enrich?.summary) ||
         naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim())));

@@ -1157,18 +1157,23 @@ function groupsFromAssignment(articles: NewsDataArticle[], idToCluster: Map<stri
     arr.push(idx);
     clusterToIdx.set(c, arr);
   });
-  const groups = Array.from(clusterToIdx.values()).map((g) => g.slice(0, 6));
-  // Fresh articles that arrived between AI-clustering runs aren't in the cached
-  // assignment. Instead of dumping them ALL as singletons (so same-event stories
-  // that broke just now stay split), lexically cluster them now — title + body,
-  // so different-worded coverage of the same launch/event still groups.
-  if (unknownIdx.length > 1) {
-    const fresh = unknownIdx.map((i) => articles[i]!);
-    for (const lg of clusterForMixedFeed(fresh, { useDesc: true })) {
-      groups.push(lg.map((li) => unknownIdx[li]!).slice(0, 6));
+  const groups: number[][] = [];
+  // Keep the AI's genuine multi-source clusters; pool every SINGLETON (AI ones it
+  // didn't group + fresh articles that arrived between runs) and run a lexical
+  // re-pass over them. That title+body pass catches same-event coverage the AI
+  // split or missed — e.g. two outlets on the Shokz OpenDots 2 launch.
+  const singletonIdx: number[] = [...unknownIdx];
+  for (const idxs of clusterToIdx.values()) {
+    if (idxs.length >= 2) groups.push(idxs.slice(0, 6));
+    else singletonIdx.push(...idxs);
+  }
+  if (singletonIdx.length > 1) {
+    const pool = singletonIdx.map((i) => articles[i]!);
+    for (const lg of clusterForMixedFeed(pool, { useDesc: true })) {
+      groups.push(lg.map((li) => singletonIdx[li]!).slice(0, 6));
     }
-  } else if (unknownIdx.length === 1) {
-    groups.push([unknownIdx[0]!]);
+  } else if (singletonIdx.length === 1) {
+    groups.push([singletonIdx[0]!]);
   }
   return groups;
 }
@@ -1225,7 +1230,7 @@ Rules:
 - Group together coverage of the SAME event from different outlets; unrelated stories are their own single-item group.
 - Return JSON ONLY, no prose:
 {"groups":[{"indices":[0,3]},{"indices":[1]},{"indices":[2,5,7]}]}`;
-    const text = await callGroq(prompt, 700, { model: GROQ_MODEL_FAST, task: "clustering", background: true });
+    const text = await callGroq(prompt, 700, { model: GROQ_MODEL_FAST, task: "clustering" });
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { groups?: { indices?: number[] }[] };
     if (!Array.isArray(parsed?.groups) || parsed.groups.length === 0) throw new Error("empty AI groups");
     const idToCluster = new Map<string, number>();
@@ -2023,7 +2028,7 @@ Return JSON only:
     aiCallsToday++;
     console.log(`AI call #${aiCallsToday} today for ${topic}`);
 
-    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "clustering", background: true });
+    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "clustering" });
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 

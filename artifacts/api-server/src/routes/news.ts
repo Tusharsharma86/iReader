@@ -355,9 +355,12 @@ function breakingScore(a: NewsDataArticle): number {
   return score;
 }
 
+// Catches sports/entertainment the main list misses: general "world cup", bare
+// movie/film, casting language, and common Bollywood/Hollywood names.
+const EXTRA_SE_RE = /\b(world cup|t20 world cup|asia cup|champions trophy|movies?|films?|film festival|to star in|stars in (the|a|an|upcoming)|box.?office|streaming series|reality show|salman khan|shah rukh|\bsrk\b|aamir khan|ajay devgn|akshay kumar|ranbir kapoor|ranveer singh|deepika padukone|alia bhatt|kareena|katrina kaif|priyanka chopra|kangana|hrithik|kravitz|kardashian|taylor swift)\b/i;
 function isSportsOrEntertainment(article: NewsDataArticle): boolean {
   const text = `${article.title ?? ""} ${article.description ?? ""}`.slice(0, 300);
-  return SPORTS_ENTERTAINMENT_RE.test(text);
+  return SPORTS_ENTERTAINMENT_RE.test(text) || EXTRA_SE_RE.test(text);
 }
 
 // NYT's recurring "Here's the Latest" live-briefing roundup is a placeholder,

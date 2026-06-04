@@ -1260,7 +1260,7 @@ async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Pr
   try {
     const lines = ga.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`).join("\n");
     const prompt = `These news articles all cover the SAME story. Return JSON ONLY (no markdown):
-{"label":"a complete, specific 5-9 word Title Case news headline stating WHAT HAPPENED — lead with the key entity/place, and make it a real headline a reader understands on its own, NOT a 2-3 word fragment","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
+{"label":"a clear 6-10 word Title Case news headline of what happened, leading with the key entity","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
 
 ${lines}`;
     const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich", background: true })).replace(/```json|```/g, "").trim();
@@ -1550,7 +1550,11 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       // summary. Falls back to the algorithmic label / lead description until
       // generated or if Groq's enrich budget is unavailable.
       const enrich = clusterEnrichment(ga);
-      const topicTitle = (enrich?.label) || feedClusterLabel(ga);
+      // Headline priority: AI synthesis label → the lead article's REAL headline
+      // (always a full, journalist-written headline) → terse algorithmic label.
+      // This kills the "3-word fragment" problem even when AI enrich isn't ready.
+      const repHeadline = stripUrlJunk((rep.title ?? "").replace(/\s+[|–—-]\s+[^|–—-]+$/, "").trim());
+      const topicTitle = (enrich?.label) || (repHeadline.split(/\s+/).length >= 4 ? repHeadline : "") || feedClusterLabel(ga);
       const topicSummary =
         (enrich?.summary) ||
         naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim())));

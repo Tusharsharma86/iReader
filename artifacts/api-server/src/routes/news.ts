@@ -1177,7 +1177,17 @@ function groupsFromAssignment(articles: NewsDataArticle[], idToCluster: Map<stri
     arr.push(idx);
     clusterToIdx.set(c, arr);
   });
-  const groups = Array.from(clusterToIdx.values()).map((g) => g.slice(0, 6));
+  // Re-validate coherence on the CURRENT articles. A cached cluster id may have
+  // grouped stories via a bridging article that has since aged out, leaving
+  // unrelated members (e.g. a Delhi fire story stuck in a Trump/Iran cluster).
+  // Re-split each cached cluster so only members still connected by >=2 shared
+  // title tokens stay together. This is the precision guard that catches the
+  // stale-chain over-merges the cache can't see.
+  const groups: number[][] = [];
+  for (const g of clusterToIdx.values()) {
+    if (g.length <= 1) { groups.push(g); continue; }
+    for (const sg of splitIncoherent(g, articles)) groups.push(sg.slice(0, 6));
+  }
   // Fresh/unknown articles (arrived between AI runs): cluster them by TITLE only
   // (>=3 shared title tokens, different domains) — conservative, never chains
   // unrelated stories. Body-token clustering was tried and over-merged badly, so

@@ -1328,7 +1328,10 @@ async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Pr
 {"label":"a clear 6-10 word Title Case news headline of what happened, leading with the key entity","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
 
 ${lines}`;
-    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich", background: true })).replace(/```json|```/g, "").trim();
+    // No rate gate — cluster-enrich is awaited on the feed-build critical path
+    // and runs at most ONCE per cluster (cached 24h). Low volume; the gate is
+    // reserved for the high-volume per-card summary burst.
+    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich" })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
     const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 110) : "";
@@ -1352,9 +1355,13 @@ function clusterEnrichment(ga: NewsDataArticle[]): { label: string; summary: str
 }
 
 // Synchronous AWAIT variant — used during feed builds (cron poll path) so every
-// cluster gets a real AI label before the feed is cached. Capped at 8s per call
-// so a stuck cluster can't block the whole build. Falls back to whatever the
-// sync read returns (cache hit or null).
+// cluster gets a real AI label before the feed is cached. 15s per-cluster cap;
+// at most 3 in-flight at once to avoid a 429 burst. Falls back to the cleaned
+// hero headline only if Groq paused/errored.
+let enrichInflightCount = 0;
+async function waitForSlot(): Promise<void> {
+  while (enrichInflightCount >= 3) await new Promise((r) => setTimeout(r, 120));
+}
 async function clusterEnrichmentAwait(ga: NewsDataArticle[]): Promise<{ label: string; summary: string } | null> {
   const sig = clusterSignature(ga);
   const c = clusterEnrichCache.get(sig);
@@ -1362,12 +1369,15 @@ async function clusterEnrichmentAwait(ga: NewsDataArticle[]): Promise<{ label: s
   if (Date.now() <= enrichPausedUntil) return null;
   if (!clusterEnrichInflight.has(sig)) {
     clusterEnrichInflight.add(sig);
+    await waitForSlot();
+    enrichInflightCount++;
     try {
       await Promise.race([
         generateClusterEnrichment(sig, ga),
-        new Promise<void>((res) => setTimeout(res, 8000)),
+        new Promise<void>((res) => setTimeout(res, 15000)),
       ]);
     } catch { /* swallow — fall through to cache read */ }
+    finally { enrichInflightCount--; }
   }
   const fresh = clusterEnrichCache.get(sig);
   return fresh ? { label: fresh.label, summary: fresh.summary } : null;

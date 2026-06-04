@@ -1099,9 +1099,22 @@ function feedClusterLabel(articles: NewsDataArticle[]): string {
 // fallback article headline.
 function cleanClusterHeadline(raw: string): string {
   let t = stripUrlJunk((raw ?? "").trim()).replace(/\s+[|–—-]\s+[^|–—-]+$/, "").trim();
+  // Strip article-specific date stamps ("June 2026", "May 29", "2026", "Q1 FY26",
+  // "Day 0/Day 3" subscription counters) so cluster topics don't look like a
+  // single article's headline.
+  t = t
+    .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*\d{4})?\b/gi, "")
+    .replace(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{4}\b/gi, "")
+    .replace(/\b(?:Day|Q[1-4])\s*\d{1,2}\b/gi, "")
+    .replace(/\b(?:FY|fy)\s?\d{2,4}\b/g, "")
+    .replace(/\b(?:19|20)\d{2}\b/g, "")
+    // Tidy orphaned punctuation left by date removal ("RBI policy : How..." → "RBI policy: How...")
+    .replace(/\s+([:;,–—-])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
   // Drop a trailing subtitle/elaboration clause; keep the lead clause if substantial.
   const lead = t.split(/\s*[:;–—]\s+/)[0]!.trim();
-  if (lead.split(/\s+/).length >= 4) t = lead;
+  if (lead.split(/\s+/).length >= 3) t = lead;
   const words = t.split(/\s+/);
   // If long, cut at the first natural clause break — a secondary connective
   // ("... as ...", "... after ...", "... amid ...") — so the title reads as a whole

@@ -2651,7 +2651,16 @@ router.get("/ai-usage", (_req, res) => {
     "llama-3.3-70b-versatile": "Spare (free-tier RPD too low for feed work)",
     "llama-3.1-8b-instant": "Clustering · headlines · summaries · themes · Q&A",
   };
-  const models = Object.entries(aiUsageByModel).map(([model, m]) => {
+  // Always show all three known models (even at 0 usage) so the split is always
+  // visible — 8B does the feed work, Scout is Deep Dive only, 70B is spare.
+  const KNOWN_MODELS = [
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
+  ];
+  const allModels = Array.from(new Set([...KNOWN_MODELS, ...Object.keys(aiUsageByModel)]));
+  const models = allModels.map((model) => {
+    const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
     const REQ_LIMIT = 1000; // free-tier requests/day per model (approx)
     return {

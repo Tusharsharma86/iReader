@@ -1633,10 +1633,11 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       const cards = buildFallbackStories(display);
       const newest = Math.max(...display.map(a => (a.pubDate ? Date.parse(a.pubDate) : 0)));
       const hoursOld = Math.max(0, (now - newest) / 3_600_000);
-      // Trending theme collections rank in the top mix (above random fresh
-      // singles, just below the freshest breaking event clusters) so the feed
-      // reads as a deliberate mix of TRENDING + BREAKING, not random singles on top.
-      const score = (1 / (hoursOld + 1)) * 0.45 + Math.log(display.length + 1) * 0.30 + 0.18;
+      // Trending theme collections sit just ABOVE random fresh singles but BELOW
+      // the freshest breaking event clusters, so the feed interleaves TRENDING +
+      // BREAKING instead of leading with a wall of either. (Earlier +0.18 base
+      // overshot and buried breaking; this lands ~0.8-0.9.)
+      const score = (1 / (hoursOld + 1)) * 0.4 + Math.log(display.length + 1) * 0.25 + 0.08;
       scored.push({ item: { type: "cluster", topicTitle: theme, topicSummary: themeDigest(display), articles: cards, collection: true }, score });
     }
   }

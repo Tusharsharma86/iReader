@@ -106,6 +106,7 @@ type FeedCluster = {
   topicTitle: string;
   topicSummary: string;
   articles: StoryCard[];
+  collection?: boolean; // true = theme collection (different stories, same subject), not a same-event cluster
 };
 type FeedArticle = StoryCard & { type: "article" };
 type FeedItem = FeedCluster | FeedArticle;
@@ -1298,9 +1299,133 @@ function cardAiSummary(card: StoryCard): string | null {
 // Score and order all groups into a mixed FeedItem[].
 // Groups ≥ 3 become clusters; smaller groups produce standalone FeedArticle items.
 // score = velocity * 0.4 + freshness * 0.35 + relevance * 0.25
-function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedItem[] {
+// ── Theme collections — group DIFFERENT stories by company / hot theme ───────
+// A second clustering TYPE (distinct from same-event clusters). For tech /
+// business / markets, the many one-off singletons are grouped by the company or
+// theme they're about (Apple, "AI Agents", "Earnings"…) so the feed has useful
+// "what's happening with X" rails. Hybrid: keyword map first, then 8B for the
+// keyword-missed leftovers. Cross-company themes are checked BEFORE companies so
+// a theme (e.g. "AI Agents") wins over a single company when both match.
+type ThemeRule = { name: string; re: RegExp };
+const COMPANY_RULES: ThemeRule[] = [
+  { name: "Apple",     re: /\b(apple|iphone|ipad|macbook|macos|ios|siri|app store|airpods|vision pro|tim cook|cupertino)\b/i },
+  { name: "Google",    re: /\b(google|alphabet|android|pixel|chrome|deepmind|gemini|gemma|waymo)\b/i },
+  { name: "Meta",      re: /\b(meta|facebook|instagram|whatsapp|zuckerberg|threads|reality labs|oculus)\b/i },
+  { name: "Microsoft", re: /\b(microsoft|windows|azure|copilot|\bxbox\b|satya)\b/i },
+  { name: "Nvidia",    re: /\b(nvidia|jensen huang|cuda|geforce|\bgpus?\b)\b/i },
+  { name: "OpenAI",    re: /\b(openai|chatgpt|sam altman)\b/i },
+  { name: "Amazon",    re: /\b(amazon|\baws\b|alexa|jeff bezos)\b/i },
+  { name: "Tesla",     re: /\b(tesla|elon musk|cybertruck)\b/i },
+  { name: "Samsung",   re: /\b(samsung|galaxy s\d|galaxy z)\b/i },
+];
+const TECH_THEME_RULES: ThemeRule[] = [
+  { name: "AI Agents",  re: /\b(ai agents?|agentic|autonomous agents?)\b/i },
+  { name: "New AI Models", re: /\b(gpt-?\d|large language model|foundation model|open-?weight|new ai model|model release|llama \d|claude \d|mistral|deepseek|\bqwen|\bgrok\b)\b/i },
+  { name: "Chips & Semiconductors", re: /\b(semiconductor|chipmaker|tsmc|\bchips?\b|wafer|foundry|\beuv\b|nanometer)\b/i },
+  { name: "AR / VR",    re: /\b(augmented reality|virtual reality|mixed reality|vr headset|ar glasses|metaverse|quest \d)\b/i },
+  { name: "Cybersecurity", re: /\b(ransomware|data breach|malware|zero-day|vulnerabilit|hacked|cyberattack|phishing)\b/i },
+  { name: "Crypto & Web3", re: /\b(crypto|bitcoin|ethereum|blockchain|stablecoin|web3)\b/i },
+  { name: "EVs & Autonomy", re: /\b(electric vehicle|\bevs?\b|self-driving|robotaxi|autonomous vehicle)\b/i },
+  { name: "Space",      re: /\b(spacex|\bnasa\b|rocket launch|satellite|starship)\b/i },
+];
+const BIZ_THEME_RULES: ThemeRule[] = [
+  { name: "Earnings",   re: /\b(earnings|quarterly results|q[1-4] (results|profit)|net profit|profit (jump|rise|fall|down|up)|guidance)\b/i },
+  { name: "IPOs & Listings", re: /\b(\bipo\b|listing|market debut|goes public|drhp|grey market premium|\bgmp\b)\b/i },
+  { name: "Banking & Rates", re: /\b(\bbank\b|\brbi\b|\bfed\b|interest rate|\bloans?\b|deposit|\bnpa\b|repo rate)\b/i },
+  { name: "Mergers & Deals", re: /\b(acquir|acquisition|merger|takeover|buyout|\bstake\b|block deal)\b/i },
+  { name: "Startups & Funding", re: /\b(startup|\bfunding\b|raises? \$|series [a-e]\b|valuation|venture capital)\b/i },
+  { name: "Markets & Indices", re: /\b(sensex|nifty|nasdaq|\bdow\b|s&p|stock market|\bshares?\b|\bindex\b|yields?)\b/i },
+];
+const THEME_TOPICS = new Set(["technology", "business", "markets"]);
+function themeRulesFor(topic: string): ThemeRule[] {
+  if (topic === "technology") return [...TECH_THEME_RULES, ...COMPANY_RULES];
+  if (topic === "business") return [...BIZ_THEME_RULES, ...COMPANY_RULES];
+  // Markets: drop the catch-all "Markets & Indices" — in a markets feed it would
+  // swallow nearly everything and stop being a useful rail.
+  if (topic === "markets") return [...BIZ_THEME_RULES.filter(r => r.name !== "Markets & Indices"), ...COMPANY_RULES];
+  return [];
+}
+function themeNamesFor(topic: string): string[] { return themeRulesFor(topic).map(r => r.name); }
+function detectTheme(a: NewsDataArticle, rules: ThemeRule[]): string | null {
+  const text = `${a.title ?? ""} ${stripHtml(a.description ?? "").slice(0, 160)}`;
+  for (const r of rules) if (r.re.test(text)) return r.name;
+  return null;
+}
+
+// Hybrid leftover pass: 8B assigns a theme to keyword-unmatched articles.
+// Throttled per topic + cached by article key (mirrors aiClusterGroups). Lazy:
+// the first build triggers it, later builds use the cached assignment.
+const THEME_ASSIGN_TTL_MS = 90 * 60 * 1000;
+const themeAssignCache = new Map<string, { at: number; idToTheme: Map<string, string> }>();
+const themeAssignInflight = new Set<string>();
+async function generateThemeAssignments(topic: string, untagged: NewsDataArticle[]): Promise<void> {
+  try {
+    const names = themeNamesFor(topic);
+    const subset = untagged.slice(0, 30);
+    const lines = subset.map((a, i) => `${i}: ${a.title ?? ""}`).join("\n");
+    const prompt = `You are a ${topic} news editor. Assign each story to ONE theme from this list if it clearly fits, otherwise "none".
+Themes: ${names.join(", ")}.
+
+${lines}
+
+Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"none"}]}`;
+    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "theme-assign" });
+    const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { a?: { i?: number; t?: string }[] };
+    const idToTheme = new Map<string, string>();
+    const valid = new Set(names);
+    for (const e of parsed.a ?? []) {
+      if (typeof e.i !== "number" || e.i < 0 || e.i >= subset.length) continue;
+      const t = (e.t ?? "").trim();
+      if (t && t !== "none" && valid.has(t)) idToTheme.set(clusterArticleKey(subset[e.i]!), t);
+    }
+    themeAssignCache.set(topic, { at: Date.now(), idToTheme });
+  } catch {
+    const prev = themeAssignCache.get(topic);
+    themeAssignCache.set(topic, { at: Date.now(), idToTheme: prev?.idToTheme ?? new Map() });
+  } finally {
+    themeAssignInflight.delete(topic);
+  }
+}
+function cachedThemeAssign(topic: string, untagged: NewsDataArticle[]): Map<string, string> {
+  const c = themeAssignCache.get(topic);
+  const fresh = c && Date.now() - c.at < THEME_ASSIGN_TTL_MS;
+  if (!fresh && untagged.length >= 3 && Date.now() > articleSummaryPausedUntil && !themeAssignInflight.has(topic)) {
+    themeAssignInflight.add(topic);
+    void generateThemeAssignments(topic, untagged);
+  }
+  return c?.idToTheme ?? new Map();
+}
+
+// Group leftover singletons into theme groups (keyword + AI), freshest first.
+function buildThemeGroups(singletons: NewsDataArticle[], topic: string): { theme: string; arts: NewsDataArticle[] }[] {
+  const rules = themeRulesFor(topic);
+  if (rules.length === 0) return [];
+  const byTheme = new Map<string, NewsDataArticle[]>();
+  const push = (t: string, a: NewsDataArticle) => { const arr = byTheme.get(t) ?? []; arr.push(a); byTheme.set(t, arr); };
+  const untagged: NewsDataArticle[] = [];
+  for (const a of singletons) {
+    const th = detectTheme(a, rules);
+    if (th) push(th, a); else untagged.push(a);
+  }
+  const aiThemes = cachedThemeAssign(topic, untagged);
+  if (aiThemes.size > 0) for (const a of untagged) { const th = aiThemes.get(clusterArticleKey(a)); if (th) push(th, a); }
+  const ts = (a: NewsDataArticle) => (a.pubDate ? Date.parse(a.pubDate) : 0);
+  return Array.from(byTheme.entries())
+    .filter(([, arts]) => arts.length >= 3)
+    .map(([theme, arts]) => ({ theme, arts: arts.sort((x, y) => ts(y) - ts(x)) }));
+}
+
+// Deterministic ~25-word digest for a theme collection: the freshest few
+// headlines, cleaned of trailing source/section cruft, joined.
+function themeDigest(arts: NewsDataArticle[]): string {
+  const parts = arts.slice(0, 3).map(a => (a.title ?? "").replace(/\s*[-|–:][^-|–:]*$/, "").trim()).filter(Boolean);
+  return clampWords25(parts.join(" · "));
+}
+
+function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic = ""): FeedItem[] {
   const now = Date.now();
   const scored: Array<{ item: FeedItem; score: number }> = [];
+  const singletonArts: NewsDataArticle[] = []; // one-off articles, grouped into theme collections below
 
   for (const group of groups) {
     const ga = group.map(i => articles[i]!).filter(Boolean);
@@ -1331,16 +1456,39 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][]): FeedIt
         naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim())));
       scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
     } else {
-      for (const a of ga) {
-        const pubMs = a.pubDate ? Date.parse(a.pubDate) : 0;
-        const ah = Math.max(0, (now - pubMs) / 3_600_000);
-        const velocity = ah < 1 ? 1 : Math.exp(-0.5 * (ah - 1));
-        const freshness = 1 / (ah + 1);
-        const score = velocity * 0.4 + freshness * 0.35 + 0.3 * 0.25;
-        const [card] = buildFallbackStories([a]);
-        if (card) scored.push({ item: { ...card, type: "article" }, score });
-      }
+      for (const a of ga) singletonArts.push(a);
     }
+  }
+
+  // ── Theme collections (tech / business / markets) ──────────────────────────
+  // Group the one-off singletons by company / hot theme into "what's happening
+  // with X" rails. Claim only the displayed slice so no story is lost — any
+  // overflow flows on as a normal single card.
+  const claimed = new Set<NewsDataArticle>();
+  if (THEME_TOPICS.has(topic)) {
+    const COLLECTION_CAP = 8;
+    for (const { theme, arts } of buildThemeGroups(singletonArts, topic)) {
+      const display = arts.slice(0, COLLECTION_CAP);
+      if (display.length < 3) continue;
+      for (const a of display) claimed.add(a);
+      const cards = buildFallbackStories(display);
+      const newest = Math.max(...display.map(a => (a.pubDate ? Date.parse(a.pubDate) : 0)));
+      const hoursOld = Math.max(0, (now - newest) / 3_600_000);
+      const score = (1 / (hoursOld + 1)) * 0.5 + Math.log(display.length + 1) * 0.18;
+      scored.push({ item: { type: "cluster", topicTitle: theme, topicSummary: themeDigest(display), articles: cards, collection: true }, score });
+    }
+  }
+
+  // Remaining one-off singletons → article items.
+  for (const a of singletonArts) {
+    if (claimed.has(a)) continue;
+    const pubMs = a.pubDate ? Date.parse(a.pubDate) : 0;
+    const ah = Math.max(0, (now - pubMs) / 3_600_000);
+    const velocity = ah < 1 ? 1 : Math.exp(-0.5 * (ah - 1));
+    const freshness = 1 / (ah + 1);
+    const score = velocity * 0.4 + freshness * 0.35 + 0.3 * 0.25;
+    const [card] = buildFallbackStories([a]);
+    if (card) scored.push({ item: { ...card, type: "article" }, score });
   }
 
   scored.sort((a, b) => b.score - a.score);
@@ -1641,7 +1789,7 @@ async function buildBreakingFeed(): Promise<FeedItem[]> {
   const recentDeduped = capBySource(recent, 999);
   await enrichMissingImages(recentDeduped);
   const groups = await aiClusterGroups(recentDeduped, "breaking");
-  return buildMixedFeed(recentDeduped, groups);
+  return buildMixedFeed(recentDeduped, groups, "breaking");
 }
 
 // ----- AI clustering (stale-while-revalidate, 30-min TTL) -----
@@ -1809,7 +1957,7 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   // Reuse cluster assignments when only scores need updating (saves RSS round-trip).
   const rawEntry = rawFeedCache.get(topic);
   if (rawEntry && Date.now() - rawEntry.at < RAW_FEED_TTL_MS) {
-    return buildMixedFeed(rawEntry.articles, rawEntry.groups);
+    return buildMixedFeed(rawEntry.articles, rawEntry.groups, topic);
   }
 
   let articles: NewsDataArticle[];
@@ -1833,7 +1981,7 @@ async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
   const deduped = capBySource(articles, 999);
   const groups = await aiClusterGroups(deduped, topic);
   rawFeedCache.set(topic, { articles: deduped, groups, at: Date.now() });
-  return buildMixedFeed(deduped, groups);
+  return buildMixedFeed(deduped, groups, topic);
 }
 
 const inflightFeed = new Map<string, Promise<FeedItem[]>>();
@@ -2327,6 +2475,7 @@ router.get("/ai-usage", (_req, res) => {
     deepdive: "Deep Dive",
     "cluster-enrich": "Cluster headlines + summaries",
     "article-summary-feed": "Article 25-word summaries",
+    "theme-assign": "Theme tagging (collections)",
     "cluster-summary": "Cluster summaries (old)", "cluster-labels": "Cluster labels (For You)",
     "article-summary": "Article summary (5Ws/ELI5)", qna: "Follow-up Q&A",
     clustering: "AI clustering", other: "Other",

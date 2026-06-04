@@ -1092,8 +1092,15 @@ function feedClusterLabel(articles: NewsDataArticle[]): string {
 // Union-Find clustering: articles sharing 2+ non-stopword title tokens are
 // grouped. Returns array of groups (each is an array of article indices).
 // Same-domain articles never merge. Groups are capped at 8 members.
-function clusterForMixedFeed(articles: NewsDataArticle[]): number[][] {
-  const tokenSets = articles.map(a => titleTokens(a.title ?? ""));
+function clusterForMixedFeed(articles: NewsDataArticle[], opts: { useDesc?: boolean } = {}): number[][] {
+  // useDesc: also fold in description tokens — catches same-event stories whose
+  // HEADLINES differ a lot (e.g. two outlets on the Shokz OpenDots 2 launch share
+  // only "shokz"/"earbuds" in the title but both say "OpenDots" in the body).
+  const tokenSets = articles.map(a => {
+    const t = titleTokens(a.title ?? "");
+    if (opts.useDesc) for (const x of titleTokens(stripHtml(a.description ?? "").slice(0, 120))) t.add(x);
+    return t;
+  });
   const n = articles.length;
   const parent = Array.from({ length: n }, (_, i) => i);
   const rank = new Array<number>(n).fill(0);
@@ -1142,16 +1149,28 @@ function clusterArticleKey(a: NewsDataArticle): string {
 }
 function groupsFromAssignment(articles: NewsDataArticle[], idToCluster: Map<string, number>): number[][] {
   const clusterToIdx = new Map<number, number[]>();
-  let nextNew = 1_000_000; // singleton ids for new/unknown articles
+  const unknownIdx: number[] = [];
   articles.forEach((a, idx) => {
-    const k = clusterArticleKey(a);
-    let c = idToCluster.get(k);
-    if (c === undefined) c = nextNew++;
+    const c = idToCluster.get(clusterArticleKey(a));
+    if (c === undefined) { unknownIdx.push(idx); return; }
     const arr = clusterToIdx.get(c) ?? [];
     arr.push(idx);
     clusterToIdx.set(c, arr);
   });
-  return Array.from(clusterToIdx.values()).map((g) => g.slice(0, 6));
+  const groups = Array.from(clusterToIdx.values()).map((g) => g.slice(0, 6));
+  // Fresh articles that arrived between AI-clustering runs aren't in the cached
+  // assignment. Instead of dumping them ALL as singletons (so same-event stories
+  // that broke just now stay split), lexically cluster them now — title + body,
+  // so different-worded coverage of the same launch/event still groups.
+  if (unknownIdx.length > 1) {
+    const fresh = unknownIdx.map((i) => articles[i]!);
+    for (const lg of clusterForMixedFeed(fresh, { useDesc: true })) {
+      groups.push(lg.map((li) => unknownIdx[li]!).slice(0, 6));
+    }
+  } else if (unknownIdx.length === 1) {
+    groups.push([unknownIdx[0]!]);
+  }
+  return groups;
 }
 // Coherence guard: the 8B model sometimes lumps unrelated stories into one
 // group (a shared broad theme, not the same event). Split an AI group into

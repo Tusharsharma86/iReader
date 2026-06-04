@@ -16,32 +16,60 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive (flagship) — dedicated daily budget
 const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks (article tools, Q&A) — separate budget
 const GROQ_MODEL_ENRICH = "llama-3.3-70b-versatile"; // feed enrichment: cluster headlines + 25-word summaries — separate budget (~100k/day)
+// Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
+// card summaries, theme discovery). A feed build fires ~25 of these at once,
+// which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
+// ~every 4.5s (~13/min) keeps the burst under the cap; they're fire-and-forget
+// + cached, so spreading them over a minute is invisible. User-facing calls
+// (Deep Dive, Q&A) pass `background:false` and skip the gate for low latency.
+let groqNextSlot = 0;
+const GROQ_BG_INTERVAL_MS = 4500;
+function groqBgGate(): Promise<void> {
+  const now = Date.now();
+  const at = Math.max(now, groqNextSlot);
+  groqNextSlot = at + GROQ_BG_INTERVAL_MS;
+  const wait = at - now;
+  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+}
+
 async function callGroq(
   prompt: string,
   maxTokens: number,
-  opts: { temperature?: number; signal?: AbortSignal; model?: string; task?: string } = {},
+  opts: { temperature?: number; signal?: AbortSignal; model?: string; task?: string; background?: boolean } = {},
 ): Promise<string> {
   const key = process.env["GROQ_API_KEY"];
   if (!key) throw new Error("GROQ_API_KEY missing");
   const model = opts.model ?? GROQ_MODEL;
-  const r = await fetch(GROQ_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-    body: JSON.stringify({
-      model,
-      max_tokens: maxTokens,
-      temperature: opts.temperature ?? 0.3,
-      messages: [{ role: "user", content: prompt }],
-    }),
-    signal: opts.signal,
-  });
-  if (!r.ok) { recordAiUsage(model, opts.task ?? "other", 0, false); throw new Error(`Groq ${r.status}`); }
-  const data = (await r.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: { total_tokens?: number };
-  };
-  recordAiUsage(model, opts.task ?? "other", data.usage?.total_tokens ?? 0, true);
-  return data.choices?.[0]?.message?.content ?? "";
+  const task = opts.task ?? "other";
+  if (opts.background) await groqBgGate();
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(GROQ_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        temperature: opts.temperature ?? 0.3,
+        messages: [{ role: "user", content: prompt }],
+      }),
+      signal: opts.signal,
+    });
+    if (r.ok) {
+      const data = (await r.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+        usage?: { total_tokens?: number };
+      };
+      recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
+      return data.choices?.[0]?.message?.content ?? "";
+    }
+    // One retry on rate-limit for background calls (after a short wait) before giving up.
+    if (r.status === 429 && opts.background && attempt < 1) {
+      await new Promise((res) => setTimeout(res, 5000));
+      continue;
+    }
+    recordAiUsage(model, task, 0, false);
+    throw new Error(`Groq ${r.status}`);
+  }
 }
 
 // ── Per-model / per-task AI usage tracker (for the in-app dashboard) ─────────
@@ -1178,7 +1206,7 @@ Rules:
 - Group together coverage of the SAME event from different outlets; unrelated stories are their own single-item group.
 - Return JSON ONLY, no prose:
 {"groups":[{"indices":[0,3]},{"indices":[1]},{"indices":[2,5,7]}]}`;
-    const text = await callGroq(prompt, 700, { model: GROQ_MODEL_FAST, task: "clustering" });
+    const text = await callGroq(prompt, 700, { model: GROQ_MODEL_FAST, task: "clustering", background: true });
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { groups?: { indices?: number[] }[] };
     if (!Array.isArray(parsed?.groups) || parsed.groups.length === 0) throw new Error("empty AI groups");
     const idToCluster = new Map<string, number>();
@@ -1235,7 +1263,7 @@ async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Pr
 {"label":"a sharp 3-6 word Title Case headline leading with the key entity/place","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
 
 ${lines}`;
-    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich" })).replace(/```json|```/g, "").trim();
+    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich", background: true })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
     const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 80) : "";
@@ -1276,7 +1304,7 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
     const prompt = body.length > 12
       ? `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${card.headline ?? ""}\n${body}\n\nSummary:`
       : `Write ONE neutral, informative sentence of AT MOST 25 words describing what this article is most likely about, based on its headline. No preamble, no markdown, no speculation beyond the headline.\n\nHeadline: ${card.headline ?? ""}\n\nSummary:`;
-    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed" })).trim().replace(/^summary:\s*/i, "");
+    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true })).trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
     if (summary) articleSummaryCache.set(sig, { summary, at: Date.now() });
   } catch {
@@ -1430,7 +1458,7 @@ async function generateThemeAssignments(topic: string, untagged: NewsDataArticle
 ${lines}
 
 Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"Quantum Computing"},{"i":2,"t":"none"}]}`;
-    const text = await callGroq(prompt, 800, { model: GROQ_MODEL_FAST, task: "theme-assign" });
+    const text = await callGroq(prompt, 800, { model: GROQ_MODEL_FAST, task: "theme-assign", background: true });
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { a?: { i?: number; t?: string }[] };
     const idToTheme = new Map<string, string>();
     for (const e of parsed.a ?? []) {
@@ -1972,7 +2000,7 @@ Return JSON only:
     aiCallsToday++;
     console.log(`AI call #${aiCallsToday} today for ${topic}`);
 
-    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "clustering" });
+    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "clustering", background: true });
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 

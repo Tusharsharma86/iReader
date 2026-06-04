@@ -1410,7 +1410,7 @@ async function generateThemeAssignments(topic: string, untagged: NewsDataArticle
 ${lines}
 
 Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"Quantum Computing"},{"i":2,"t":"none"}]}`;
-    const text = await callGroq(prompt, 800, { model: GROQ_MODEL_FAST, task: "theme-assign" });
+    const text = await callGroq(prompt, 800, { model: GROQ_MODEL_ENRICH, task: "theme-assign" });
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { a?: { i?: number; t?: string }[] };
     const idToTheme = new Map<string, string>();
     for (const e of parsed.a ?? []) {
@@ -1420,8 +1420,10 @@ Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"Quantum Computing"},{"i"
     }
     themeAssignCache.set(topic, { at: Date.now(), idToTheme });
   } catch {
+    // Keep the last assignment but retry soon (~10 min) rather than waiting the
+    // full TTL — a transient rate-limit shouldn't block discovery for 90 min.
     const prev = themeAssignCache.get(topic);
-    themeAssignCache.set(topic, { at: Date.now(), idToTheme: prev?.idToTheme ?? new Map() });
+    themeAssignCache.set(topic, { at: Date.now() - THEME_ASSIGN_TTL_MS + 10 * 60 * 1000, idToTheme: prev?.idToTheme ?? new Map() });
   } finally {
     themeAssignInflight.delete(topic);
   }
@@ -1429,7 +1431,7 @@ Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"Quantum Computing"},{"i"
 function cachedThemeAssign(topic: string, untagged: NewsDataArticle[]): Map<string, string> {
   const c = themeAssignCache.get(topic);
   const fresh = c && Date.now() - c.at < THEME_ASSIGN_TTL_MS;
-  if (!fresh && untagged.length >= 3 && Date.now() > articleSummaryPausedUntil && !themeAssignInflight.has(topic)) {
+  if (!fresh && untagged.length >= 3 && Date.now() > enrichPausedUntil && !themeAssignInflight.has(topic)) {
     themeAssignInflight.add(topic);
     void generateThemeAssignments(topic, untagged);
   }
@@ -2532,7 +2534,7 @@ router.get("/ai-usage", (_req, res) => {
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (flagship)",
-    "llama-3.3-70b-versatile": "Cluster headlines + summaries",
+    "llama-3.3-70b-versatile": "Cluster headlines, summaries + theme discovery",
     "llama-3.1-8b-instant": "Clustering · card summaries · Q&A",
   };
   const models = Object.entries(aiUsageByModel).map(([model, m]) => {

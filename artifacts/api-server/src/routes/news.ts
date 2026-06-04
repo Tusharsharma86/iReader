@@ -1328,10 +1328,10 @@ async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Pr
 {"label":"a clear 6-10 word Title Case news headline of what happened, leading with the key entity","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
 
 ${lines}`;
-    // No rate gate — cluster-enrich is awaited on the feed-build critical path
-    // and runs at most ONCE per cluster (cached 24h). Low volume; the gate is
-    // reserved for the high-volume per-card summary burst.
-    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich" })).replace(/```json|```/g, "").trim();
+    // Gated — un-gating caused 92% 429s when a feed build fired ~60 enrich calls
+    // at once. With the gate ON + buildMixedFeed only firing for top-N clusters,
+    // volume stays under burst limit and labels actually generate.
+    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich", background: true })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
     const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 110) : "";
@@ -1624,13 +1624,15 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
   const scored: Array<{ item: FeedItem; score: number }> = [];
   const singletonArts: NewsDataArticle[] = []; // one-off articles, grouped into theme collections below
 
+  // First pass: score every cluster so we know which are the TOP N to enrich.
+  // Firing clusterEnrichment for every cluster bursts ~60 calls and 92% 429.
+  type ClusterInfo = { ga: NewsDataArticle[]; score: number; hoursOld: number };
+  const clusterInfos: ClusterInfo[] = [];
   for (const group of groups) {
     const ga = group.map(i => articles[i]!).filter(Boolean);
     if (ga.length === 0) continue;
-
     const newest = Math.max(...ga.map(a => a.pubDate ? Date.parse(a.pubDate) : 0));
     const hoursOld = Math.max(0, (now - newest) / 3_600_000);
-
     if (group.length >= 3) {
       const recentCount = ga.filter(a => {
         const ms = a.pubDate ? Date.parse(a.pubDate) : 0;
@@ -1640,21 +1642,28 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       const freshness = 1 / (hoursOld + 1);
       const relevance = Math.log(ga.length + 1);
       const score = velocity * 0.4 + freshness * 0.35 + relevance * 0.25;
-
-      const cards = buildFallbackStories(ga);
-      const rep = ga[0]!;
-      // Fire-and-forget enrichment — kicks off the AI label generation in the
-      // background; returns cached label if already generated, else null. The
-      // next feed build (cron-poll ~5min) picks up the cached label.
-      const enrich = clusterEnrichment(ga);
-      const topicTitle = cleanClusterHeadline(enrich?.label || rep.title || "") || feedClusterLabel(ga);
-      const topicSummary =
-        (enrich?.summary) ||
-        naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim())));
-      scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
+      clusterInfos.push({ ga, score, hoursOld });
     } else {
       for (const a of ga) singletonArts.push(a);
     }
+  }
+  // Top N clusters by score get AI enrichment fired (the user sees these at top).
+  // Beyond that, hero-headline fallback is fine — they're scrolled past.
+  const TOP_ENRICH = 15;
+  const topByScore = new Set(clusterInfos.slice().sort((a, b) => b.score - a.score).slice(0, TOP_ENRICH).map((c) => c.ga));
+  for (const { ga, score } of clusterInfos) {
+    const cards = buildFallbackStories(ga);
+    const rep = ga[0]!;
+    // Read enrich cache for ALL clusters (free); only FIRE generation for top N.
+    const enrich = topByScore.has(ga) ? clusterEnrichment(ga) : (() => {
+      const c = clusterEnrichCache.get(clusterSignature(ga));
+      return c && Date.now() - c.at < ENRICH_TTL_MS ? { label: c.label, summary: c.summary } : null;
+    })();
+    const topicTitle = cleanClusterHeadline(enrich?.label || rep.title || "") || feedClusterLabel(ga);
+    const topicSummary =
+      (enrich?.summary) ||
+      naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim())));
+    scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
   }
 
   // ── Theme collections (tech / business / markets) ──────────────────────────

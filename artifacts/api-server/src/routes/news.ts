@@ -1219,32 +1219,48 @@ function groupsFromAssignment(articles: NewsDataArticle[], idToCluster: Map<stri
   return groups;
 }
 // Coherence guard: the 8B model sometimes lumps unrelated stories into one
-// group (a shared broad theme, not the same event). Split an AI group into
-// connected components where members share >=2 title tokens; stories that don't
-// genuinely overlap fall out as their own singletons. Same-event coverage
-// always shares the primary entity (e.g. "iran", "kuwait"), so real clusters
-// survive while junk groups collapse to singletons.
+// group via a BRIDGE article (e.g. an "Iran war + Israel-Hezbollah" piece
+// linking a US-politics story to a separate Israel-Lebanon ceasefire cluster).
+// Old version used union-find: a single bridge collapsed everything into one
+// component. New version: each member must have >=2 STRONG connections (≥2
+// shared title tokens with ≥2 OTHER members of the group). Lone-bridge members
+// and isolated outliers get split off as their own singletons — so distinct
+// stories the AI accidentally chained stay separate.
 function splitIncoherent(indices: number[], subset: NewsDataArticle[]): number[][] {
   const m = indices.length;
   if (m <= 1) return [indices];
   const toks = indices.map(i => titleTokens(subset[i]?.title ?? ""));
-  const parent = Array.from({ length: m }, (_, i) => i);
-  const find = (x: number): number => { while (parent[x] !== x) { parent[x] = parent[parent[x]!]!; x = parent[x]!; } return x; };
+  // Build adjacency graph: edge i↔j iff they share >=2 title tokens.
+  const adj: number[][] = Array.from({ length: m }, () => []);
   for (let i = 0; i < m; i++) {
     for (let j = i + 1; j < m; j++) {
       let shared = 0;
       for (const t of toks[i]!) if (toks[j]!.has(t)) shared++;
-      if (shared >= 2) { const a = find(i), b = find(j); if (a !== b) parent[a] = b; }
+      if (shared >= 2) { adj[i]!.push(j); adj[j]!.push(i); }
     }
   }
-  const comp = new Map<number, number[]>();
+  // For groups of 4+, require each member to have >=2 strong neighbours; for
+  // smaller groups, >=1 suffices (don't over-split tiny clusters).
+  const minDeg = m >= 4 ? 2 : 1;
+  const keep = (i: number) => adj[i]!.length >= minDeg;
+  // Build groups: BFS connected components among kept members only. Members
+  // that fail the degree threshold become singletons.
+  const groups: number[][] = [];
+  const visited = new Set<number>();
   for (let i = 0; i < m; i++) {
-    const r = find(i);
-    const arr = comp.get(r) ?? [];
-    arr.push(indices[i]!);
-    comp.set(r, arr);
+    if (visited.has(i)) continue;
+    if (!keep(i)) { groups.push([indices[i]!]); visited.add(i); continue; }
+    const comp: number[] = [];
+    const stack = [i];
+    while (stack.length) {
+      const x = stack.pop()!;
+      if (visited.has(x)) continue;
+      visited.add(x); comp.push(x);
+      for (const y of adj[x]!) if (!visited.has(y) && keep(y)) stack.push(y);
+    }
+    groups.push(comp.map((c) => indices[c]!));
   }
-  return Array.from(comp.values());
+  return groups;
 }
 async function aiClusterGroups(articles: NewsDataArticle[], topic: string): Promise<number[][]> {
   const n = articles.length;

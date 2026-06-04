@@ -1089,6 +1089,21 @@ function feedClusterLabel(articles: NewsDataArticle[]): string {
   return rep.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || "News";
 }
 
+// Turn an article headline into a concise cluster title: strip the " - Source"
+// suffix, drop the ": subtitle" / "; elaboration" tail when the headline is long
+// (keeping the lead clause if it's substantial), and hard-cap the length so a
+// cluster card never shows a 4-line hero headline.
+function cleanClusterHeadline(raw: string): string {
+  let t = stripUrlJunk((raw ?? "").trim()).replace(/\s+[|–—-]\s+[^|–—-]+$/, "").trim();
+  if (t.split(/\s+/).length > 10) {
+    const lead = t.split(/\s*[:;–—]\s+/)[0]!.trim();
+    if (lead.split(/\s+/).length >= 5) t = lead;
+  }
+  const words = t.split(/\s+/);
+  if (words.length > 13) t = words.slice(0, 13).join(" ") + "…";
+  return words.length >= 4 ? t : "";
+}
+
 // Union-Find clustering: articles sharing 2+ non-stopword title tokens are
 // grouped. Returns array of groups (each is an array of article indices).
 // Same-domain articles never merge. Groups are capped at 8 members.
@@ -1577,8 +1592,7 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       // Headline priority: AI synthesis label → the lead article's REAL headline
       // (always a full, journalist-written headline) → terse algorithmic label.
       // This kills the "3-word fragment" problem even when AI enrich isn't ready.
-      const repHeadline = stripUrlJunk((rep.title ?? "").replace(/\s+[|–—-]\s+[^|–—-]+$/, "").trim());
-      const topicTitle = (enrich?.label) || (repHeadline.split(/\s+/).length >= 4 ? repHeadline : "") || feedClusterLabel(ga);
+      const topicTitle = (enrich?.label) || cleanClusterHeadline(rep.title ?? "") || feedClusterLabel(ga);
       const topicSummary =
         (enrich?.summary) ||
         naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim())));

@@ -1732,10 +1732,11 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
     const themeGroups = buildThemeGroups(singletonArts, topic)
       .sort((a, b) => b.arts.length - a.arts.length) // biggest themes first when capping
       .slice(0, maxRails);
-    // Only the TOP-N theme collections fire AI 20-word summary (per request) so
-    // the rate gate doesn't get blown. Lower-ranked themes use the deterministic
-    // themeDigest (joined headlines). N=6 matches the typical above-the-fold view.
-    const TOP_THEME_AI = 6;
+    // Only the TOP-N theme collections fire AI 20-word summary. Reduced 6→3 so
+    // the rate gate doesn't burst-fail; lower-ranked themes use the
+    // deterministic themeDigest. Cron polls every ~5 min so the cache fills out
+    // over multiple builds — the user sees more AI summaries as time progresses.
+    const TOP_THEME_AI = 3;
     themeGroups.forEach(({ theme, arts }, idx) => {
       const display = arts.slice(0, COLLECTION_CAP);
       if (display.length < 3) return;

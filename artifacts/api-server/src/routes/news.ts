@@ -1656,14 +1656,15 @@ async function generateThemeSummary(key: string, theme: string, arts: NewsDataAr
     const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : "")).split(/\s+/).slice(0, 20).join(" ");
     if (summary) clusterEnrichCache.set(key, { label: "", summary, at: Date.now() });
   } catch {
-    // Soft-fail — themeDigest fallback covers it; don't pause the shared enrich timer
+    themeSummaryPausedUntil = Date.now() + 10 * 60 * 1000; // own 10-min backoff on error
   }
 }
+let themeSummaryPausedUntil = 0; // OWN pause — don't inherit cluster-enrich's
 function themeSummary(theme: string, arts: NewsDataArticle[]): string | null {
   const key = themeKey(theme, arts);
   const c = clusterEnrichCache.get(key);
   if (c && c.summary && Date.now() - c.at < ENRICH_TTL_MS) return c.summary;
-  if (Date.now() > enrichPausedUntil && !clusterEnrichInflight.has(key)) {
+  if (Date.now() > themeSummaryPausedUntil && !clusterEnrichInflight.has(key)) {
     clusterEnrichInflight.add(key);
     void generateThemeSummary(key, theme, arts).finally(() => clusterEnrichInflight.delete(key));
   }

@@ -1712,9 +1712,13 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       return c && Date.now() - c.at < ENRICH_TTL_MS ? { label: c.label, summary: c.summary } : null;
     })();
     const topicTitle = cleanClusterHeadline(enrich?.label || rep.title || "") || feedClusterLabel(ga);
+    // AI summary already clampWords25'd at generation. When AI fails / hasn't
+    // landed, clamp the article-description fallback to 25 words too so the
+    // cluster summary is consistently ~25 words instead of spilling the full
+    // lead description.
     const topicSummary =
       (enrich?.summary) ||
-      naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim())));
+      clampWords25(naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim()))));
     scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
   }
 

@@ -1638,6 +1638,38 @@ function themeDigest(arts: NewsDataArticle[]): string {
   return clampWords25(parts.join(" · "));
 }
 
+// AI 20-word meta-summary for a theme collection (~Apple, AI Agents, Banking).
+// Theme collections hold DIFFERENT stories on a topic, so the summary describes
+// the CURRENT state of coverage, not a single event. Fire-and-forget + cached
+// 24h; next feed build picks up the cached summary. Falls back to themeDigest.
+function themeKey(theme: string, arts: NewsDataArticle[]): string {
+  const ids = arts.slice(0, 6).map(a => (a.link ? canonicalizeUrl(a.link) : "") || a.title || "").sort().join("|");
+  return createHash("md5").update(theme + "::" + ids).digest("hex");
+}
+async function generateThemeSummary(key: string, theme: string, arts: NewsDataArticle[]): Promise<void> {
+  try {
+    const lines = arts.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 100))}`).join("\n");
+    const prompt = `These articles all relate to the topic "${theme}" but are DIFFERENT stories. Summarise the current state of "${theme}" coverage in ONE neutral sentence of AT MOST 20 words. Capture WHAT'S HAPPENING ACROSS the stories (multiple angles, recurring entities, key developments) — NOT one story. Return JSON ONLY: {"summary":"..."}\n\n${lines}`;
+    const raw = (await callGroq(prompt, 120, { model: GROQ_MODEL_FAST, task: "theme-summary", background: true })).replace(/```json|```/g, "").trim();
+    const m = raw.match(/\{[\s\S]*\}/);
+    const parsed = m ? (JSON.parse(m[0]) as { summary?: string }) : {};
+    const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : "")).split(/\s+/).slice(0, 20).join(" ");
+    if (summary) clusterEnrichCache.set(key, { label: "", summary, at: Date.now() });
+  } catch {
+    // Soft-fail — themeDigest fallback covers it; don't pause the shared enrich timer
+  }
+}
+function themeSummary(theme: string, arts: NewsDataArticle[]): string | null {
+  const key = themeKey(theme, arts);
+  const c = clusterEnrichCache.get(key);
+  if (c && c.summary && Date.now() - c.at < ENRICH_TTL_MS) return c.summary;
+  if (Date.now() > enrichPausedUntil && !clusterEnrichInflight.has(key)) {
+    clusterEnrichInflight.add(key);
+    void generateThemeSummary(key, theme, arts).finally(() => clusterEnrichInflight.delete(key));
+  }
+  return null;
+}
+
 function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic = ""): FeedItem[] {
   const now = Date.now();
   const scored: Array<{ item: FeedItem; score: number }> = [];
@@ -1699,20 +1731,24 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
     const themeGroups = buildThemeGroups(singletonArts, topic)
       .sort((a, b) => b.arts.length - a.arts.length) // biggest themes first when capping
       .slice(0, maxRails);
-    for (const { theme, arts } of themeGroups) {
+    // Only the TOP-N theme collections fire AI 20-word summary (per request) so
+    // the rate gate doesn't get blown. Lower-ranked themes use the deterministic
+    // themeDigest (joined headlines). N=6 matches the typical above-the-fold view.
+    const TOP_THEME_AI = 6;
+    themeGroups.forEach(({ theme, arts }, idx) => {
       const display = arts.slice(0, COLLECTION_CAP);
-      if (display.length < 3) continue;
+      if (display.length < 3) return;
       for (const a of display) claimed.add(a);
       const cards = buildFallbackStories(display);
       const newest = Math.max(...display.map(a => (a.pubDate ? Date.parse(a.pubDate) : 0)));
       const hoursOld = Math.max(0, (now - newest) / 3_600_000);
-      // Trending theme collections sit just ABOVE random fresh singles but BELOW
-      // the freshest breaking event clusters, so the feed interleaves TRENDING +
-      // BREAKING instead of leading with a wall of either. (Earlier +0.18 base
-      // overshot and buried breaking; this lands ~0.8-0.9.)
       const score = (1 / (hoursOld + 1)) * 0.4 + Math.log(display.length + 1) * 0.25 + 0.08;
-      scored.push({ item: { type: "cluster", topicTitle: theme, topicSummary: themeDigest(display), articles: cards, collection: true }, score });
-    }
+      // AI 20-word meta-summary for top-N themes (fire-and-forget, lands in cache
+      // for next build). Falls back to themeDigest until generated.
+      const aiSum = idx < TOP_THEME_AI ? themeSummary(theme, display) : null;
+      const topicSummary = aiSum || themeDigest(display);
+      scored.push({ item: { type: "cluster", topicTitle: theme, topicSummary, articles: cards, collection: true }, score });
+    });
   }
 
   // Remaining one-off singletons → article items.
@@ -2712,6 +2748,7 @@ router.get("/ai-usage", (_req, res) => {
     "cluster-enrich": "Cluster headlines + summaries",
     "article-summary-feed": "Article 25-word summaries",
     "theme-assign": "Theme tagging (collections)",
+    "theme-summary": "Theme 20-word AI summary",
     "cluster-summary": "Cluster summaries (old)", "cluster-labels": "Cluster labels (For You)",
     "article-summary": "Article summary (5Ws/ELI5)", qna: "Follow-up Q&A",
     clustering: "AI clustering", other: "Other",

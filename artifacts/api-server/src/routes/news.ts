@@ -1732,12 +1732,12 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
     const themeGroups = buildThemeGroups(singletonArts, topic)
       .sort((a, b) => b.arts.length - a.arts.length) // biggest themes first when capping
       .slice(0, maxRails);
-    // Only the TOP-N theme collections fire AI 20-word summary. Reduced 6→3 so
-    // the rate gate doesn't burst-fail; lower-ranked themes use the
-    // deterministic themeDigest. Cron polls every ~5 min so the cache fills out
-    // over multiple builds — the user sees more AI summaries as time progresses.
-    const TOP_THEME_AI = 3;
-    themeGroups.forEach(({ theme, arts }, idx) => {
+    // Theme AI summaries DISABLED — free-tier Groq RPM gets saturated by the
+    // already-shipped cluster-enrich + article-summary-feed bursts, so the
+    // theme-summary calls fire last in each build and 100% 429'd. The
+    // deterministic themeDigest (joined first-3 headlines) gives the reader the
+    // same surface info reliably; re-enable with batching or paid Groq tier later.
+    themeGroups.forEach(({ theme, arts }) => {
       const display = arts.slice(0, COLLECTION_CAP);
       if (display.length < 3) return;
       for (const a of display) claimed.add(a);
@@ -1745,11 +1745,7 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       const newest = Math.max(...display.map(a => (a.pubDate ? Date.parse(a.pubDate) : 0)));
       const hoursOld = Math.max(0, (now - newest) / 3_600_000);
       const score = (1 / (hoursOld + 1)) * 0.4 + Math.log(display.length + 1) * 0.25 + 0.08;
-      // AI 20-word meta-summary for top-N themes (fire-and-forget, lands in cache
-      // for next build). Falls back to themeDigest until generated.
-      const aiSum = idx < TOP_THEME_AI ? themeSummary(theme, display) : null;
-      const topicSummary = aiSum || themeDigest(display);
-      scored.push({ item: { type: "cluster", topicTitle: theme, topicSummary, articles: cards, collection: true }, score });
+      scored.push({ item: { type: "cluster", topicTitle: theme, topicSummary: themeDigest(display), articles: cards, collection: true }, score });
     });
   }
 

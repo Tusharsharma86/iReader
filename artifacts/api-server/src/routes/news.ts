@@ -357,7 +357,7 @@ function breakingScore(a: NewsDataArticle): number {
 
 // Catches sports/entertainment the main list misses: general "world cup", bare
 // movie/film, casting language, and common Bollywood/Hollywood names.
-const EXTRA_SE_RE = /\b(world cup|t20 world cup|asia cup|champions trophy|movies?|films?|film festival|to star in|stars in (the|a|an|upcoming)|box.?office|streaming series|reality show|salman khan|shah rukh|\bsrk\b|aamir khan|ajay devgn|akshay kumar|ranbir kapoor|ranveer singh|deepika padukone|alia bhatt|kareena|katrina kaif|priyanka chopra|kangana|hrithik|kravitz|kardashian|taylor swift)\b/i;
+const EXTRA_SE_RE = /\b(world cup|t20 world cup|asia cup|champions trophy|movies?|films?|film festival|to star in|stars in (the|a|an|upcoming)|box.?office|streaming series|reality show|salman khan|shah rukh|\bsrk\b|aamir khan|ajay devgn|akshay kumar|ranbir kapoor|ranveer singh|deepika padukone|alia bhatt|kareena|katrina kaif|priyanka chopra|kangana|hrithik|kravitz|kardashian|taylor swift|pop group|k.?pop|kpop|j.?pop|boy band|girl group|fan(?:dom|s)|stan(?:s|ned)?|sykkuno|twitch streamer|twitch star|youtuber|content creator|influencer|tiktoker|streamer cheats|cheating scandal|sneak peek|first look|teaser drop|debut album|outback steakhouse|le sserafim|bts |blackpink|nct |stray kids|new jeans|cookies|tough cookies)\b/i;
 function isSportsOrEntertainment(article: NewsDataArticle): boolean {
   const text = `${article.title ?? ""} ${article.description ?? ""}`.slice(0, 300);
   return SPORTS_ENTERTAINMENT_RE.test(text) || EXTRA_SE_RE.test(text);
@@ -876,7 +876,13 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
     return tb - ta;
   });
 
-  const top = articles.slice(0, 500); // tech pool ceiling (raised 300→500 for a longer tech feed)
+  // Hard-filter: remove sports/entertainment/gadget-deal noise (matches breaking
+  // and indian-feeds paths). Without this Tech leaked phone-discount, Steam
+  // Frame promos, celebrity items into the feed.
+  const filtered = articles
+    .filter(a => !isSportsOrEntertainment(a))
+    .filter(a => !isJunkRoundup(a));
+  const top = filtered.slice(0, 500); // tech pool ceiling
 
   await enrichMissingImages(top);
   return top;
@@ -1685,6 +1691,9 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
     if (ga.length === 0) continue;
     const newest = Math.max(...ga.map(a => a.pubDate ? Date.parse(a.pubDate) : 0));
     const hoursOld = Math.max(0, (now - newest) / 3_600_000);
+    // Hard age cap on event clusters: a cluster whose newest article is >24h
+    // old is stale and shouldn't surface (was showing 41h Shivakumar cluster).
+    if (hoursOld > 24 && group.length >= 3) continue;
     if (group.length >= 3) {
       const recentCount = ga.filter(a => {
         const ms = a.pubDate ? Date.parse(a.pubDate) : 0;
@@ -1744,10 +1753,13 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
     themeGroups.forEach(({ theme, arts }) => {
       const display = arts.slice(0, COLLECTION_CAP);
       if (display.length < 3) return;
-      for (const a of display) claimed.add(a);
-      const cards = buildFallbackStories(display);
       const newest = Math.max(...display.map(a => (a.pubDate ? Date.parse(a.pubDate) : 0)));
       const hoursOld = Math.max(0, (now - newest) / 3_600_000);
+      // Hard age cap on themes: drop the rail if even its freshest story is
+      // >12h old (was showing Aviation at 6.5 DAYS, Google at 32h).
+      if (hoursOld > 12) return;
+      for (const a of display) claimed.add(a);
+      const cards = buildFallbackStories(display);
       const score = (1 / (hoursOld + 1)) * 0.4 + Math.log(display.length + 1) * 0.25 + 0.08;
       scored.push({ item: { type: "cluster", topicTitle: theme, topicSummary: themeDigest(display), articles: cards, collection: true }, score });
     });

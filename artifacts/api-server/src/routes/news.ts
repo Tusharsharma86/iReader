@@ -3410,16 +3410,25 @@ Article: ${text}`,
     default:
       return {
         maxTokens: 1100,
-        prompt: `Summarize this news article thoroughly. Return ONLY valid JSON:
-{"bullets":["bullet 1","bullet 2","bullet 3","..."],"summary":""}
-Rules:
-- TOTAL across all bullets ~300 words (range 250-350). This is the only hard target.
-- Number of bullets is YOUR call — choose what fits the story:
-  * Breaking / fast-moving / single-event story → fewer, punchier bullets (~4-5, ~60 words each).
-  * Complex / multi-thread / political / analysis story → more bullets (~7-10, ~30-40 words each).
-  * One bullet = one distinct fact, angle, or development. Don't pad.
-- Neutral tone. Cover all key facts: who, what, when, where, named parties, figures, timeline, context, reactions, stakes.
-- Leave "summary" as an empty string — bullets carry everything.
+        prompt: `Summarize this news article as a flowing, readable STORY — not a list. Return ONLY valid JSON:
+{"bullets":["one-line takeaway","one-line takeaway","one-line takeaway"],"summary":"3-4 paragraphs separated by blank lines using \\n\\n"}
+
+The "summary" field is the MAIN view the reader sees. It MUST read like a short news article:
+- Paragraph 1 (lede): what just happened — lead with the most important fact, name the key actors and the action.
+- Paragraph 2 (context): why this happened, what came before, who else is involved, the backdrop.
+- Paragraph 3 (details): numbers, dates, named figures, quotes if any, the specifics that matter.
+- Paragraph 4 (so-what, optional): implications, what to watch next.
+
+Hard rules for "summary":
+- 250-350 words total across all paragraphs.
+- Plain journalistic prose with smooth sentence flow. 2-4 sentences per paragraph.
+- Paragraphs separated by a blank line (\\n\\n). NO bullet points, NO headers, NO labels, NO markdown anywhere.
+- Neutral tone. Cover the same ground a bullet list would (who/what/when/where, named parties, figures, context, reactions, stakes) but as a story, not a fact dump.
+
+"bullets" is a SHORT takeaway list shown below the summary as quick reference:
+- Exactly 3 entries.
+- Each entry ≤ 25 words. One distinct takeaway per entry. No padding.
+
 Article: ${text}`,
       };
   }
@@ -3532,7 +3541,8 @@ router.post("/ai-summary", async (req, res) => {
     return;
   }
 
-  const cacheKey = `${url}:${type}`;
+  // v2 — narrative-prose summary prompt. Bump invalidates v1 bullet-style caches.
+  const cacheKey = `${url}:${type}:v2`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/ai-summary-${hashKey}.json`;
 

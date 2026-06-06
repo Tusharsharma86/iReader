@@ -376,9 +376,15 @@ function breakingScore(a: NewsDataArticle): number {
 // Catches sports/entertainment the main list misses: general "world cup", bare
 // movie/film, casting language, and common Bollywood/Hollywood names.
 const EXTRA_SE_RE = /\b(world cup|t20 world cup|asia cup|champions trophy|movies?|films?|film festival|to star in|stars in (the|a|an|upcoming)|box.?office|streaming series|reality show|salman khan|shah rukh|\bsrk\b|aamir khan|ajay devgn|akshay kumar|ranbir kapoor|ranveer singh|deepika padukone|alia bhatt|kareena|katrina kaif|priyanka chopra|kangana|hrithik|kravitz|kardashian|taylor swift|pop group|k.?pop|kpop|j.?pop|boy band|girl group|fan(?:dom|s)|stan(?:s|ned)?|sykkuno|twitch streamer|twitch star|youtuber|content creator|influencer|tiktoker|streamer cheats|cheating scandal|sneak peek|first look|teaser drop|debut album|outback steakhouse|le sserafim|bts |blackpink|nct |stray kids|new jeans|cookies|tough cookies|varun dhawan|sidharth malhotra|tiger shroff|kartik aaryan|vicky kaushal|rajkummar rao|nawazuddin|pankaj tripathi|allu arjun|vijay sethupathi|\bdhanush\b|mahesh babu|prabhas|jr ntr|\byash\b|rana daggubati|david dhawan|karan johar|rohit shetty|sanjay leela bhansali|imtiaz ali|zoya akhtar|anurag kashyap|farhan akhtar|aditya chopra|director's formula|formula (?:finally )?(?:expires|works|fails|delivers|returns)|film review|movie review|series review|show review|episode \d+ review|trailer (?:review|reaction|out|drops?)|teaser (?:out|drops?)|hindi (?:film|movie|cinema)|telugu (?:film|movie)|tamil (?:film|movie)|malayalam (?:film|movie)|kannada (?:film|movie)|punjabi (?:film|movie)|marathi (?:film|movie)|gujarati (?:film|movie)|bengali (?:film|movie)|south indian (?:film|movie|cinema)|theatrical release|theatres? on|cinemas? on|directorial debut|cinematic universe|netflix series|amazon prime original|disney\+ hotstar|hotstar special|sonyliv original|zee5 original|jiocinema)\b/i;
+// Sports/entertainment patterns missed by SPORTS_ENTERTAINMENT_RE — major
+// tournaments, named players, and generic markers like "lifts trophy".
+const EXTRA_SPORTS_RE = /\b(french open|roland garros|us open(?:\s+tennis)?|australian open|monte carlo masters|atp|wta|grand slam|davis cup|laver cup|indian wells|miami open|madrid open|italian open|cincinnati open|paris masters|champion(?:ship)?s? trophy|lifts? (?:the )?trophy|wins? (?:the )?title|wins? (?:gold|silver|bronze)|gold medal|silver medal|bronze medal|podium finish|coach (?:fired|sacked|hired|appointed)|head coach|defending champion|reigning champion|knocked out|advances? to (?:final|semi|quarter)|reaches? (?:final|semi|quarter)|seeded|wildcard|qualifier|nadal|federer|djokovic|alcaraz|sinner|medvedev|swiatek|sabalenka|andreeva|gauff|rybakina|paolini|pegula|jabeur|kyrgios|tsitsipas|zverev|ruud|fritz|tiafoe|raducanu|tennis player|tennis star|grand prix|qualifying round|qualifying race|race winner|race results|pole position|fastest lap|pit stop|pit lane|hamilton (?:wins|leads|crashes)|verstappen|leclerc|norris|piastri|russell|alonso|sainz|formula one|f1 grand prix|moto ?gp|nascar|indycar|grand final|grand slam title|gold cup|copa america|euros? \d{4}|nations league|hat.?trick|brace|own goal|own.?goal|sent off|red card|yellow card|stoppage time|extra time|aggregate score|league standings|fixture (?:announced|released)|table topper|table toppers|league title|championship win|finals? mvp|series mvp|playoff (?:berth|spot|win|loss|game)|coaching change|trade rumor|rumour|trade deadline|free agent|salary cap)\b/i;
+
 function isSportsOrEntertainment(article: NewsDataArticle): boolean {
   const text = `${article.title ?? ""} ${article.description ?? ""}`.slice(0, 300);
-  return SPORTS_ENTERTAINMENT_RE.test(text) || EXTRA_SE_RE.test(text);
+  return SPORTS_ENTERTAINMENT_RE.test(text)
+    || EXTRA_SE_RE.test(text)
+    || EXTRA_SPORTS_RE.test(text);
 }
 
 // NYT's recurring "Here's the Latest" live-briefing roundup is a placeholder,
@@ -2549,9 +2555,10 @@ async function notifyOnNewClusters(
           if (r.re.test(text)) { matchedTheme = r.name; break; }
         }
         // Backend-side theme mute: drop tokens whose user has muted this theme.
-        const recipients = matchedTheme
-          ? allowed.filter(tk => !getMutedThemesForToken(tk).has(matchedTheme!))
-          : allowed;
+        // The pseudo-theme "Other Breaking" matches anything WITHOUT a theme,
+        // letting users silence all unclassified breaking pushes in one toggle.
+        const muteKey = matchedTheme ?? "Other Breaking";
+        const recipients = allowed.filter(tk => !getMutedThemesForToken(tk).has(muteKey));
         if (recipients.length === 0) continue;
         const title = matchedTheme ? `Breaking · ${matchedTheme}` : "Breaking";
         await sendPushToTokens(recipients, {
@@ -2580,9 +2587,8 @@ async function notifyOnNewClusters(
         for (const r of breakingRules) {
           if (r.re.test(text)) { matchedTheme = r.name; break; }
         }
-        const recipients = matchedTheme
-          ? allowed.filter(tk => !getMutedThemesForToken(tk).has(matchedTheme!))
-          : allowed;
+        const muteKey = matchedTheme ?? "Other Breaking";
+        const recipients = allowed.filter(tk => !getMutedThemesForToken(tk).has(muteKey));
         if (recipients.length === 0) continue;
         const title = matchedTheme ? `AI Feed · ${matchedTheme}` : "AI Feed · Breaking";
         await sendPushToTokens(recipients, {

@@ -40,7 +40,7 @@ function groqBgGate(): Promise<void> {
 async function callGroq(
   prompt: string,
   maxTokens: number,
-  opts: { temperature?: number; signal?: AbortSignal; model?: string; task?: string; background?: boolean } = {},
+  opts: { temperature?: number; signal?: AbortSignal; model?: string; task?: string; background?: boolean; jsonMode?: boolean } = {},
 ): Promise<string> {
   const key = process.env["GROQ_API_KEY"];
   if (!key) throw new Error("GROQ_API_KEY missing");
@@ -48,15 +48,19 @@ async function callGroq(
   const task = opts.task ?? "other";
   if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
+    const body: Record<string, unknown> = {
+      model,
+      max_tokens: maxTokens,
+      temperature: opts.temperature ?? 0.3,
+      messages: [{ role: "user", content: prompt }],
+    };
+    // Groq supports OpenAI-compatible JSON mode — guarantees the model emits
+    // a syntactically valid JSON object (or it errors at the API level).
+    if (opts.jsonMode) body["response_format"] = { type: "json_object" };
     const r = await fetch(GROQ_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model,
-        max_tokens: maxTokens,
-        temperature: opts.temperature ?? 0.3,
-        messages: [{ role: "user", content: prompt }],
-      }),
+      body: JSON.stringify(body),
       signal: opts.signal,
     });
     if (r.ok) {
@@ -3423,26 +3427,13 @@ Article: ${text}`,
     default:
       return {
         maxTokens: 1100,
-        prompt: `Summarize this news article as a flowing, readable STORY — not a list. Return ONLY valid JSON:
-{"bullets":["one-line takeaway","one-line takeaway","one-line takeaway"],"summary":"3-4 paragraphs separated by blank lines using \\n\\n"}
+        prompt: `You are a news editor. Write a short story-style summary of this article. Return ONLY a valid JSON object, no prose before or after, no markdown fences.
 
-The "summary" field is the MAIN view the reader sees. It MUST read like a short news article:
-- Paragraph 1 (lede): what just happened — lead with the most important fact, name the key actors and the action.
-- Paragraph 2 (context): why this happened, what came before, who else is involved, the backdrop.
-- Paragraph 3 (details): numbers, dates, named figures, quotes if any, the specifics that matter.
-- Paragraph 4 (so-what, optional): implications, what to watch next.
+Schema:
+{"summary":"<news-style narrative, 250-300 words, 3 paragraphs separated by \\n\\n. Paragraph 1: what happened. Paragraph 2: context and background. Paragraph 3: details, numbers, what's next. Plain journalistic prose. NO bullets, NO headers.>","bullets":["<takeaway, ≤25 words>","<takeaway, ≤25 words>","<takeaway, ≤25 words>"]}
 
-Hard rules for "summary":
-- 250-350 words total across all paragraphs.
-- Plain journalistic prose with smooth sentence flow. 2-4 sentences per paragraph.
-- Paragraphs separated by a blank line (\\n\\n). NO bullet points, NO headers, NO labels, NO markdown anywhere.
-- Neutral tone. Cover the same ground a bullet list would (who/what/when/where, named parties, figures, context, reactions, stakes) but as a story, not a fact dump.
-
-"bullets" is a SHORT takeaway list shown below the summary as quick reference:
-- Exactly 3 entries.
-- Each entry ≤ 25 words. One distinct takeaway per entry. No padding.
-
-Article: ${text}`,
+Article:
+${text}`,
       };
   }
 }
@@ -3582,7 +3573,7 @@ router.post("/ai-summary", async (req, res) => {
   try {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text);
-    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary" })) || "{}";
+    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();

@@ -3546,8 +3546,10 @@ router.post("/ai-summary", async (req, res) => {
     return;
   }
 
-  // v2 — narrative-prose summary prompt. Bump invalidates v1 bullet-style caches.
-  const cacheKey = `${url}:${type}:v2`;
+  // v3 — invalidates v2 entries that may have been cached with bullets-only
+  // payloads when the empty-cache guard was too lenient. v3 enforces a strict
+  // "summary must be >100 chars" gate before caching.
+  const cacheKey = `${url}:${type}:v3`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/ai-summary-${hashKey}.json`;
 
@@ -3599,10 +3601,11 @@ router.post("/ai-summary", async (req, res) => {
       eli5: typeof parsed.eli5 === "string" ? parsed.eli5 : "",
     };
 
-    // Only cache if the result is meaningful — otherwise a transient parse or
-    // empty-payload failure poisons the 24h cache and every retry sees stale
-    // emptiness. The user can refresh and try again.
-    const hasContent = (type === "summary" && (result.summary.length > 50 || result.bullets.length > 0))
+    // Only cache if the result is genuinely useful. For "summary" we now
+    // REQUIRE the narrative `summary` field to be meaningful — bullets-only
+    // responses are treated as failures so the next request retries against
+    // Groq instead of serving a poisoned cache for 24h.
+    const hasContent = (type === "summary" && result.summary.length > 100)
       || (type === "fiveWs" && result.fiveWs.length >= 3)
       || (type === "eli5" && result.eli5.length > 30);
     if (hasContent) {

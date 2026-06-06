@@ -47,6 +47,47 @@ try {
   }
 } catch { /* ignore */ }
 
+// ── Per-token muted-themes store ─────────────────────────────────────────────
+// Backend-side gating: client syncs the user's muted breaking themes here so
+// pushes for those themes are NEVER attempted. Local listener-based dismissal
+// only works when the app is in foreground; this catches background/killed
+// cases too.
+const MUTED_THEMES_PATH = "/tmp/muted-themes.json";
+const mutedThemesByToken = new Map<string, Set<string>>();
+
+try {
+  if (existsSync(MUTED_THEMES_PATH)) {
+    const raw = JSON.parse(readFileSync(MUTED_THEMES_PATH, "utf8")) as Record<string, string[]>;
+    for (const [tk, list] of Object.entries(raw)) {
+      mutedThemesByToken.set(tk, new Set(list));
+    }
+  }
+} catch { /* ignore */ }
+
+let mtWriteQueued = false;
+function persistMutedThemes(): void {
+  if (mtWriteQueued) return;
+  mtWriteQueued = true;
+  setTimeout(() => {
+    mtWriteQueued = false;
+    try {
+      const obj: Record<string, string[]> = {};
+      for (const [tk, set] of mutedThemesByToken.entries()) obj[tk] = Array.from(set);
+      writeFileSync(MUTED_THEMES_PATH, JSON.stringify(obj));
+    } catch { /* ignore */ }
+  }, 2000);
+}
+
+export function setMutedThemesForToken(token: string, themes: string[]): void {
+  if (!token) return;
+  mutedThemesByToken.set(token, new Set(themes));
+  persistMutedThemes();
+}
+
+export function getMutedThemesForToken(token: string): Set<string> {
+  return mutedThemesByToken.get(token) ?? new Set();
+}
+
 let writeQueued = false;
 function persistNotifLog(): void {
   if (writeQueued) return;

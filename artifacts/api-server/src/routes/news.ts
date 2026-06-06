@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { cleanArticleParagraphs } from "../lib/articleCleaner";
-import { getNotifHistoryForToken } from "../lib/push-sender";
+import { getNotifHistoryForToken, getMutedThemesForToken, setMutedThemesForToken } from "../lib/push-sender";
 
 const router: IRouter = Router();
 
@@ -2540,7 +2540,7 @@ async function notifyOnNewClusters(
     if (isBreaking && breakingTokens.length > 0) {
       const allowed = tokensUnderLimit(breakingTokens);
       if (allowed.length > 0) {
-        // Detect which of the 63 themes the cluster matches so the notif
+        // Detect which of the 73 themes the cluster matches so the notif
         // title reads "Breaking · <theme>" instead of just "Breaking".
         const breakingRules = themeRulesFor("breaking");
         const text = `${cluster.headline} ${articlePayload.summary}`;
@@ -2548,14 +2548,19 @@ async function notifyOnNewClusters(
         for (const r of breakingRules) {
           if (r.re.test(text)) { matchedTheme = r.name; break; }
         }
+        // Backend-side theme mute: drop tokens whose user has muted this theme.
+        const recipients = matchedTheme
+          ? allowed.filter(tk => !getMutedThemesForToken(tk).has(matchedTheme!))
+          : allowed;
+        if (recipients.length === 0) continue;
         const title = matchedTheme ? `Breaking · ${matchedTheme}` : "Breaking";
-        await sendPushToTokens(allowed, {
+        await sendPushToTokens(recipients, {
           title,
           body: cluster.headline,
           data: { kind: "breaking", clusterId: cluster.id, fp, article: articlePayload },
           ...(articlePayload.imageUrl ? { richContent: { image: articlePayload.imageUrl } } : {}),
         });
-        recordPushes(allowed);
+        recordPushes(recipients);
       }
     }
 
@@ -2575,14 +2580,18 @@ async function notifyOnNewClusters(
         for (const r of breakingRules) {
           if (r.re.test(text)) { matchedTheme = r.name; break; }
         }
+        const recipients = matchedTheme
+          ? allowed.filter(tk => !getMutedThemesForToken(tk).has(matchedTheme!))
+          : allowed;
+        if (recipients.length === 0) continue;
         const title = matchedTheme ? `AI Feed · ${matchedTheme}` : "AI Feed · Breaking";
-        await sendPushToTokens(allowed, {
+        await sendPushToTokens(recipients, {
           title,
           body: cluster.headline,
           data: { kind: "ai-feed", clusterId: cluster.id, fp, article: articlePayload },
           ...(articlePayload.imageUrl ? { richContent: { image: articlePayload.imageUrl } } : {}),
         });
-        recordPushes(allowed);
+        recordPushes(recipients);
       }
     }
 
@@ -4070,6 +4079,22 @@ router.get("/usage", async (req, res) => {
     req.log?.warn({ err }, "usage proxy failed");
     res.status(502).json({ error: "Usage proxy failed" });
   }
+});
+
+// ── /muted-themes ───────────────────────────────────────────────────────────
+// Per-token muted breaking themes. Client POSTs whenever the user toggles a
+// theme; backend uses this to drop push recipients before sending.
+router.post("/muted-themes", (req, res) => {
+  const { token, themes } = (req.body ?? {}) as { token?: string; themes?: string[] };
+  if (!token || typeof token !== "string") {
+    res.status(400).json({ error: "token required" });
+    return;
+  }
+  const list = Array.isArray(themes)
+    ? themes.filter((t): t is string => typeof t === "string").slice(0, 200)
+    : [];
+  setMutedThemesForToken(token, list);
+  res.json({ ok: true, count: list.length });
 });
 
 // ── /notif-history ──────────────────────────────────────────────────────────

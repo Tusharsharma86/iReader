@@ -3400,7 +3400,17 @@ const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
 
 type AiSummaryType = "summary" | "fiveWs" | "eli5";
 
-function aiPrompt(type: AiSummaryType, text: string): { prompt: string; maxTokens: number } {
+function aiPrompt(
+  type: AiSummaryType,
+  text: string,
+  opts: { maxWords?: number; keyPoints?: number } = {},
+): { prompt: string; maxTokens: number } {
+  const maxWords = Math.max(80, Math.min(600, opts.maxWords ?? 250));
+  const keyPoints = Math.max(3, Math.min(10, opts.keyPoints ?? 3));
+  // Map words → paragraph count for the summary prompt.
+  const paraCount = maxWords < 180 ? 2 : maxWords < 320 ? 3 : 4;
+  // Token budget = ~1.6x word target, plus 200 for bullets + JSON overhead.
+  const summaryTokens = Math.round(maxWords * 1.6) + 250;
   switch (type) {
     case "fiveWs":
       return {
@@ -3425,17 +3435,26 @@ Article: ${text}`,
 {"eli5":"<explanation in 80-100 words, simple language, no jargon, conversational tone>"}
 Article: ${text}`,
       };
-    default:
+    default: {
+      const bulletExamples = Array.from({ length: keyPoints },
+        () => '"<takeaway, ≤25 words>"').join(',');
+      const wordRange = `${Math.round(maxWords * 0.85)}-${Math.round(maxWords * 1.1)}`;
       return {
-        maxTokens: 1100,
+        maxTokens: summaryTokens,
         prompt: `You are a news editor. Write a short story-style summary of this article. Return ONLY a valid JSON object, no prose before or after, no markdown fences.
 
 Schema:
-{"summary":"<news-style narrative, 250-300 words, 3 paragraphs separated by \\n\\n. Paragraph 1: what happened. Paragraph 2: context and background. Paragraph 3: details, numbers, what's next. Plain journalistic prose. NO bullets, NO headers.>","bullets":["<takeaway, ≤25 words>","<takeaway, ≤25 words>","<takeaway, ≤25 words>"]}
+{"summary":"<news-style narrative, ${wordRange} words, ${paraCount} paragraphs separated by \\n\\n. Plain journalistic prose. NO bullets, NO headers.>","bullets":[${bulletExamples}]}
+
+Hard rules:
+- "summary" MUST be ${wordRange} words across ${paraCount} paragraphs separated by \\n\\n.
+- "bullets" array MUST have EXACTLY ${keyPoints} entries.
+- Each bullet ≤ 25 words.
 
 Article:
 ${text}`,
       };
+    }
   }
 }
 
@@ -3536,20 +3555,22 @@ router.post("/cluster-labels", async (req, res) => {
 });
 
 router.post("/ai-summary", async (req, res) => {
-  const { url, paragraphs, type = "summary" } = req.body as {
+  const { url, paragraphs, type = "summary", maxWords, keyPoints } = req.body as {
     url?: string;
     paragraphs?: string[];
     type?: AiSummaryType;
+    maxWords?: number;
+    keyPoints?: number;
   };
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
     return;
   }
 
-  // v3 — invalidates v2 entries that may have been cached with bullets-only
-  // payloads when the empty-cache guard was too lenient. v3 enforces a strict
-  // "summary must be >100 chars" gate before caching.
-  const cacheKey = `${url}:${type}:v3`;
+  // v4 — cache key now includes maxWords + keyPoints so changing Customize
+  // → summary length / key points count yields a fresh response instead of
+  // serving the prior result. (Server-side previously ignored those params.)
+  const cacheKey = `${url}:${type}:v4:${maxWords ?? 'd'}:${keyPoints ?? 'd'}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/ai-summary-${hashKey}.json`;
 
@@ -3575,7 +3596,7 @@ router.post("/ai-summary", async (req, res) => {
 
   try {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
-    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text);
+    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints });
     const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};

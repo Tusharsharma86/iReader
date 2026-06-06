@@ -3602,8 +3602,16 @@ router.post("/ai-summary", async (req, res) => {
       eli5: typeof parsed.eli5 === "string" ? parsed.eli5 : "",
     };
 
-    aiSummaryCache.set(cacheKey, result);
-    safeWriteJson(diskPath, result);
+    // Only cache if the result is meaningful — otherwise a transient parse or
+    // empty-payload failure poisons the 24h cache and every retry sees stale
+    // emptiness. The user can refresh and try again.
+    const hasContent = (type === "summary" && (result.summary.length > 50 || result.bullets.length > 0))
+      || (type === "fiveWs" && result.fiveWs.length >= 3)
+      || (type === "eli5" && result.eli5.length > 30);
+    if (hasContent) {
+      aiSummaryCache.set(cacheKey, result);
+      safeWriteJson(diskPath, result);
+    }
 
     res.json({ ...result, cached: false });
   } catch (err) {

@@ -2540,10 +2540,20 @@ async function notifyOnNewClusters(
     if (isBreaking && breakingTokens.length > 0) {
       const allowed = tokensUnderLimit(breakingTokens);
       if (allowed.length > 0) {
+        // Detect which of the 63 themes the cluster matches so the notif
+        // title reads "Breaking · <theme>" instead of just "Breaking".
+        const breakingRules = themeRulesFor("breaking");
+        const text = `${cluster.headline} ${articlePayload.summary}`;
+        let matchedTheme: string | null = null;
+        for (const r of breakingRules) {
+          if (r.re.test(text)) { matchedTheme = r.name; break; }
+        }
+        const title = matchedTheme ? `Breaking · ${matchedTheme}` : "Breaking";
         await sendPushToTokens(allowed, {
-          title: "Breaking",
+          title,
           body: cluster.headline,
           data: { kind: "breaking", clusterId: cluster.id, fp, article: articlePayload },
+          ...(articlePayload.imageUrl ? { richContent: { image: articlePayload.imageUrl } } : {}),
         });
         recordPushes(allowed);
       }
@@ -2558,10 +2568,19 @@ async function notifyOnNewClusters(
     if (isBreaking && aiFeedTokens.length > 0) {
       const allowed = tokensUnderLimit(aiFeedTokens);
       if (allowed.length > 0) {
+        // Same per-theme title treatment as Main Breaking.
+        const breakingRules = themeRulesFor("breaking");
+        const text = `${cluster.headline} ${articlePayload.summary}`;
+        let matchedTheme: string | null = null;
+        for (const r of breakingRules) {
+          if (r.re.test(text)) { matchedTheme = r.name; break; }
+        }
+        const title = matchedTheme ? `AI Feed · ${matchedTheme}` : "AI Feed · Breaking";
         await sendPushToTokens(allowed, {
-          title: "AI Feed · Breaking",
+          title,
           body: cluster.headline,
           data: { kind: "ai-feed", clusterId: cluster.id, fp, article: articlePayload },
+          ...(articlePayload.imageUrl ? { richContent: { image: articlePayload.imageUrl } } : {}),
         });
         recordPushes(allowed);
       }

@@ -10,6 +10,8 @@ export type PushPayload = {
   title: string;
   body: string;
   data?: Record<string, unknown>;
+  /** Android-only rich content. `image` shows a big-picture thumbnail. */
+  richContent?: { image?: string };
 };
 
 // ── Per-token notification log ───────────────────────────────────────────────
@@ -119,7 +121,9 @@ export async function sendPushToTokens(
     body: payload.body,
     data: payload.data ?? {},
     priority: "high",
-  }));
+    // Android big-picture thumbnail when image URL provided.
+    ...(payload.richContent ? { richContent: payload.richContent } : {}),
+  } as ExpoPushMessage));
 
   // Log against every valid token BEFORE chunked send. We log on attempt, not
   // success — push delivery is async and tickets only confirm queueing. This

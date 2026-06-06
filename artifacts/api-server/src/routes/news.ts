@@ -15,6 +15,11 @@ const router: IRouter = Router();
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive (flagship) — dedicated daily budget
 const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks (article tools, Q&A) — separate budget
+// Foreground user-facing article summary. 8B is saturated by background feed
+// work (cluster-enrich, theme-assign) which causes 70%+ 429 errors on the
+// burst window. 70B has its own RPM/RPD budget and sits unused, so route the
+// (low-volume, user-initiated) article-summary route here for reliability.
+const GROQ_MODEL_FOREGROUND = "llama-3.3-70b-versatile";
 const GROQ_MODEL_ENRICH = "llama-3.3-70b-versatile"; // feed enrichment: cluster headlines + 25-word summaries — separate budget (~100k/day)
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
@@ -3577,7 +3582,7 @@ router.post("/ai-summary", async (req, res) => {
   try {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text);
-    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST, task: "article-summary" })) || "{}";
+    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary" })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();

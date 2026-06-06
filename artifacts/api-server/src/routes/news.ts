@@ -3403,10 +3403,11 @@ type AiSummaryType = "summary" | "fiveWs" | "eli5";
 function aiPrompt(
   type: AiSummaryType,
   text: string,
-  opts: { maxWords?: number; keyPoints?: number } = {},
+  opts: { maxWords?: number; keyPoints?: number; eli5Tone?: 'kid' | 'casual' | 'plain' } = {},
 ): { prompt: string; maxTokens: number } {
   const maxWords = Math.max(80, Math.min(600, opts.maxWords ?? 250));
   const keyPoints = Math.max(3, Math.min(10, opts.keyPoints ?? 3));
+  const eli5Tone = opts.eli5Tone ?? 'casual';
   // Map words → paragraph count for the summary prompt.
   const paraCount = maxWords < 180 ? 2 : maxWords < 320 ? 3 : 4;
   // Token budget = ~1.6x word target, plus 200 for bullets + JSON overhead.
@@ -3428,13 +3429,19 @@ Rules:
 
 Article: ${text}`,
       };
-    case "eli5":
+    case "eli5": {
+      const toneInstruction = eli5Tone === 'kid'
+        ? 'Explain like to a curious 8-year-old. Use very short words, fun analogies (toys, animals, school).'
+        : eli5Tone === 'plain'
+          ? 'Explain in plain English. Clear, direct, neutral. No childish analogies; just simple jargon-free sentences.'
+          : 'Explain simply, like to a smart 13-year-old. Friendly conversational tone, light analogies OK.';
       return {
         maxTokens: 300,
-        prompt: `Explain this news article simply, like to a 10-year-old. Return ONLY valid JSON:
-{"eli5":"<explanation in 80-100 words, simple language, no jargon, conversational tone>"}
+        prompt: `${toneInstruction} Return ONLY valid JSON:
+{"eli5":"<explanation in 80-100 words, simple language, no jargon>"}
 Article: ${text}`,
       };
+    }
     default: {
       const bulletExamples = Array.from({ length: keyPoints },
         () => '"<takeaway, ≤25 words>"').join(',');
@@ -3555,12 +3562,13 @@ router.post("/cluster-labels", async (req, res) => {
 });
 
 router.post("/ai-summary", async (req, res) => {
-  const { url, paragraphs, type = "summary", maxWords, keyPoints } = req.body as {
+  const { url, paragraphs, type = "summary", maxWords, keyPoints, eli5Tone } = req.body as {
     url?: string;
     paragraphs?: string[];
     type?: AiSummaryType;
     maxWords?: number;
     keyPoints?: number;
+    eli5Tone?: 'kid' | 'casual' | 'plain';
   };
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
@@ -3570,7 +3578,8 @@ router.post("/ai-summary", async (req, res) => {
   // v4 — cache key now includes maxWords + keyPoints so changing Customize
   // → summary length / key points count yields a fresh response instead of
   // serving the prior result. (Server-side previously ignored those params.)
-  const cacheKey = `${url}:${type}:v4:${maxWords ?? 'd'}:${keyPoints ?? 'd'}`;
+  // v5 — include eli5Tone so kid/casual/plain yield distinct caches.
+  const cacheKey = `${url}:${type}:v5:${maxWords ?? 'd'}:${keyPoints ?? 'd'}:${eli5Tone ?? 'd'}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/ai-summary-${hashKey}.json`;
 
@@ -3596,7 +3605,7 @@ router.post("/ai-summary", async (req, res) => {
 
   try {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
-    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints });
+    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
     const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
@@ -3710,18 +3719,23 @@ async function fetchArticleText(u: string): Promise<string> {
 }
 
 router.post("/deepdive", async (req, res) => {
-  const { url, headline, paragraphs, sourceUrls } = req.body as {
+  const { url, headline, paragraphs, sourceUrls, depth: rawDepth } = req.body as {
     url?: string;
     headline?: string;
     paragraphs?: string[];
     sourceUrls?: string[];
+    depth?: 'quick' | 'standard' | 'deep';
   };
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
     return;
   }
+  const depth: 'quick' | 'standard' | 'deep' =
+    rawDepth === 'quick' || rawDepth === 'deep' ? rawDepth : 'standard';
 
-  const cacheKey = `deepdive:v8:${url}`; // v8 — read FULL text of all sources (multi-source)
+  // v9 — cache key includes depth so quick/standard/deep yield distinct
+  // cached responses.
+  const cacheKey = `deepdive:v9:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -3800,7 +3814,14 @@ Headline: ${headline ?? "(no headline)"}
 Article:
 ${text}
 
-Respond with JSON only.`;
+Respond with JSON only.
+
+DEPTH OVERRIDE for this request: "${depth}".
+${depth === 'quick'
+  ? '- Shorten EVERY length target by ~40%. tldr bullets: 2-3 per section. storySections: 50-90 words each. questions: 3.'
+  : depth === 'deep'
+    ? '- Expand the storySections to ~150-220 words each (still no repetition). Add depth and nuance. Keep tldr crisp.'
+    : '- Use the default lengths as specified above.'}`;
 
     // Retry once on transient network failure.
     const ctrl = new AbortController();

@@ -1,6 +1,7 @@
 import { Expo, type ExpoPushMessage } from "expo-server-sdk";
 import { db, pushTokensTable, notificationPrefsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { logger } from "./logger";
 
 const expo = new Expo();
@@ -10,6 +11,92 @@ export type PushPayload = {
   body: string;
   data?: Record<string, unknown>;
 };
+
+// ── Per-token notification log ───────────────────────────────────────────────
+// Source of truth for both Android (merged into local history on focus) and
+// Web (read via pair code). Captures every push attempted to a token even if
+// the device was offline / killed when it landed.
+export interface NotifLogEntry {
+  id: string;          // article id or clusterId
+  kind: string;        // 'breaking' | 'ai-feed' | 'topic' | 'source' | 'digest'
+  title: string;
+  body: string;
+  firedAt: number;
+  // Article snapshot — same shape as the in-app NotifHistoryEntry.
+  headline?: string;
+  summary?: string;
+  imageUrl?: string;
+  url?: string;
+  source?: string;
+  publishedAt?: string;
+}
+
+const NOTIF_LOG_PATH = "/tmp/notif-log.json";
+const NOTIF_LOG_MAX_PER_TOKEN = 200;
+const notifLog = new Map<string, NotifLogEntry[]>();
+
+// Disk load (best-effort) — Render free tier wipes /tmp on cold-start.
+try {
+  if (existsSync(NOTIF_LOG_PATH)) {
+    const raw = JSON.parse(readFileSync(NOTIF_LOG_PATH, "utf8")) as Record<string, NotifLogEntry[]>;
+    for (const [tk, entries] of Object.entries(raw)) {
+      notifLog.set(tk, entries);
+    }
+  }
+} catch { /* ignore */ }
+
+let writeQueued = false;
+function persistNotifLog(): void {
+  if (writeQueued) return;
+  writeQueued = true;
+  setTimeout(() => {
+    writeQueued = false;
+    try {
+      const obj: Record<string, NotifLogEntry[]> = {};
+      for (const [tk, entries] of notifLog.entries()) obj[tk] = entries;
+      writeFileSync(NOTIF_LOG_PATH, JSON.stringify(obj));
+    } catch { /* ignore */ }
+  }, 2000);
+}
+
+function appendNotifLog(token: string, entry: NotifLogEntry): void {
+  const arr = notifLog.get(token) ?? [];
+  // Dedup by id (newer wins, floats to top).
+  const filtered = arr.filter((e) => e.id !== entry.id);
+  filtered.unshift(entry);
+  notifLog.set(token, filtered.slice(0, NOTIF_LOG_MAX_PER_TOKEN));
+  persistNotifLog();
+}
+
+export function getNotifHistoryForToken(token: string, limit = 200): NotifLogEntry[] {
+  const arr = notifLog.get(token) ?? [];
+  return arr.slice(0, limit);
+}
+
+function buildLogEntry(payload: PushPayload): NotifLogEntry {
+  const data = (payload.data ?? {}) as {
+    kind?: string;
+    clusterId?: string;
+    article?: {
+      id?: string; headline?: string; summary?: string;
+      imageUrl?: string; url?: string; source?: string; publishedAt?: string;
+    };
+  };
+  const a = data.article ?? {};
+  return {
+    id: a.id ?? data.clusterId ?? `notif-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: data.kind ?? "unknown",
+    title: payload.title,
+    body: payload.body,
+    firedAt: Date.now(),
+    headline: a.headline ?? payload.body,
+    summary: a.summary,
+    imageUrl: a.imageUrl,
+    url: a.url,
+    source: a.source,
+    publishedAt: a.publishedAt,
+  };
+}
 
 // Send the same notification to a specific list of tokens. Invalid tokens
 // returned by Expo's push service are deleted from BOTH push_tokens and
@@ -33,6 +120,14 @@ export async function sendPushToTokens(
     data: payload.data ?? {},
     priority: "high",
   }));
+
+  // Log against every valid token BEFORE chunked send. We log on attempt, not
+  // success — push delivery is async and tickets only confirm queueing. This
+  // is the source of truth for history sync.
+  const logEntry = buildLogEntry(payload);
+  for (const tk of valid) {
+    appendNotifLog(tk, { ...logEntry });
+  }
 
   const chunks = expo.chunkPushNotifications(messages);
   const invalidTokens = new Set<string>();

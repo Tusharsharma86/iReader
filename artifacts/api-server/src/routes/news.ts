@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { cleanArticleParagraphs } from "../lib/articleCleaner";
+import { getNotifHistoryForToken } from "../lib/push-sender";
 
 const router: IRouter = Router();
 
@@ -4005,6 +4006,26 @@ router.get("/usage", async (req, res) => {
     req.log?.warn({ err }, "usage proxy failed");
     res.status(502).json({ error: "Usage proxy failed" });
   }
+});
+
+// ── /notif-history ──────────────────────────────────────────────────────────
+// Per-token notification log. Used by Android to backfill local history with
+// pushes that landed while the app was killed, and by Web to mirror Android
+// via a pair code (the user's Expo push token).
+router.get("/notif-history", (req, res) => {
+  const token = String(req.query.token ?? "").trim();
+  const sinceRaw = String(req.query.since ?? "0");
+  const since = Number.isFinite(Number(sinceRaw)) ? Number(sinceRaw) : 0;
+  const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 200)));
+  if (!token) {
+    res.status(400).json({ error: "token required" });
+    return;
+  }
+  // Accept either the full Expo token or its short pair-code form (last 12).
+  // For now we require the full token; pair-code lookup would need an index.
+  const entries = getNotifHistoryForToken(token, limit)
+    .filter((e) => e.firedAt > since);
+  res.json({ entries });
 });
 
 export default router;

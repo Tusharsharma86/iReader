@@ -62,9 +62,17 @@ async function callGroq(
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
       return data.choices?.[0]?.message?.content ?? "";
     }
-    // One retry on rate-limit for background calls (after a short wait) before giving up.
-    if (r.status === 429 && opts.background && attempt < 1) {
-      await new Promise((res) => setTimeout(res, 5000));
+    // Retry on rate-limit / transient 5xx — foreground gets up to 2 retries
+    // (article-summary, deepdive etc. are user-facing), background gets 1.
+    const retryable = r.status === 429 || r.status === 502 || r.status === 503;
+    const maxAttempts = opts.background ? 1 : 2;
+    if (retryable && attempt < maxAttempts) {
+      // Honor Retry-After if present, else exponential back-off (2s, 5s).
+      const ra = Number(r.headers.get("retry-after"));
+      const waitMs = Number.isFinite(ra) && ra > 0
+        ? Math.min(ra * 1000, 8000)
+        : (attempt === 0 ? 2000 : 5000);
+      await new Promise((res) => setTimeout(res, waitMs));
       continue;
     }
     recordAiUsage(model, task, 0, false);

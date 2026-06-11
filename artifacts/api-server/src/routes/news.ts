@@ -3734,6 +3734,8 @@ interface DeepDiveResult {
   keyPeople: string[];
   keyCompanies: string[];
   topics: string[];
+  articlesRead: number;
+  articlesAttempted: number;
 }
 const deepDiveCache = new Map<string, DeepDiveResult>();
 const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -3930,6 +3932,7 @@ ${depth === 'quick'
       ? parsed.narrative
       : storySections.map((s) => s.body).join("\n\n");
 
+    const articlesRead = fetched.filter((f) => f.body.length > 200).length;
     const result: DeepDiveResult = {
       at: Date.now(),
       tldr: flatTldr,
@@ -3942,6 +3945,8 @@ ${depth === 'quick'
       keyPeople: Array.isArray(parsed.keyPeople) ? parsed.keyPeople.slice(0, 12).map(String) : [],
       keyCompanies: Array.isArray(parsed.keyCompanies) ? parsed.keyCompanies.slice(0, 10).map(String) : [],
       topics: Array.isArray(parsed.topics) ? parsed.topics.slice(0, 8).map(String) : [],
+      articlesRead,
+      articlesAttempted: urlsToRead.length,
     };
 
     // Return whatever we got — even partial data is useful. Only fail on total emptiness.

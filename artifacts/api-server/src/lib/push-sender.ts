@@ -52,9 +52,13 @@ try {
 // pushes for those themes are NEVER attempted. Local listener-based dismissal
 // only works when the app is in foreground; this catches background/killed
 // cases too.
+//
+// Source of truth: notification_prefs.muted_themes column in PostgreSQL.
+// /tmp file is a warm-start cache only — never relied upon across restarts.
 const MUTED_THEMES_PATH = "/tmp/muted-themes.json";
 const mutedThemesByToken = new Map<string, Set<string>>();
 
+// Warm the in-memory map from /tmp on a fresh cold start (best-effort).
 try {
   if (existsSync(MUTED_THEMES_PATH)) {
     const raw = JSON.parse(readFileSync(MUTED_THEMES_PATH, "utf8")) as Record<string, string[]>;
@@ -65,7 +69,7 @@ try {
 } catch { /* ignore */ }
 
 let mtWriteQueued = false;
-function persistMutedThemes(): void {
+function persistMutedThemesToTmp(): void {
   if (mtWriteQueued) return;
   mtWriteQueued = true;
   setTimeout(() => {
@@ -78,10 +82,33 @@ function persistMutedThemes(): void {
   }, 2000);
 }
 
+// Called once at server startup — loads all muted-theme rows from DB into the
+// in-memory map so the map survives Render restarts/deploys.
+export async function initMutedThemesFromDb(): Promise<void> {
+  try {
+    const rows = await db
+      .select({ token: notificationPrefsTable.token, mutedThemes: notificationPrefsTable.mutedThemes })
+      .from(notificationPrefsTable);
+    for (const row of rows) {
+      if (row.mutedThemes.length > 0) {
+        mutedThemesByToken.set(row.token, new Set(row.mutedThemes));
+      }
+    }
+    logger.info({ count: rows.length }, "muted-themes: loaded from DB");
+  } catch (err) {
+    logger.warn({ err }, "muted-themes: DB load failed, falling back to /tmp cache");
+  }
+}
+
 export function setMutedThemesForToken(token: string, themes: string[]): void {
   if (!token) return;
   mutedThemesByToken.set(token, new Set(themes));
-  persistMutedThemes();
+  persistMutedThemesToTmp();
+  // Persist to DB (fire-and-forget — in-memory map is already updated above).
+  db.update(notificationPrefsTable)
+    .set({ mutedThemes: themes, updatedAt: new Date() })
+    .where(eq(notificationPrefsTable.token, token))
+    .catch((err) => logger.warn({ err, token }, "muted-themes: DB write failed"));
 }
 
 export function getMutedThemesForToken(token: string): Set<string> {

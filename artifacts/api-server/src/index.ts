@@ -1,5 +1,6 @@
 import app from "./app";
 import { logger } from "./lib/logger";
+import { initMutedThemesFromDb } from "./lib/push-sender";
 
 const rawPort = process.env["PORT"];
 
@@ -22,4 +23,7 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+
+  // Load muted themes from DB into memory so push filtering survives restarts.
+  initMutedThemesFromDb().catch((e) => logger.warn({ e }, "muted-themes init failed"));
 });

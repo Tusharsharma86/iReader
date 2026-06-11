@@ -972,6 +972,26 @@ function titleTokens(title: string): Set<string> {
   );
 }
 
+// Return the article from `group` whose headline has the highest average
+// token overlap with all other members — the "centroid" representative.
+// Falls back to index 0 if group has only one member.
+function clusterRepresentative<T extends { title?: string | null }>(group: T[]): T {
+  if (group.length <= 1) return group[0]!;
+  const sets = group.map((a) => titleTokens(a.title ?? ""));
+  let bestIdx = 0;
+  let bestScore = -1;
+  for (let i = 0; i < group.length; i++) {
+    let total = 0;
+    for (let j = 0; j < group.length; j++) {
+      if (i === j) continue;
+      total += overlapCoefficient(sets[i]!, sets[j]!);
+    }
+    const avg = total / (group.length - 1);
+    if (avg > bestScore) { bestScore = avg; bestIdx = i; }
+  }
+  return group[bestIdx]!;
+}
+
 function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 && b.size === 0) return 1;
   let intersection = 0;
@@ -1042,6 +1062,23 @@ function titleNamedEntities(title: string): Set<string> {
   return entities;
 }
 
+// Country names that, if different between two headlines, signal different stories.
+const COUNTRY_TOKENS = new Set([
+  "australia","australian","canada","canadian","india","indian","china","chinese",
+  "russia","russian","ukraine","ukrainian","usa","us","american","america","uk","britain","british",
+  "france","french","germany","german","japan","japanese","brazil","brazilians","pakistan","iran",
+  "israel","israeli","iran","iranian","turkey","turkish","mexico","south korea","north korea",
+  "italy","italian","spain","spanish","sweden","swedish","indonesia","saudi","nigeria",
+  "south africa","netherlands","dutch","new zealand","singapore","thailand","argentina",
+]);
+
+function headlineCountry(tokens: Set<string>): string | null {
+  for (const t of tokens) {
+    if (COUNTRY_TOKENS.has(t)) return t;
+  }
+  return null;
+}
+
 // Cluster articles by title similarity and same-domain proximity.
 // Returns a ClusterResult matching the same shape buildStoryCards expects.
 function deterministicCluster(articles: NewsDataArticle[]): ClusterResult {
@@ -1069,20 +1106,26 @@ function deterministicCluster(articles: NewsDataArticle[]): ClusterResult {
       for (const e of entitySets[i]!) {
         if (entitySets[j]!.has(e)) sharedEntities++;
       }
+      // Block clustering if articles mention different countries — same topic in
+      // different countries (e.g. "Australia bans social media" vs "Canada bans
+      // social media") are different stories even if token overlap is high.
+      const countryI = headlineCountry(tokenSets[i]!);
+      const countryJ = headlineCountry(tokenSets[j]!);
+      if (countryI && countryJ && countryI !== countryJ) continue;
       if (overlap >= 0.35 || sharedEntities >= 2) {
         assigned[j] = clusterIdx;
         members.push(j);
       }
     }
 
-    const rep = articles[i]!;
+    const repArticle = clusterRepresentative(members.map((idx) => articles[idx]!));
     const desc = stripHtml(
-      (rep.description ?? rep.content ?? rep.title ?? "").trim(),
+      (repArticle.description ?? repArticle.content ?? repArticle.title ?? "").trim(),
     );
     const summary = naiveParagraph(desc);
 
     clusters.push({
-      headline: rep.title ?? "Untitled",
+      headline: repArticle.title ?? "Untitled",
       category: pickCategory(rep),
       article_indexes: members,
       fiveWs: naiveFiveWs(desc),
@@ -1318,6 +1361,7 @@ ${lines}
 Rules:
 - Each index appears in exactly ONE group.
 - Group together coverage of the SAME event from different outlets; unrelated stories are their own single-item group.
+- CRITICAL: The same type of event happening in DIFFERENT countries = DIFFERENT stories. E.g. "Australia bans social media for kids" and "Canada proposes social media ban for kids" are TWO separate stories — do NOT group them together just because the topic is similar.
 - Return JSON ONLY, no prose:
 {"groups":[{"indices":[0,3]},{"indices":[1]},{"indices":[2,5,7]}]}`;
     const text = await callGroq(prompt, 700, { model: GROQ_MODEL_FAST, task: "clustering" });
@@ -1738,7 +1782,7 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
   const topByScore = new Set(clusterInfos.slice().sort((a, b) => b.score - a.score).slice(0, TOP_ENRICH).map((c) => c.ga));
   for (const { ga, score } of clusterInfos) {
     const cards = buildFallbackStories(ga);
-    const rep = ga[0]!;
+    const rep = clusterRepresentative(ga);
     // Read enrich cache for ALL clusters (free); only FIRE generation for top N.
     const enrich = topByScore.has(ga) ? clusterEnrichment(ga) : (() => {
       const c = clusterEnrichCache.get(clusterSignature(ga));

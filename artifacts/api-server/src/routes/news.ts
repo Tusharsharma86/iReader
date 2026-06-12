@@ -2213,12 +2213,14 @@ GROUPING RULES (strict — read carefully):
 - 4-8 groups maximum.
 - Stories that don't fit any cluster go into "Other".
 
-LABEL STYLE — write each cluster label like a magazine section title:
-- 3-6 words, Title Case.
-- Lead with the named entity/place when there is one ("Iran-Israel Strikes", "Modi Cabinet Reshuffle", "Apple iPhone 17 Launch", "Tesla Q3 Earnings", "OpenAI Sora 2 Release").
-- Capture the ANGLE, not just the topic: "Fed Holds Rates Amid Inflation Fears" beats "Federal Reserve".
-- No vague labels like "Politics", "Tech", "Updates", "News". No clickbait. No emoji.
-- "Other" is the only allowed generic label, and only for unrelated singletons.
+HEADLINE STYLE — write each label as a proper news headline, not a section title:
+- 6-12 words. Sentence case (capitalise first word + proper nouns only).
+- Tell the reader WHAT HAPPENED or WHAT IS HAPPENING. Use an active verb.
+- Include the key entity AND the action/outcome: "Delhi hotel fire kills three, CM honours rescue workers" not "Delhi: 3 members".
+- Be specific: named parties, exact stakes, key outcome. No filler words.
+- For ongoing stories use present tense: "Iran and US signal nuclear deal is within reach".
+- No vague labels like "Politics", "Tech", "Updates", "Latest". No clickbait. No emoji.
+- "Other" is the only allowed exception (for unrelated singletons only).
 
 Return JSON only:
 {"groups":[{"label":"<sharp label>","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`;
@@ -2226,7 +2228,7 @@ Return JSON only:
     aiCallsToday++;
     console.log(`AI call #${aiCallsToday} today for ${topic}`);
 
-    const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "clustering" });
+    const text = await callGroq(prompt, 900, { model: GROQ_MODEL_FAST, task: "clustering" });
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -3547,16 +3549,18 @@ GROUPING RULES (strict):
 - 3-7 groups maximum.
 - Singletons → "Other".
 
-LABEL STYLE — like a magazine section title:
-- 3-6 words, Title Case.
-- Lead with the named entity/place ("Iran-Israel Strikes", "Modi Cabinet Reshuffle", "Apple iPhone 17 Launch", "Tesla Q3 Earnings", "OpenAI Sora 2 Release").
-- Capture the ANGLE, not just the topic: "Fed Holds Rates Amid Inflation" beats "Federal Reserve".
-- No vague labels: avoid "Politics", "Tech", "Updates", "News". No emoji. No clickbait.
-- "Other" only for unrelated singletons.
+HEADLINE STYLE — write each label as a proper news headline, not a section title:
+- 6-12 words. Sentence case (capitalise first word + proper nouns only).
+- Tell the reader WHAT HAPPENED or WHAT IS HAPPENING. Use an active verb.
+- Include the key entity AND the action/outcome: "Delhi hotel fire kills three, CM honours rescue workers" not "Delhi: 3 members".
+- Be specific: named parties, exact stakes, key outcome. No filler words.
+- For ongoing stories use present tense: "Iran and US signal nuclear deal is within reach".
+- No vague labels like "Politics", "Tech", "Updates", "Latest". No clickbait. No emoji.
+- "Other" is the only allowed exception (for unrelated singletons only).
 
 Return JSON only:
 {"groups":[{"label":"<sharp label>","indices":[0,1,4]},{"label":"Other","indices":[2,3]}]}`;
-  const text = await callGroq(prompt, 600, { model: GROQ_MODEL_FAST, task: "cluster-labels" });
+  const text = await callGroq(prompt, 900, { model: GROQ_MODEL_FAST, task: "cluster-labels" });
   const raw = text.replace(/```json|```/g, '').trim();
   const parsed = JSON.parse(raw) as { groups?: { label: string; indices: number[] }[] };
   if (!Array.isArray(parsed?.groups)) throw new Error('bad AI response');

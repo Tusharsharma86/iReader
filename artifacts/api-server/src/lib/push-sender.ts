@@ -1,6 +1,6 @@
 import { Expo, type ExpoPushMessage } from "expo-server-sdk";
 import { db, pushTokensTable, notificationPrefsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { logger } from "./logger";
 
@@ -86,17 +86,19 @@ function persistMutedThemesToTmp(): void {
 // in-memory map so the map survives Render restarts/deploys.
 export async function initMutedThemesFromDb(): Promise<void> {
   try {
-    const rows = await db
-      .select({ token: notificationPrefsTable.token, mutedThemes: notificationPrefsTable.mutedThemes })
-      .from(notificationPrefsTable);
-    for (const row of rows) {
-      if (row.mutedThemes.length > 0) {
-        mutedThemesByToken.set(row.token, new Set(row.mutedThemes));
+    // Use raw SQL so a missing muted_themes column (migration not yet run)
+    // never throws — we just get an empty result and fall back to /tmp cache.
+    const result = await db.execute(
+      sql`SELECT token, muted_themes FROM notification_prefs WHERE array_length(muted_themes, 1) > 0`
+    );
+    for (const row of result.rows as { token: string; muted_themes: string[] }[]) {
+      if (Array.isArray(row.muted_themes) && row.muted_themes.length > 0) {
+        mutedThemesByToken.set(row.token, new Set(row.muted_themes));
       }
     }
-    logger.info({ count: rows.length }, "muted-themes: loaded from DB");
+    logger.info({ count: result.rows.length }, "muted-themes: loaded from DB");
   } catch (err) {
-    logger.warn({ err }, "muted-themes: DB load failed, falling back to /tmp cache");
+    logger.warn({ err }, "muted-themes: DB load failed, using /tmp cache only");
   }
 }
 

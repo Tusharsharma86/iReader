@@ -2532,8 +2532,17 @@ async function notifyOnNewClusters(
     return;
   }
 
-  // Fetch all opted-in users once.
-  const allPrefs = await db.select().from(notificationPrefsTable);
+  // Fetch all opted-in users once. Select only the columns this function needs
+  // so a schema migration adding new columns never breaks the notification flow.
+  const allPrefs = await db.select({
+    token: notificationPrefsTable.token,
+    breakingEnabled: notificationPrefsTable.breakingEnabled,
+    aiFeedEnabled: notificationPrefsTable.aiFeedEnabled,
+    topicsEnabled: notificationPrefsTable.topicsEnabled,
+    topicsKeywords: notificationPrefsTable.topicsKeywords,
+    favSourcesEnabled: notificationPrefsTable.favSourcesEnabled,
+    favSources: notificationPrefsTable.favSources,
+  }).from(notificationPrefsTable);
   if (allPrefs.length === 0) return;
 
   const breakingTokens = allPrefs

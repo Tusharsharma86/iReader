@@ -212,7 +212,17 @@ const digestTickHandler = async (_req: import("express").Request, res: import("e
       const minuteNow = now.getUTCMinutes();
       const cutoff = new Date(now.getTime() - 11 * 60 * 60 * 1000);
 
-      const allPrefs = await db.select().from(notificationPrefsTable);
+      const allPrefs = await db.select({
+        token: notificationPrefsTable.token,
+        digestEnabled: notificationPrefsTable.digestEnabled,
+        digestHour: notificationPrefsTable.digestHour,
+        digestMinute: notificationPrefsTable.digestMinute,
+        lastDigestSentAt: notificationPrefsTable.lastDigestSentAt,
+        digestEveningEnabled: notificationPrefsTable.digestEveningEnabled,
+        digestEveningHour: notificationPrefsTable.digestEveningHour,
+        digestEveningMinute: notificationPrefsTable.digestEveningMinute,
+        lastDigestEveningSentAt: notificationPrefsTable.lastDigestEveningSentAt,
+      }).from(notificationPrefsTable);
       const morningDue = allPrefs.filter(
         (p) =>
           p.digestEnabled &&
@@ -280,12 +290,17 @@ router.get("/digest-tick", digestTickHandler);
 router.get("/stats", async (req, res) => {
   try {
     const tokens = await db.select().from(pushTokensTable);
-    const prefs = await db.select().from(notificationPrefsTable);
+    const prefs = await db.select({
+      breakingEnabled: notificationPrefsTable.breakingEnabled,
+      aiFeedEnabled: notificationPrefsTable.aiFeedEnabled,
+      topicsEnabled: notificationPrefsTable.topicsEnabled,
+      digestEnabled: notificationPrefsTable.digestEnabled,
+    }).from(notificationPrefsTable);
     res.json({
       tokens: tokens.length,
       prefs: prefs.length,
       breakingEnabled: prefs.filter((p) => p.breakingEnabled).length,
-      aiFeedEnabled: prefs.filter((p) => (p as { aiFeedEnabled?: boolean }).aiFeedEnabled).length,
+      aiFeedEnabled: prefs.filter((p) => p.aiFeedEnabled).length,
       topicsEnabled: prefs.filter((p) => p.topicsEnabled).length,
       digestEnabled: prefs.filter((p) => p.digestEnabled).length,
     });
@@ -307,7 +322,10 @@ const testPushHandler = async (req: import("express").Request, res: import("expr
       if (only) {
         tokens = [only];
       } else {
-        const prefs = await db.select().from(notificationPrefsTable);
+        const prefs = await db.select({
+          token: notificationPrefsTable.token,
+          breakingEnabled: notificationPrefsTable.breakingEnabled,
+        }).from(notificationPrefsTable);
         tokens = prefs.filter((p) => p.breakingEnabled).map((p) => p.token);
       }
       if (tokens.length === 0) return;

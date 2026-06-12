@@ -262,7 +262,6 @@ type RssSource = {
 const TECH_RSS_SOURCES: RssSource[] = [
   { id: "techcrunch",   name: "TechCrunch",       url: "https://techcrunch.com/feed/" },
   { id: "theverge",     name: "The Verge",         url: "https://www.theverge.com/rss/index.xml" },
-  { id: "arstechnica",  name: "Ars Technica",      url: "https://feeds.arstechnica.com/arstechnica/index" },
   { id: "wired",        name: "Wired",             url: "https://www.wired.com/feed/rss" },
   { id: "9to5google",   name: "9to5Google",        url: "https://9to5google.com/feed/" },
   { id: "9to5mac",      name: "9to5Mac",           url: "https://9to5mac.com/feed/" },
@@ -270,7 +269,6 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "venturebeat",  name: "VentureBeat",       url: "https://venturebeat.com/feed/" },
   { id: "thenextweb",   name: "The Next Web",      url: "https://thenextweb.com/feed/" },
   { id: "hackernews",   name: "Hacker News",       url: "https://hnrss.org/frontpage" },
-  { id: "mittech",      name: "MIT Tech Review",   url: "https://www.technologyreview.com/feed/" },
   { id: "scrollin",     name: "Scroll.in",         url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
   // IE direct URLs → 403 from Render IPs; FeedBurner proxy works (IE Tech section, 200 items)
   { id: "ie-tech",      name: "Indian Express",    url: "https://feeds.feedburner.com/indianexpress" },
@@ -281,8 +279,6 @@ const TECH_RSS_SOURCES: RssSource[] = [
 // IE / News18 / Firstpost / MoneyControl all return HTTP 403 from Render's
 // datacenter IP range. IE only works via FeedBurner proxy (Tech section only).
 const INDIA_POLITICS_RSS_SOURCES: RssSource[] = [
-  { id: "ndtv-india",   name: "NDTV",        url: "https://feeds.feedburner.com/ndtvnews-india-news" },
-  { id: "ndtv-latest",  name: "NDTV",        url: "https://feeds.feedburner.com/ndtvnews-latest" },
   { id: "indiatoday",   name: "India Today", url: "https://www.indiatoday.in/rss/home" },
   { id: "theprint-ind", name: "The Print",   url: "https://theprint.in/category/india/feed/" },
   { id: "theprint-pol", name: "The Print",   url: "https://theprint.in/category/politics/feed/" },
@@ -307,7 +303,6 @@ const GEOPOLITICS_RSS_SOURCES: RssSource[] = [
   { id: "bbc-world",    name: "BBC World",   url: "https://feeds.bbci.co.uk/news/world/rss.xml" },
   { id: "guardian-wld", name: "The Guardian", url: "https://www.theguardian.com/world/rss" },
   { id: "aljazeera",    name: "Al Jazeera",  url: "https://www.aljazeera.com/xml/rss/all.xml" },
-  { id: "nyt-world",    name: "NYT World",   url: "https://rss.nytimes.com/services/xml/rss/nyt/World.xml" },
   { id: "npr-world",    name: "NPR World",   url: "https://feeds.npr.org/1004/rss.xml" },
   { id: "theprint-wld", name: "The Print",       url: "https://theprint.in/category/world/feed/" },
   { id: "ht-world",     name: "Hindustan Times", url: "https://www.hindustantimes.com/feeds/rss/world-news/rssfeed.xml" },
@@ -387,15 +382,6 @@ function isSportsOrEntertainment(article: NewsDataArticle): boolean {
     || EXTRA_SPORTS_RE.test(text);
 }
 
-// NYT's recurring "Here's the Latest" live-briefing roundup is a placeholder,
-// not a story — drop it at the source so it never reaches web or app feeds.
-function isJunkRoundup(article: NewsDataArticle): boolean {
-  const title = (article.title ?? "").toLowerCase();
-  if (!/here.?s the latest|here are the latest/.test(title)) return false;
-  const domain = article.link ? articleDomain(article.link) : "";
-  const src = (article.source_id ?? "").toLowerCase();
-  return /nyt|nytimes|new york times/.test(domain) || /nyt|nytimes|new york times/.test(src);
-}
 
 function matchesTopic(article: NewsDataArticle, topic: string): boolean {
   const kws = TOPIC_KEYWORDS[topic];
@@ -533,7 +519,6 @@ async function fetchIndianFeeds(topic: string): Promise<NewsDataArticle[]> {
   }
   const filtered = articles
     .filter(a => !isSportsOrEntertainment(a))
-    .filter(a => !isJunkRoundup(a))
     .filter(a => matchesTopic(a, topic));
 
   filtered.sort((a, b) => {
@@ -877,7 +862,7 @@ async function getOgImageCached(articleUrl: string): Promise<string | null> {
   return url;
 }
 
-const PREFERRED_SOURCES = new Set(["techcrunch", "theverge", "arstechnica"]);
+const PREFERRED_SOURCES = new Set(["techcrunch", "theverge"]);
 const SIXTY_HOURS_MS = 60 * 60 * 60 * 1000;
 const FORTY_HOURS_MS = SIXTY_HOURS_MS; // alias kept for tech feed usage
 
@@ -904,8 +889,7 @@ async function fetchTechRss(): Promise<NewsDataArticle[]> {
   // and indian-feeds paths). Without this Tech leaked phone-discount, Steam
   // Frame promos, celebrity items into the feed.
   const filtered = articles
-    .filter(a => !isSportsOrEntertainment(a))
-    .filter(a => !isJunkRoundup(a));
+    .filter(a => !isSportsOrEntertainment(a));
   const top = filtered.slice(0, 500); // tech pool ceiling
 
   await enrichMissingImages(top);
@@ -1899,10 +1883,7 @@ const MAINSTREAM_HOSTS = [
   "bbc",
   "apnews",
   "ap.org",
-  "nytimes",
   "cnn",
-  "wsj",
-  "bloomberg",
   "guardian",
   "washingtonpost",
   "financialexpress.com",
@@ -1912,7 +1893,6 @@ const MAINSTREAM_HOSTS = [
 const TECH_HOSTS = [
   "techcrunch",
   "theverge",
-  "arstechnica",
   "wired",
   "engadget",
   "9to5mac",
@@ -2127,7 +2107,6 @@ async function buildBreakingFeed(): Promise<FeedItem[]> {
   // Hard-filter: remove sports/entertainment and gadget-deal noise
   const filtered = raw
     .filter(a => !isSportsOrEntertainment(a))
-    .filter(a => !isJunkRoundup(a))
     .filter(a => {
       const text = `${a.title ?? ""} ${a.description ?? ""}`;
       return !BREAKING_LOWPRIORITY_RE.test(text);
@@ -3317,19 +3296,8 @@ async function tryWordPressJson(
 
 // Build an AMP URL for publishers known to block datacenter IPs on their main
 // site but serve AMP pages via the AMP CDN without IP restrictions.
-function toAmpUrl(url: string): string | null {
-  try {
-    const u = new URL(url);
-    const host = u.hostname.replace(/^www\./, "");
-    if (host === "ndtv.com") {
-      // NDTV AMP: replace www.ndtv.com with amp.ndtv.com
-      u.hostname = "amp.ndtv.com";
-      return u.href;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+function toAmpUrl(_url: string): string | null {
+  return null;
 }
 
 async function extractArticle(url: string): Promise<ArticleResult> {

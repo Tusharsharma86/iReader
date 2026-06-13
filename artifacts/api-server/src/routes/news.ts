@@ -2888,6 +2888,70 @@ router.get("/ai-usage", (_req, res) => {
   res.json({ day: aiUsageDay, totalTokens, models, note: "In-memory; resets on server restart. Limits are free-tier TPD (approx)." });
 });
 
+const questionsCache = new Map<string, { questions: { text: string; accent: string }[]; ts: number }>();
+const QUESTIONS_TTL_MS = 30 * 60 * 1000;
+
+const Q_ACCENTS = ['#9b7cff', '#5b9fef', '#34c468', '#ff9a00', '#ff6b6b'];
+
+router.get("/questions", async (req, res) => {
+  const now = Date.now();
+  const hit = questionsCache.get('v1');
+  if (hit && now - hit.ts < QUESTIONS_TTL_MS) {
+    res.json({ questions: hit.questions, cached: true }); return;
+  }
+  try {
+    const breakingEntry = cache.get('breaking');
+    if (!breakingEntry?.data?.length) { res.json({ questions: [], cached: false }); return; }
+    const headlines = breakingEntry.data.slice(0, 12).map((item: any) =>
+      item.clusterLabel || item.headline || item.articles?.[0]?.headline || ''
+    ).filter(Boolean).slice(0, 10).join('\n');
+
+    const prompt = `You are a curious, intelligent reader. Based on these current news headlines, generate exactly 5 probing questions that a smart person would genuinely want answered. Be specific — not "What is happening?" but "Why is Iran rushing to sign now?". Return JSON only:
+{"questions":["<specific question>","<specific question>","<specific question>","<specific question>","<specific question>"]}
+
+Headlines:
+${headlines}`;
+
+    const raw = await callGroq(prompt, 400, { model: GROQ_MODEL_FAST, task: 'questions', jsonMode: true });
+    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim()) as { questions?: string[] };
+    const qs = (parsed.questions ?? []).filter((q): q is string => typeof q === 'string' && q.length > 0).slice(0, 5);
+    const result = qs.map((text, i) => ({ text, accent: Q_ACCENTS[i % Q_ACCENTS.length] }));
+    if (result.length > 0) questionsCache.set('v1', { questions: result, ts: now });
+    res.json({ questions: result, cached: false });
+  } catch (err) {
+    req.log?.error?.({ err }, 'questions failed');
+    res.json({ questions: [], error: true });
+  }
+});
+
+router.get("/qa", async (req, res) => {
+  const q = String(req.query['q'] ?? '').trim();
+  if (!q) { res.status(400).json({ error: 'q required' }); return; }
+  try {
+    const breakingEntry = cache.get('breaking');
+    const context = (breakingEntry?.data ?? []).slice(0, 8).map((item: any) => {
+      const h = item.clusterLabel || item.headline || item.articles?.[0]?.headline || '';
+      const s = item.summary || item.articles?.[0]?.summary || '';
+      return `${h}. ${s}`;
+    }).join('\n\n').slice(0, 1800);
+
+    const prompt = `You are a concise news analyst. Answer the question based on recent news. Be direct and specific. 80-120 words max.
+
+Question: ${q}
+
+Recent news context:
+${context}
+
+Answer:`;
+
+    const answer = await callGroq(prompt, 220, { model: GROQ_MODEL_FAST, task: 'qa' });
+    res.json({ answer: answer.trim() });
+  } catch (err) {
+    req.log?.error?.({ err }, 'qa failed');
+    res.status(502).json({ error: 'AI unavailable' });
+  }
+});
+
 router.get("/feed", async (req, res) => {
   const topic = String(req.query["topic"] ?? "top").toLowerCase();
   const refresh = req.query["refresh"] === "1";

@@ -2213,8 +2213,9 @@ GROUPING RULES (strict — read carefully):
 - 4-8 groups maximum.
 - Stories that don't fit any cluster go into "Other".
 
-HEADLINE STYLE — write each label as a proper news headline, not a section title:
-- 6-12 words. Sentence case (capitalise first word + proper nouns only).
+HEADLINE STYLE — write each label as a COMPLETE news headline, not a section title:
+- 8-14 words. Sentence case (capitalise first word + proper nouns only).
+- Must be a COMPLETE grammatical sentence — never cut off mid-thought.
 - Tell the reader WHAT HAPPENED or WHAT IS HAPPENING. Use an active verb.
 - Include the key entity AND the action/outcome: "Delhi hotel fire kills three, CM honours rescue workers" not "Delhi: 3 members".
 - Be specific: named parties, exact stakes, key outcome. No filler words.
@@ -3613,8 +3614,9 @@ GROUPING RULES (strict):
 - 3-7 groups maximum.
 - Singletons → "Other".
 
-HEADLINE STYLE — write each label as a proper news headline, not a section title:
-- 6-12 words. Sentence case (capitalise first word + proper nouns only).
+HEADLINE STYLE — write each label as a COMPLETE news headline, not a section title:
+- 8-14 words. Sentence case (capitalise first word + proper nouns only).
+- Must be a COMPLETE grammatical sentence — never cut off mid-thought.
 - Tell the reader WHAT HAPPENED or WHAT IS HAPPENING. Use an active verb.
 - Include the key entity AND the action/outcome: "Delhi hotel fire kills three, CM honours rescue workers" not "Delhi: 3 members".
 - Be specific: named parties, exact stakes, key outcome. No filler words.

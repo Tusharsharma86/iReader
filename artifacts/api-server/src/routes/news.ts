@@ -3848,13 +3848,59 @@ async function fetchArticleText(u: string): Promise<string> {
   }
 }
 
+// ── Confidence scoring helpers ───────────────────────────────────────────────
+// Tier-1: gold-standard wire services / major nationals.
+// Tier-2: reputable regional / sector outlets.
+const TRUSTED_T1 = new Set([
+  'reuters.com','bloomberg.com','apnews.com','bbc.co.uk','bbc.com',
+  'nytimes.com','theguardian.com','ft.com','wsj.com','economist.com',
+  'washingtonpost.com','ap.org',
+]);
+const TRUSTED_T2 = new Set([
+  'thehindu.com','indianexpress.com','hindustantimes.com','ndtv.com',
+  'economictimes.indiatimes.com','livemint.com','theprint.in','scroll.in',
+  'cnbc.com','cnn.com','aljazeera.com','npr.org','techcrunch.com',
+  'theverge.com','arstechnica.com','wired.com','forbes.com','time.com',
+]);
+
+function credibilityScore(urls: string[]): number {
+  for (const u of urls) {
+    try {
+      const host = new URL(u).hostname.replace(/^www\./, '');
+      if (TRUSTED_T1.has(host)) return 1.0;
+    } catch {}
+  }
+  let t2 = 0;
+  for (const u of urls) {
+    try {
+      const host = new URL(u).hostname.replace(/^www\./, '');
+      if (TRUSTED_T2.has(host)) t2++;
+    } catch {}
+  }
+  if (t2 >= 2) return 0.8;
+  if (t2 === 1) return 0.55;
+  return 0.25; // unknown sources
+}
+
+function ageScore(publishedAt?: string): number {
+  if (!publishedAt) return 0.5;
+  const ageHrs = (Date.now() - new Date(publishedAt).getTime()) / 3_600_000;
+  if (ageHrs < 0.5) return 0.1;   // < 30 min: still breaking, few cross-checks
+  if (ageHrs < 1)   return 0.3;
+  if (ageHrs < 3)   return 0.6;
+  if (ageHrs < 6)   return 0.8;
+  if (ageHrs < 12)  return 0.95;
+  return 1.0;                       // 12 h+: well-corroborated
+}
+
 router.post("/deepdive", async (req, res) => {
-  const { url, headline, paragraphs, sourceUrls, depth: rawDepth } = req.body as {
+  const { url, headline, paragraphs, sourceUrls, depth: rawDepth, publishedAt } = req.body as {
     url?: string;
     headline?: string;
     paragraphs?: string[];
     sourceUrls?: string[];
     depth?: 'quick' | 'standard' | 'deep';
+    publishedAt?: string;
   };
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
@@ -3863,8 +3909,8 @@ router.post("/deepdive", async (req, res) => {
   const depth: 'quick' | 'standard' | 'deep' =
     rawDepth === 'quick' || rawDepth === 'deep' ? rawDepth : 'standard';
 
-  // v11 — objective confidence (grounding + diversity), no AI self-assessment
-  const cacheKey = `deepdive:v11:${depth}:${url}`;
+  // v12 — 4-signal confidence: grounding + credibility + diversity + age
+  const cacheKey = `deepdive:v12:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -4026,13 +4072,16 @@ ${depth === 'quick'
       : storySections.map((s) => s.body).join("\n\n");
 
     const articlesRead = fetched.filter((f) => f.body.length > 200).length;
-    // Objective confidence: grounding ratio (70%) + source diversity (30%).
-    // Grounding = fraction of URLs that returned full article text (>200 chars).
-    // Diversity = how many distinct sources were attempted (capped at 5).
-    // AI self-assessment removed — it always returned ~80, giving a flat 88%.
-    const groundingScore = urlsToRead.length > 0 ? (articlesRead / urlsToRead.length) * 70 : 0;
-    const diversityScore = Math.min(urlsToRead.length, 5) / 5 * 30;
-    const confidence = Math.round(groundingScore + diversityScore);
+    // 4-signal confidence score (0-100):
+    //   40% grounding    — fraction of source URLs where full text was fetched
+    //   20% credibility  — tier-1/tier-2 source presence (Reuters, BBC, etc.)
+    //   20% diversity    — distinct source count (capped at 5)
+    //   20% age          — older stories have had time to be cross-verified
+    const grounding   = urlsToRead.length > 0 ? (articlesRead / urlsToRead.length) : 0;
+    const diversity   = Math.min(urlsToRead.length, 5) / 5;
+    const credibility = credibilityScore(urlsToRead);
+    const age         = ageScore(publishedAt);
+    const confidence  = Math.round(grounding * 40 + credibility * 20 + diversity * 20 + age * 20);
     const result: DeepDiveResult = {
       at: Date.now(),
       tldr: flatTldr,

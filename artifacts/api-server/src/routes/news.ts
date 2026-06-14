@@ -3863,8 +3863,8 @@ router.post("/deepdive", async (req, res) => {
   const depth: 'quick' | 'standard' | 'deep' =
     rawDepth === 'quick' || rawDepth === 'deep' ? rawDepth : 'standard';
 
-  // v10 — includes confidence score in result
-  const cacheKey = `deepdive:v10:${depth}:${url}`;
+  // v11 — objective confidence (grounding + diversity), no AI self-assessment
+  const cacheKey = `deepdive:v11:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -3935,8 +3935,7 @@ router.post("/deepdive", async (req, res) => {
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
   "keyPeople": ["..."],                                // named individuals mentioned (full names). May be empty if none.
   "keyCompanies": ["..."],                             // organisations, companies, agencies, political parties. May be empty.
-  "topics": ["..."],                                   // broader topics / themes (e.g. "Monetary Policy", "AI Safety"). 3-6 items.
-  "confidence": 72                                     // integer 0-100. Honest self-assessment: how well do the sources support this analysis? 90+ = multiple corroborating full articles with rich detail; 70 = adequate sourcing, main facts covered; 50 = mostly summaries or single source; below 50 = thin coverage, speculation likely. Be calibrated, not inflated.
+  "topics": ["..."]                                    // broader topics / themes (e.g. "Monetary Policy", "AI Safety"). 3-6 items.
 }
 
 Headline: ${headline ?? "(no headline)"}
@@ -4027,13 +4026,13 @@ ${depth === 'quick'
       : storySections.map((s) => s.body).join("\n\n");
 
     const articlesRead = fetched.filter((f) => f.body.length > 200).length;
-    // Blend AI self-assessment (60%) with objective grounding ratio (40%).
-    // Grounding = fraction of source URLs that returned full article text.
-    const aiConf = typeof (parsed as Record<string, unknown>).confidence === "number"
-      ? Math.max(0, Math.min(100, Math.round((parsed as Record<string, unknown>).confidence as number)))
-      : 70;
-    const groundingPct = urlsToRead.length > 0 ? (articlesRead / urlsToRead.length) * 100 : 50;
-    const confidence = Math.round(aiConf * 0.6 + groundingPct * 0.4);
+    // Objective confidence: grounding ratio (70%) + source diversity (30%).
+    // Grounding = fraction of URLs that returned full article text (>200 chars).
+    // Diversity = how many distinct sources were attempted (capped at 5).
+    // AI self-assessment removed — it always returned ~80, giving a flat 88%.
+    const groundingScore = urlsToRead.length > 0 ? (articlesRead / urlsToRead.length) * 70 : 0;
+    const diversityScore = Math.min(urlsToRead.length, 5) / 5 * 30;
+    const confidence = Math.round(groundingScore + diversityScore);
     const result: DeepDiveResult = {
       at: Date.now(),
       tldr: flatTldr,

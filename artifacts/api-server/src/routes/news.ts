@@ -3827,6 +3827,7 @@ interface DeepDiveResult {
   topics: string[];
   articlesRead: number;
   articlesAttempted: number;
+  confidence: number;
 }
 const deepDiveCache = new Map<string, DeepDiveResult>();
 const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -3860,9 +3861,8 @@ router.post("/deepdive", async (req, res) => {
   const depth: 'quick' | 'standard' | 'deep' =
     rawDepth === 'quick' || rawDepth === 'deep' ? rawDepth : 'standard';
 
-  // v9 — cache key includes depth so quick/standard/deep yield distinct
-  // cached responses.
-  const cacheKey = `deepdive:v9:${depth}:${url}`;
+  // v10 — includes confidence score in result
+  const cacheKey = `deepdive:v10:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -3933,7 +3933,8 @@ router.post("/deepdive", async (req, res) => {
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
   "keyPeople": ["..."],                                // named individuals mentioned (full names). May be empty if none.
   "keyCompanies": ["..."],                             // organisations, companies, agencies, political parties. May be empty.
-  "topics": ["..."]                                    // broader topics / themes (e.g. "Monetary Policy", "AI Safety"). 3-6 items.
+  "topics": ["..."],                                   // broader topics / themes (e.g. "Monetary Policy", "AI Safety"). 3-6 items.
+  "confidence": 72                                     // integer 0-100. Honest self-assessment: how well do the sources support this analysis? 90+ = multiple corroborating full articles with rich detail; 70 = adequate sourcing, main facts covered; 50 = mostly summaries or single source; below 50 = thin coverage, speculation likely. Be calibrated, not inflated.
 }
 
 Headline: ${headline ?? "(no headline)"}
@@ -4024,6 +4025,13 @@ ${depth === 'quick'
       : storySections.map((s) => s.body).join("\n\n");
 
     const articlesRead = fetched.filter((f) => f.body.length > 200).length;
+    // Blend AI self-assessment (60%) with objective grounding ratio (40%).
+    // Grounding = fraction of source URLs that returned full article text.
+    const aiConf = typeof (parsed as Record<string, unknown>).confidence === "number"
+      ? Math.max(0, Math.min(100, Math.round((parsed as Record<string, unknown>).confidence as number)))
+      : 70;
+    const groundingPct = urlsToRead.length > 0 ? (articlesRead / urlsToRead.length) * 100 : 50;
+    const confidence = Math.round(aiConf * 0.6 + groundingPct * 0.4);
     const result: DeepDiveResult = {
       at: Date.now(),
       tldr: flatTldr,
@@ -4038,6 +4046,7 @@ ${depth === 'quick'
       topics: Array.isArray(parsed.topics) ? parsed.topics.slice(0, 8).map(String) : [],
       articlesRead,
       articlesAttempted: urlsToRead.length,
+      confidence,
     };
 
     // Return whatever we got — even partial data is useful. Only fail on total emptiness.

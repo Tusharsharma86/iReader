@@ -847,7 +847,7 @@ async function fetchCategoryRss(
 }
 
 const ogImageCache = new Map<string, { url: string | null; ts: number }>();
-const OG_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const OG_CACHE_TTL_MS = 90 * 60 * 1000;
 const OG_NULL_CACHE_TTL_MS = 5 * 60 * 1000; // retry failed lookups after 5 min
 
 async function getOgImageCached(articleUrl: string): Promise<string | null> {
@@ -1419,7 +1419,7 @@ ${lines}`;
     const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : ""));
     if (label || summary) clusterEnrichCache.set(sig, { label, summary, at: Date.now() });
   } catch {
-    enrichPausedUntil = Date.now() + 15 * 60 * 1000;
+    enrichPausedUntil = Date.now() + 3 * 60 * 1000;
   } finally {
     clusterEnrichInflight.delete(sig);
   }
@@ -1619,7 +1619,7 @@ function detectTheme(a: NewsDataArticle, rules: ThemeRule[]): string | null {
 // Hybrid leftover pass: 8B assigns a theme to keyword-unmatched articles.
 // Throttled per topic + cached by article key (mirrors aiClusterGroups). Lazy:
 // the first build triggers it, later builds use the cached assignment.
-const THEME_ASSIGN_TTL_MS = 90 * 60 * 1000;
+const THEME_ASSIGN_TTL_MS = 24 * 60 * 60 * 1000;
 const themeAssignCache = new Map<string, { at: number; idToTheme: Map<string, string> }>();
 const themeAssignInflight = new Set<string>();
 async function generateThemeAssignments(topic: string, untagged: NewsDataArticle[]): Promise<void> {
@@ -1644,6 +1644,11 @@ Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"Quantum Computing"},{"i"
       const t = (e.t ?? "").trim().replace(/\s+/g, " ").slice(0, 28);
       if (t && t.toLowerCase() !== "none" && t.length >= 2) idToTheme.set(clusterArticleKey(subset[e.i]!), t);
     }
+    // Cap to top 8 themes by article count — prevents 15+ micro-rails that clutter the feed
+    const themeCounts = new Map<string, number>();
+    for (const t of idToTheme.values()) themeCounts.set(t, (themeCounts.get(t) ?? 0) + 1);
+    const top8 = new Set([...themeCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => t));
+    for (const [k, t] of idToTheme.entries()) { if (!top8.has(t)) idToTheme.delete(k); }
     themeAssignCache.set(topic, { at: Date.now(), idToTheme });
   } catch {
     // Keep the last assignment but retry soon (~10 min) rather than waiting the
@@ -2458,9 +2463,10 @@ function storySignature(headline: string): string[] {
 }
 function clusterFingerprint(s: StoryCard): string {
   const sig = storySignature(s.headline ?? "").join("|");
-  // Fall back to the raw headline if it had no significant tokens at all.
   const key = sig || (s.headline ?? "").trim().toLowerCase().slice(0, 200);
-  return createHash("sha256").update(key).digest("hex");
+  // Include publication day so same-topic stories on different days fire independently
+  const day = s.publishedAt ? new Date(s.publishedAt).toISOString().slice(0, 10) : "";
+  return createHash("sha256").update(`${key}|${day}`).digest("hex");
 }
 
 // NOTE: the signature-based clusterFingerprint above already de-dups the

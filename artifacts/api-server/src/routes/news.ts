@@ -3954,9 +3954,13 @@ router.post("/deepdive", async (req, res) => {
     );
     // Cross-article dedup: remove wire-copy sentences reprinted across sources
     const substantiveFetched = fetched.filter((f) => f.body.length > 200);
-    if (substantiveFetched.length > 1) {
-      const dedupedBodies = deduplicateCrossArticle(substantiveFetched.map((f) => f.body));
-      dedupedBodies.forEach((body, i) => { substantiveFetched[i].body = body; });
+    try {
+      if (substantiveFetched.length > 1) {
+        const dedupedBodies = deduplicateCrossArticle(substantiveFetched.map((f) => f.body));
+        dedupedBodies.forEach((body, i) => { substantiveFetched[i].body = body; });
+      }
+    } catch {
+      // dedup failed — proceed with original bodies
     }
 
     const fullArticles = substantiveFetched

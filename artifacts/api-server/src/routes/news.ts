@@ -4,7 +4,7 @@ import { XMLParser } from "fast-xml-parser";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { cleanArticleParagraphs } from "../lib/articleCleaner";
+import { cleanArticleParagraphs, deduplicateCrossArticle } from "../lib/articleCleaner";
 import { getNotifHistoryForToken, getMutedThemesForToken, setMutedThemesForToken } from "../lib/push-sender";
 
 const router: IRouter = Router();
@@ -3452,7 +3452,11 @@ async function getOrFetchArticle(url: string): Promise<ArticleResult> {
       if ((data.paragraphs?.length ?? 0) > 0) {
         // Apply non-AI cleaning pipeline; fall back to raw on any error.
         try {
-          const { paragraphs: cleaned, originalParagraphs } = cleanArticleParagraphs(data.paragraphs);
+          const { paragraphs: cleaned, originalParagraphs } = cleanArticleParagraphs(
+            data.paragraphs,
+            undefined,
+            { headline: data.title },
+          );
           data = { ...data, paragraphs: cleaned, originalParagraphs, deduped: true };
         } catch (_) {
           // cleaning failed — serve raw
@@ -3948,8 +3952,14 @@ router.post("/deepdive", async (req, res) => {
         return { host, body };
       }),
     );
-    const fullArticles = fetched
-      .filter((f) => f.body.length > 200)
+    // Cross-article dedup: remove wire-copy sentences reprinted across sources
+    const substantiveFetched = fetched.filter((f) => f.body.length > 200);
+    if (substantiveFetched.length > 1) {
+      const dedupedBodies = deduplicateCrossArticle(substantiveFetched.map((f) => f.body));
+      dedupedBodies.forEach((body, i) => { substantiveFetched[i].body = body; });
+    }
+
+    const fullArticles = substantiveFetched
       .map((f) => `=== FULL ARTICLE (${f.host}) ===\n${f.body.slice(0, 6000)}`)
       .join("\n\n");
     const summaries = paragraphs.slice(0, 40).join("\n");

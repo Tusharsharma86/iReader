@@ -269,7 +269,6 @@ const TECH_RSS_SOURCES: RssSource[] = [
   { id: "venturebeat",  name: "VentureBeat",       url: "https://venturebeat.com/feed/" },
   { id: "thenextweb",   name: "The Next Web",      url: "https://thenextweb.com/feed/" },
   { id: "hackernews",   name: "Hacker News",       url: "https://hnrss.org/frontpage" },
-  { id: "scrollin",     name: "Scroll.in",         url: "https://feeds.feedburner.com/ScrollinArticles.rss" },
   // IE direct URLs → 403 from Render IPs; FeedBurner proxy works (IE Tech section, 200 items)
   { id: "ie-tech",      name: "Indian Express",    url: "https://feeds.feedburner.com/indianexpress" },
   // Financial Express RSS feeds are dead (410 / returns HTML) — removed

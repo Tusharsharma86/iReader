@@ -1139,14 +1139,18 @@ function feedClusterLabel(articles: NewsDataArticle[]): string {
       if (!seen.has(t)) { seen.add(t); freq[t] = (freq[t] ?? 0) + 1; }
     }
   }
+  // Prefer words shared across 2+ articles, take up to 4 to ensure label is
+  // always at least 2 words (single-word labels fall back to rep title tokens).
   const shared = Object.entries(freq)
     .filter(([, c]) => c >= 2)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 3)
+    .slice(0, 4)
     .map(([w]) => w.charAt(0).toUpperCase() + w.slice(1));
-  if (shared.length > 0) return shared.join(" ");
-  const rep = Array.from(titleTokens(articles[0]?.title ?? "")).slice(0, 3);
-  return rep.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") || "News";
+  if (shared.length >= 2) return shared.join(" ");
+  // Fallback: take first 4 meaningful tokens from representative article title
+  const rep = Array.from(titleTokens(articles[0]?.title ?? "")).slice(0, 4);
+  const repLabel = rep.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  return repLabel || "News Update";
 }
 
 // Turn a headline into a SHORT cluster title (~6-10 words). Strips the
@@ -1172,16 +1176,15 @@ function cleanClusterHeadline(raw: string): string {
   // Drop a trailing subtitle/elaboration clause; keep the lead clause if substantial.
   const lead = t.split(/\s*[:;–—]\s+/)[0]!.trim();
   if (lead.split(/\s+/).length >= 3) t = lead;
-  // Cluster titles want a TIGHT 3-5 word topic label, not a full headline.
-  // Cut at the first natural break (preposition/connective like "to", "of",
-  // "approves", "after"), else hard-cap at 5 words.
+  // Cluster titles want a tight 5-6 word topic label, not a full headline.
+  // Cut at the first natural break (preposition/connective), else hard-cap at 6 words.
   const words = t.split(/\s+/);
-  if (words.length > 5) {
+  if (words.length > 6) {
     const BREAK = new Set([
-      "to","of","for","as","after","amid","while","with","but","over","despite","following","since","because","that","by","in","on","at","from","over","into","says","said","approves","approved","plans","plan","launches","launched","announces","announced","unveils","reveals","reports","reported","files","filed","raises","raised","secures","secured","aims","seeks","wants",
+      "to","of","for","as","after","amid","while","with","but","over","despite","following","since","because","that","by","in","on","at","from","into","says","said","approves","approved","plans","plan","launches","launched","announces","announced","unveils","reveals","reports","reported","files","filed","raises","raised","secures","secured","aims","seeks","wants",
     ]);
-    let cut = 5;
-    for (let i = 3; i <= Math.min(words.length - 1, 5); i++) {
+    let cut = 6;
+    for (let i = 4; i <= Math.min(words.length - 1, 6); i++) {
       const w = words[i]!.toLowerCase().replace(/[^a-z]/g, "");
       if (BREAK.has(w)) { cut = i; break; }
     }
@@ -1290,17 +1293,19 @@ function splitIncoherent(indices: number[], subset: NewsDataArticle[]): number[]
   const m = indices.length;
   if (m <= 1) return [indices];
   const toks = indices.map(i => titleTokens(subset[i]?.title ?? ""));
-  // Build adjacency graph: edge i↔j iff they share >=2 title tokens.
+  // Build adjacency graph: edge i↔j iff they share >=3 title tokens.
+  // Raised from 2 to prevent loosely-related articles (sharing only "iPhone"
+  // or "Apple") from staying in the same cluster.
   const adj: number[][] = Array.from({ length: m }, () => []);
   for (let i = 0; i < m; i++) {
     for (let j = i + 1; j < m; j++) {
       let shared = 0;
       for (const t of toks[i]!) if (toks[j]!.has(t)) shared++;
-      if (shared >= 2) { adj[i]!.push(j); adj[j]!.push(i); }
+      if (shared >= 3) { adj[i]!.push(j); adj[j]!.push(i); }
     }
   }
-  // For groups of 4+, require each member to have >=2 strong neighbours; for
-  // smaller groups, >=1 suffices (don't over-split tiny clusters).
+  // Require each member to have >=2 strong neighbours in groups of 4+,
+  // >=1 in smaller groups.
   const minDeg = m >= 4 ? 2 : 1;
   const keep = (i: number) => adj[i]!.length >= minDeg;
   // Build groups: BFS connected components among kept members only. Members
@@ -1402,7 +1407,7 @@ async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Pr
   try {
     const lines = ga.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`).join("\n");
     const prompt = `These news articles all cover the SAME story. Return JSON ONLY (no markdown):
-{"label":"a TIGHT 3-5 word Title Case topic label naming the event, leading with the key entity (e.g. \"Trump Iran War Vote\", \"AVI Polymers Bonus Issue\", \"Israel-Lebanon Ceasefire Deal\"). NOT a full sentence, NOT an article headline — a category-style label.","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
+{"label":"EXACTLY 5-6 words, Title Case, naming the event — lead with the key entity then the action (e.g. \"Trump Iran War Powers Vote\", \"Apple Vision Pro Sales Drop\", \"Israel Lebanon Ceasefire Deal Signed\"). HARD RULE: count the words, must be 5 or 6. NOT a full sentence, NOT an article headline.","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
 
 ${lines}`;
     // Gated — un-gating caused 92% 429s when a feed build fired ~60 enrich calls

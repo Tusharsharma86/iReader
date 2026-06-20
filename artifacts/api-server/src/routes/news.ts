@@ -3969,11 +3969,15 @@ router.post("/deepdive", async (req, res) => {
       .map((f) => `=== FULL ARTICLE (${f.host}) ===\n${f.body.slice(0, 6000)}`)
       .join("\n\n");
     const summaries = paragraphs.slice(0, 40).join("\n");
+    const sourceCount = fetched.filter(f => f.body.length > 200).length;
     const text = (
       fullArticles.length > 200
-        ? `You have the FULL text of ${fetched.filter(f => f.body.length > 200).length} source article(s) covering the SAME story, plus short summaries from any sources that couldn't be fetched. Read them ALL.\n\n${fullArticles}\n\n=== OTHER SOURCE SUMMARIES ===\n${summaries}`
+        ? `You have the FULL text of ${sourceCount} source article(s) covering the SAME story, plus short summaries from any sources that couldn't be fetched. Read them ALL.\n\n${fullArticles}\n\n=== OTHER SOURCE SUMMARIES ===\n${summaries}`
         : summaries
     ).slice(0, 14000);
+    const diffAnglesInstruction = sourceCount <= 1
+      ? `"DIFFERENT ANGLES"  — ONLY analyse the FRAMING and TONE of the single source and the key questions it leaves UNANSWERED. CRITICAL: do NOT mention or imply "various outlets", "different sources", "covered differently by outlets", or suggest multiple sources exist. There is only ONE source — write accordingly.`
+      : `"DIFFERENT ANGLES"  — ONLY a META-COMMENTARY on the COVERAGE itself — do NOT restate story facts here. Contrast what each named outlet EMPHASISES, frames, or omits (e.g. "Reuters leads on the financial penalty; the BBC frames it as legal precedent; Indian outlets centre the Indian victims"). If all excerpts are one outlet/very similar, instead analyse the framing/tone used and the key questions left UNANSWERED.`;
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
@@ -3987,7 +3991,7 @@ router.post("/deepdive", async (req, res) => {
     // Each section has a STRICT, NON-OVERLAPPING scope:
     //   1. "WHAT HAPPENED"     — ONLY the single core event in 2-3 sentences: who did what, the headline outcome. No numbers-dump, no background, no consequences. The spine, nothing else.
     //   2. "THE DETAILS"       — ONLY concrete specifics NOT in section 1: exact figures, dates, the sequence of events, names/titles, locations, the mechanism/how. Pure factual texture. No consequences, no framing.
-    //   3. "DIFFERENT ANGLES"  — ONLY a META-COMMENTARY on the COVERAGE itself — do NOT restate story facts here. Contrast what each named outlet EMPHASISES, frames, or omits (e.g. "Reuters leads on the financial penalty; the BBC frames it as legal precedent; Indian outlets centre the Indian victims"). If all excerpts are one outlet/very similar, instead analyse the framing/tone used and the key questions left UNANSWERED.
+    //   3. ${diffAnglesInstruction}
     //   4. "CONTEXT & BACKGROUND" — ONLY history and the bigger picture: prior events, how we got here, precedent, the pattern this fits, stakes for the wider field. NO restating today's event.
     //   5. "WHAT'S NEXT"       — ONLY the forward look: concrete expected next steps, pending decisions, appeals, timelines, awaited reactions, what to watch. Future tense only; no recap.
     { "heading": "WHAT HAPPENED", "body": "one paragraph" },

@@ -3200,6 +3200,11 @@ function htmlToParagraphs(rawHtmlChunk: string): string[] {
       // Fewer than 1 punctuation mark per 30 words → nav/trending ticker → skip.
       const puncts = (p.match(/[.,;:!?()"]/g) ?? []).length;
       if (words > 20 && puncts < words * 0.033) return false;
+      // Drop headline mashups — long blocks where many capitalised sentences are
+      // jammed together (TOI trending sidebars). Real paragraphs have < 1 new
+      // sentence per 15 words; mashups have a new headline every 5-8 words.
+      const sentenceStarts = (p.match(/\. [A-Z]/g) ?? []).length;
+      if (words > 30 && sentenceStarts / words > 0.06) return false;
       return true;
     })
     .slice(0, 60);
@@ -3861,7 +3866,7 @@ const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 // TOI (and some other Indian publishers) append trending-topic tickers +
 // site-nav dumps after the article body. Truncate at the first occurrence.
 const PUBLISHER_JUNK_STOP_RE =
-  /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b/;
+  /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b|\bCricbuzz\b|\bNewspaper\s+Subscription\b|\bFood\s+News\s+TV\b|\bTimes\s+Life\s+Times\b|\bLifestyle\s+Newspaper\b/;
 
 async function fetchArticleText(u: string): Promise<string> {
   try {

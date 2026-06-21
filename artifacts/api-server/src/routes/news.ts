@@ -847,7 +847,7 @@ async function fetchCategoryRss(
 }
 
 const ogImageCache = new Map<string, { url: string | null; ts: number }>();
-const OG_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const OG_CACHE_TTL_MS = 90 * 60 * 1000;
 const OG_NULL_CACHE_TTL_MS = 5 * 60 * 1000; // retry failed lookups after 5 min
 
 async function getOgImageCached(articleUrl: string): Promise<string | null> {
@@ -1419,7 +1419,7 @@ ${lines}`;
     const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : ""));
     if (label || summary) clusterEnrichCache.set(sig, { label, summary, at: Date.now() });
   } catch {
-    enrichPausedUntil = Date.now() + 15 * 60 * 1000;
+    enrichPausedUntil = Date.now() + 3 * 60 * 1000;
   } finally {
     clusterEnrichInflight.delete(sig);
   }
@@ -1619,7 +1619,7 @@ function detectTheme(a: NewsDataArticle, rules: ThemeRule[]): string | null {
 // Hybrid leftover pass: 8B assigns a theme to keyword-unmatched articles.
 // Throttled per topic + cached by article key (mirrors aiClusterGroups). Lazy:
 // the first build triggers it, later builds use the cached assignment.
-const THEME_ASSIGN_TTL_MS = 90 * 60 * 1000;
+const THEME_ASSIGN_TTL_MS = 24 * 60 * 60 * 1000;
 const themeAssignCache = new Map<string, { at: number; idToTheme: Map<string, string> }>();
 const themeAssignInflight = new Set<string>();
 async function generateThemeAssignments(topic: string, untagged: NewsDataArticle[]): Promise<void> {
@@ -1644,6 +1644,11 @@ Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"Quantum Computing"},{"i"
       const t = (e.t ?? "").trim().replace(/\s+/g, " ").slice(0, 28);
       if (t && t.toLowerCase() !== "none" && t.length >= 2) idToTheme.set(clusterArticleKey(subset[e.i]!), t);
     }
+    // Cap to top 8 themes by article count — prevents 15+ micro-rails that clutter the feed
+    const themeCounts = new Map<string, number>();
+    for (const t of idToTheme.values()) themeCounts.set(t, (themeCounts.get(t) ?? 0) + 1);
+    const top8 = new Set([...themeCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => t));
+    for (const [k, t] of idToTheme.entries()) { if (!top8.has(t)) idToTheme.delete(k); }
     themeAssignCache.set(topic, { at: Date.now(), idToTheme });
   } catch {
     // Keep the last assignment but retry soon (~10 min) rather than waiting the
@@ -2458,9 +2463,10 @@ function storySignature(headline: string): string[] {
 }
 function clusterFingerprint(s: StoryCard): string {
   const sig = storySignature(s.headline ?? "").join("|");
-  // Fall back to the raw headline if it had no significant tokens at all.
   const key = sig || (s.headline ?? "").trim().toLowerCase().slice(0, 200);
-  return createHash("sha256").update(key).digest("hex");
+  // Include publication day so same-topic stories on different days fire independently
+  const day = s.publishedAt ? new Date(s.publishedAt).toISOString().slice(0, 10) : "";
+  return createHash("sha256").update(`${key}|${day}`).digest("hex");
 }
 
 // NOTE: the signature-based clusterFingerprint above already de-dups the
@@ -3967,11 +3973,15 @@ router.post("/deepdive", async (req, res) => {
       .map((f) => `=== FULL ARTICLE (${f.host}) ===\n${f.body.slice(0, 6000)}`)
       .join("\n\n");
     const summaries = paragraphs.slice(0, 40).join("\n");
+    const sourceCount = fetched.filter(f => f.body.length > 200).length;
     const text = (
       fullArticles.length > 200
-        ? `You have the FULL text of ${fetched.filter(f => f.body.length > 200).length} source article(s) covering the SAME story, plus short summaries from any sources that couldn't be fetched. Read them ALL.\n\n${fullArticles}\n\n=== OTHER SOURCE SUMMARIES ===\n${summaries}`
+        ? `You have the FULL text of ${sourceCount} source article(s) covering the SAME story, plus short summaries from any sources that couldn't be fetched. Read them ALL.\n\n${fullArticles}\n\n=== OTHER SOURCE SUMMARIES ===\n${summaries}`
         : summaries
     ).slice(0, 14000);
+    const diffAnglesInstruction = sourceCount <= 1
+      ? `"DIFFERENT ANGLES"  — ONLY analyse the FRAMING and TONE of the single source and the key questions it leaves UNANSWERED. CRITICAL: do NOT mention or imply "various outlets", "different sources", "covered differently by outlets", or suggest multiple sources exist. There is only ONE source — write accordingly.`
+      : `"DIFFERENT ANGLES"  — ONLY a META-COMMENTARY on the COVERAGE itself — do NOT restate story facts here. Contrast what each named outlet EMPHASISES, frames, or omits (e.g. "Reuters leads on the financial penalty; the BBC frames it as legal precedent; Indian outlets centre the Indian victims"). If all excerpts are one outlet/very similar, instead analyse the framing/tone used and the key questions left UNANSWERED.`;
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
@@ -3985,7 +3995,7 @@ router.post("/deepdive", async (req, res) => {
     // Each section has a STRICT, NON-OVERLAPPING scope:
     //   1. "WHAT HAPPENED"     — ONLY the single core event in 2-3 sentences: who did what, the headline outcome. No numbers-dump, no background, no consequences. The spine, nothing else.
     //   2. "THE DETAILS"       — ONLY concrete specifics NOT in section 1: exact figures, dates, the sequence of events, names/titles, locations, the mechanism/how. Pure factual texture. No consequences, no framing.
-    //   3. "DIFFERENT ANGLES"  — ONLY a META-COMMENTARY on the COVERAGE itself — do NOT restate story facts here. Contrast what each named outlet EMPHASISES, frames, or omits (e.g. "Reuters leads on the financial penalty; the BBC frames it as legal precedent; Indian outlets centre the Indian victims"). If all excerpts are one outlet/very similar, instead analyse the framing/tone used and the key questions left UNANSWERED.
+    //   3. ${diffAnglesInstruction}
     //   4. "CONTEXT & BACKGROUND" — ONLY history and the bigger picture: prior events, how we got here, precedent, the pattern this fits, stakes for the wider field. NO restating today's event.
     //   5. "WHAT'S NEXT"       — ONLY the forward look: concrete expected next steps, pending decisions, appeals, timelines, awaited reactions, what to watch. Future tense only; no recap.
     { "heading": "WHAT HAPPENED", "body": "one paragraph" },

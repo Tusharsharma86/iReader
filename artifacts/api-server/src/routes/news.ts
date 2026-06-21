@@ -3191,12 +3191,17 @@ function htmlToParagraphs(rawHtmlChunk: string): string[] {
   return text
     .split(/\n{2,}/)
     .map((p) => p.replace(/\s+/g, " ").trim())
-    .filter(
-      (p) =>
-        p.length > 80 &&
-        p.split(" ").length > 14 &&
-        !BOILERPLATE_RE.test(p),
-    )
+    .filter((p) => {
+      if (p.length <= 80) return false;
+      const words = p.split(" ").length;
+      if (words <= 14) return false;
+      if (BOILERPLATE_RE.test(p)) return false;
+      // Drop tag-cloud / nav dumps — real prose has punctuation; keyword lists don't.
+      // Fewer than 1 punctuation mark per 30 words → nav/trending ticker → skip.
+      const puncts = (p.match(/[.,;:!?()"]/g) ?? []).length;
+      if (words > 20 && puncts < words * 0.033) return false;
+      return true;
+    })
     .slice(0, 60);
 }
 
@@ -3853,12 +3858,20 @@ const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 // Fetch + extract the full readable text of one article. Returns "" on failure
 // (paywall, JS-only page, timeout) so callers can fall back to summaries.
+// TOI (and some other Indian publishers) append trending-topic tickers +
+// site-nav dumps after the article body. Truncate at the first occurrence.
+const PUBLISHER_JUNK_STOP_RE =
+  /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b/;
+
 async function fetchArticleText(u: string): Promise<string> {
   try {
     const html = await fetchArticleHtml(u);
     const { bodyHtml } = extractArticleBody(html);
     let paras = htmlToParagraphs(bodyHtml);
     if (paras.length < 2) paras = htmlToParagraphs(html);
+    // Truncate at publisher navigation/tag-cloud footer
+    const cutIdx = paras.findIndex(p => PUBLISHER_JUNK_STOP_RE.test(p));
+    if (cutIdx > 0) paras = paras.slice(0, cutIdx);
     return paras.join("\n\n").trim();
   } catch {
     return "";

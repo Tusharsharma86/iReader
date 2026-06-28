@@ -1769,18 +1769,13 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       for (const a of ga) singletonArts.push(a);
     }
   }
-  // Top N clusters by score get AI enrichment fired (the user sees these at top).
-  // Beyond that, hero-headline fallback is fine — they're scrolled past.
-  const TOP_ENRICH = 15;
-  const topByScore = new Set(clusterInfos.slice().sort((a, b) => b.score - a.score).slice(0, TOP_ENRICH).map((c) => c.ga));
+  // All clusters get AI enrichment fired. groqBgGate serialises background Groq
+  // calls at 4.5 s intervals so there is no burst — old TOP_ENRICH=15 cap was
+  // added before the gate existed and is no longer needed.
   for (const { ga, score } of clusterInfos) {
     const cards = buildFallbackStories(ga);
     const rep = clusterRepresentative(ga);
-    // Read enrich cache for ALL clusters (free); only FIRE generation for top N.
-    const enrich = topByScore.has(ga) ? clusterEnrichment(ga) : (() => {
-      const c = clusterEnrichCache.get(clusterSignature(ga));
-      return c && Date.now() - c.at < ENRICH_TTL_MS ? { label: c.label, summary: c.summary } : null;
-    })();
+    const enrich = clusterEnrichment(ga);
     const topicTitle = cleanClusterHeadline(enrich?.label || rep.title || "") || feedClusterLabel(ga);
     // AI summary already clampWords25'd at generation. When AI fails / hasn't
     // landed, clamp the article-description fallback to 25 words too so the

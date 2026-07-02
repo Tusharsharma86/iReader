@@ -1398,26 +1398,56 @@ function clampWords25(text: string): string {
 // — Cluster: label + 25-word summary —
 const clusterEnrichCache = new Map<string, { label: string; summary: string; at: number }>();
 const clusterEnrichInflight = new Set<string>();
+// Secondary index: article URL → signature that has a cached label. A cluster's
+// signature churns whenever a new article joins (md5 of top-4 URLs), which used
+// to throw away the AI label and fall back to the raw headline. Overlapping
+// URLs = same story, so reuse the old label under the new signature.
+const clusterEnrichUrlIndex = new Map<string, string>();
 function clusterSignature(ga: NewsDataArticle[]): string {
   const key = ga.slice(0, 4).map((a) => (a.link ? canonicalizeUrl(a.link) : "") || a.title || "").sort().join("|");
   return createHash("md5").update(key).digest("hex");
 }
-async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[]): Promise<void> {
+function clusterUrls(ga: NewsDataArticle[]): string[] {
+  return ga.slice(0, 4).map((a) => (a.link ? canonicalizeUrl(a.link) : "")).filter(Boolean);
+}
+// Cache lookup that survives signature churn: direct hit first, then via any
+// member URL. A URL hit re-aliases the entry under the current signature.
+function getClusterEnrichCached(ga: NewsDataArticle[]): { label: string; summary: string } | null {
+  const sig = clusterSignature(ga);
+  const c = clusterEnrichCache.get(sig);
+  if (c && Date.now() - c.at < ENRICH_TTL_MS) return { label: c.label, summary: c.summary };
+  for (const url of clusterUrls(ga)) {
+    const oldSig = clusterEnrichUrlIndex.get(url);
+    if (!oldSig) continue;
+    const oc = clusterEnrichCache.get(oldSig);
+    if (oc && Date.now() - oc.at < ENRICH_TTL_MS) {
+      clusterEnrichCache.set(sig, oc);
+      for (const u of clusterUrls(ga)) clusterEnrichUrlIndex.set(u, sig);
+      return { label: oc.label, summary: oc.summary };
+    }
+  }
+  return null;
+}
+async function generateClusterEnrichment(sig: string, ga: NewsDataArticle[], foreground = false): Promise<void> {
   try {
     const lines = ga.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 140))}`).join("\n");
     const prompt = `These news articles all cover the SAME story. Return JSON ONLY (no markdown):
 {"label":"EXACTLY 5-6 words, Title Case, naming the event — lead with the key entity then the action (e.g. \"Trump Iran War Powers Vote\", \"Apple Vision Pro Sales Drop\", \"Israel Lebanon Ceasefire Deal Signed\"). HARD RULE: count the words, must be 5 or 6. NOT a full sentence, NOT an article headline.","summary":"ONE neutral sentence, AT MOST 25 words, of what they collectively report — no source names"}
 
 ${lines}`;
-    // Gated — un-gating caused 92% 429s when a feed build fired ~60 enrich calls
-    // at once. With the gate ON + buildMixedFeed only firing for top-N clusters,
-    // volume stays under burst limit and labels actually generate.
-    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich", background: true })).replace(/```json|```/g, "").trim();
+    // Background path stays gated (4.5s serial) so stray fire-and-forget calls
+    // never burst. Feed builds use foreground=true: clusterEnrichmentAwait's
+    // 3-slot concurrency is the burst control there, and waiting 4.5s × N
+    // clusters inside a build defeats the point of awaiting.
+    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich", background: !foreground })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
     const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 110) : "";
     const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : ""));
-    if (label || summary) clusterEnrichCache.set(sig, { label, summary, at: Date.now() });
+    if (label || summary) {
+      clusterEnrichCache.set(sig, { label, summary, at: Date.now() });
+      for (const u of clusterUrls(ga)) clusterEnrichUrlIndex.set(u, sig);
+    }
   } catch {
     enrichPausedUntil = Date.now() + 3 * 60 * 1000;
   } finally {
@@ -1425,9 +1455,9 @@ ${lines}`;
   }
 }
 function clusterEnrichment(ga: NewsDataArticle[]): { label: string; summary: string } | null {
+  const cached = getClusterEnrichCached(ga);
+  if (cached) return cached;
   const sig = clusterSignature(ga);
-  const c = clusterEnrichCache.get(sig);
-  if (c && Date.now() - c.at < ENRICH_TTL_MS) return { label: c.label, summary: c.summary };
   if (Date.now() > enrichPausedUntil && !clusterEnrichInflight.has(sig)) {
     clusterEnrichInflight.add(sig);
     void generateClusterEnrichment(sig, ga);
@@ -1444,17 +1474,17 @@ async function waitForSlot(): Promise<void> {
   while (enrichInflightCount >= 3) await new Promise((r) => setTimeout(r, 120));
 }
 async function clusterEnrichmentAwait(ga: NewsDataArticle[]): Promise<{ label: string; summary: string } | null> {
-  const sig = clusterSignature(ga);
-  const c = clusterEnrichCache.get(sig);
-  if (c && Date.now() - c.at < ENRICH_TTL_MS) return { label: c.label, summary: c.summary };
+  const cached = getClusterEnrichCached(ga);
+  if (cached) return cached;
   if (Date.now() <= enrichPausedUntil) return null;
+  const sig = clusterSignature(ga);
   if (!clusterEnrichInflight.has(sig)) {
     clusterEnrichInflight.add(sig);
     await waitForSlot();
     enrichInflightCount++;
     try {
       await Promise.race([
-        generateClusterEnrichment(sig, ga),
+        generateClusterEnrichment(sig, ga, true),
         new Promise<void>((res) => setTimeout(res, 15000)),
       ]);
     } catch { /* swallow — fall through to cache read */ }
@@ -1738,7 +1768,7 @@ function themeSummary(theme: string, arts: NewsDataArticle[]): string | null {
   return null;
 }
 
-function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic = ""): FeedItem[] {
+async function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic = ""): Promise<FeedItem[]> {
   const now = Date.now();
   const scored: Array<{ item: FeedItem; score: number }> = [];
   const singletonArts: NewsDataArticle[] = []; // one-off articles, grouped into theme collections below
@@ -1769,13 +1799,29 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       for (const a of ga) singletonArts.push(a);
     }
   }
-  // All clusters get AI enrichment fired. groqBgGate serialises background Groq
-  // calls at 4.5 s intervals so there is no burst — old TOP_ENRICH=15 cap was
-  // added before the gate existed and is no longer needed.
-  for (const { ga, score } of clusterInfos) {
+  // AWAIT AI labels so the feed is never cached with raw-headline cluster
+  // titles. Cache hits (incl. URL-index hits after signature churn) are free;
+  // misses call Groq foreground, 3 at a time, under a total build budget.
+  // Whatever misses the budget keeps generating and lands in cache for the
+  // next build — only those clusters fall back to the cleaned headline.
+  const ENRICH_BUILD_BUDGET_MS = 20_000;
+  const enrichDeadline = Date.now() + ENRICH_BUILD_BUDGET_MS;
+  const enrichMap = new Map<number, { label: string; summary: string } | null>();
+  await Promise.all(clusterInfos.map(async ({ ga }, idx) => {
+    const cached = getClusterEnrichCached(ga);
+    if (cached) { enrichMap.set(idx, cached); return; }
+    const remaining = enrichDeadline - Date.now();
+    if (remaining <= 0) { enrichMap.set(idx, clusterEnrichment(ga)); return; }
+    const r = await Promise.race([
+      clusterEnrichmentAwait(ga),
+      new Promise<null>((res) => setTimeout(() => res(null), remaining)),
+    ]);
+    enrichMap.set(idx, r ?? getClusterEnrichCached(ga));
+  }));
+  clusterInfos.forEach(({ ga, score }, idx) => {
     const cards = buildFallbackStories(ga);
     const rep = clusterRepresentative(ga);
-    const enrich = clusterEnrichment(ga);
+    const enrich = enrichMap.get(idx) ?? null;
     const topicTitle = cleanClusterHeadline(enrich?.label || rep.title || "") || feedClusterLabel(ga);
     // AI summary already clampWords25'd at generation. When AI fails / hasn't
     // landed, clamp the article-description fallback to 25 words too so the
@@ -1785,7 +1831,7 @@ function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], topic =
       (enrich?.summary) ||
       clampWords25(naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim()))));
     scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
-  }
+  });
 
   // ── Theme collections (tech / business / markets) ──────────────────────────
   // Group the one-off singletons by company / hot theme into "what's happening

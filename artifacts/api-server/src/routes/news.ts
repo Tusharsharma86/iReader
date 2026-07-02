@@ -2915,6 +2915,7 @@ router.get("/ai-usage", (_req, res) => {
     "theme-summary": "Theme 20-word AI summary",
     "cluster-summary": "Cluster summaries (old)", "cluster-labels": "Cluster labels (For You)",
     "article-summary": "Article summary (5Ws/ELI5)", qna: "Follow-up Q&A",
+    questions: "Suggested questions", qa: "Article Q&A",
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {

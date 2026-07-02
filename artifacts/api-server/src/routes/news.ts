@@ -3845,7 +3845,15 @@ router.post("/ai-summary", async (req, res) => {
   const generate = (async (): Promise<AiSummaryEntry> => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
-    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
+    // Model fallback: if maverick is unavailable on this Groq account/region
+    // (404/400 model errors are non-retryable and would 502 EVERY summary),
+    // retry once on the deep-dive model rather than failing the user's tab.
+    let raw: string;
+    try {
+      raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
+    } catch {
+      raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
+    }
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();

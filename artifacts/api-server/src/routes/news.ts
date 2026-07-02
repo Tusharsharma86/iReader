@@ -14,14 +14,21 @@ const router: IRouter = Router();
 // than Claude, similar quality for structured JSON. ANTHROPIC_API_KEY kept as
 // optional fallback for now (some routes still call Claude until migrated).
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+// Four separate free-tier daily budgets, task class matched to pool size:
+//   scout    500k TPD → Deep Dive (occasional, 6k-token responses)
+//   maverick 500k TPD → article summaries incl. client pre-warm (heaviest volume)
+//   70B      100k TPD → cluster headlines + theme summaries (tiny, quality-critical)
+//   8B       500k TPD → clustering / card summaries / themes / Q&A (mechanical bulk)
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive (flagship) — dedicated daily budget
 const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks (article tools, Q&A) — separate budget
-// Foreground user-facing article summary. 8B is saturated by background feed
-// work (cluster-enrich, theme-assign) which causes 70%+ 429 errors on the
-// burst window. 70B has its own RPM/RPD budget and sits unused, so route the
-// (low-volume, user-initiated) article-summary route here for reliability.
-const GROQ_MODEL_FOREGROUND = "llama-3.3-70b-versatile";
-const GROQ_MODEL_ENRICH = "llama-3.3-70b-versatile"; // feed enrichment: cluster headlines + 25-word summaries — separate budget (~100k/day)
+// Foreground user-facing article summary (Summary/5Ws/ELI5 + pre-warm). Was on
+// 70B, but its 100k TPD ≈ 66 summaries/day — the client-side pre-warm (top 40
+// per session) exhausted that in one or two sessions. Maverick has its own
+// 500k TPD, comparable quality, and nothing else rides it.
+const GROQ_MODEL_FOREGROUND = "meta-llama/llama-4-maverick-17b-128e-instruct";
+// Cluster headlines + theme summaries: ~600 tokens/call, cached 24h (~36k/day)
+// — fits 70B's 100k TPD with room, and headline quality is the whole point.
+const GROQ_MODEL_ENRICH = "llama-3.3-70b-versatile";
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -95,6 +102,7 @@ async function callGroq(
 // per UTC day. In-memory (resets on container cold start) — best-effort gauge.
 const GROQ_TPD_LIMITS: Record<string, number> = {
   "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
+  "meta-llama/llama-4-maverick-17b-128e-instruct": 500000,
   "llama-3.1-8b-instant": 500000,
   "llama-3.3-70b-versatile": 100000,
 };
@@ -1439,7 +1447,7 @@ ${lines}`;
     // never burst. Feed builds use foreground=true: clusterEnrichmentAwait's
     // 3-slot concurrency is the burst control there, and waiting 4.5s × N
     // clusters inside a build defeats the point of awaiting.
-    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_FAST, task: "cluster-enrich", background: !foreground })).replace(/```json|```/g, "").trim();
+    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_ENRICH, task: "cluster-enrich", background: !foreground })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
     const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 110) : "";
@@ -1747,7 +1755,7 @@ async function generateThemeSummary(key: string, theme: string, arts: NewsDataAr
   try {
     const lines = arts.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 100))}`).join("\n");
     const prompt = `These articles all relate to the topic "${theme}" but are DIFFERENT stories. Summarise the current state of "${theme}" coverage in ONE neutral sentence of AT MOST 20 words. Capture WHAT'S HAPPENING ACROSS the stories (multiple angles, recurring entities, key developments) — NOT one story. Return JSON ONLY: {"summary":"..."}\n\n${lines}`;
-    const raw = (await callGroq(prompt, 120, { model: GROQ_MODEL_FAST, task: "theme-summary", background: true })).replace(/```json|```/g, "").trim();
+    const raw = (await callGroq(prompt, 120, { model: GROQ_MODEL_ENRICH, task: "theme-summary", background: true })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { summary?: string }) : {};
     const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : "")).split(/\s+/).slice(0, 20).join(" ");
@@ -2911,13 +2919,16 @@ router.get("/ai-usage", (_req, res) => {
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (flagship)",
-    "llama-3.3-70b-versatile": "Spare (free-tier RPD too low for feed work)",
-    "llama-3.1-8b-instant": "Clustering · headlines · summaries · themes · Q&A",
+    "meta-llama/llama-4-maverick-17b-128e-instruct": "Article summaries + pre-warm",
+    "llama-3.3-70b-versatile": "Cluster headlines · theme summaries",
+    "llama-3.1-8b-instant": "Clustering · card summaries · themes · Q&A",
   };
-  // Always show all three known models (even at 0 usage) so the split is always
-  // visible — 8B does the feed work, Scout is Deep Dive only, 70B is spare.
+  // Always show all known models (even at 0 usage) so the split is always
+  // visible — 8B does mechanical bulk, Maverick does article summaries,
+  // 70B does headlines, Scout is Deep Dive only.
   const KNOWN_MODELS = [
     "meta-llama/llama-4-scout-17b-16e-instruct",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
     "llama-3.1-8b-instant",
     "llama-3.3-70b-versatile",
   ];

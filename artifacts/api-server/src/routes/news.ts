@@ -1478,8 +1478,15 @@ function clusterEnrichment(ga: NewsDataArticle[]): { label: string; summary: str
 // at most 3 in-flight at once to avoid a 429 burst. Falls back to the cleaned
 // hero headline only if Groq paused/errored.
 let enrichInflightCount = 0;
-async function waitForSlot(): Promise<void> {
-  while (enrichInflightCount >= 3) await new Promise((r) => setTimeout(r, 120));
+// Acquire pattern: the count check and increment happen in the same synchronous
+// tick, so N concurrent awaiters can't all pass the check before anyone counts
+// (the old check-then-increment-after-await let a Promise.all of 60 callers all
+// see count=0 and go concurrent — a 429 storm on cold cache).
+async function acquireEnrichSlot(): Promise<void> {
+  for (;;) {
+    if (enrichInflightCount < 3) { enrichInflightCount++; return; }
+    await new Promise((r) => setTimeout(r, 120));
+  }
 }
 async function clusterEnrichmentAwait(ga: NewsDataArticle[]): Promise<{ label: string; summary: string } | null> {
   const cached = getClusterEnrichCached(ga);
@@ -1488,15 +1495,13 @@ async function clusterEnrichmentAwait(ga: NewsDataArticle[]): Promise<{ label: s
   const sig = clusterSignature(ga);
   if (!clusterEnrichInflight.has(sig)) {
     clusterEnrichInflight.add(sig);
-    await waitForSlot();
-    enrichInflightCount++;
+    await acquireEnrichSlot();
+    // Release the slot when the Groq call actually settles — NOT when the 15s
+    // race times out — so real in-flight concurrency stays ≤3 even when slow.
+    const call = generateClusterEnrichment(sig, ga, true).finally(() => { enrichInflightCount--; });
     try {
-      await Promise.race([
-        generateClusterEnrichment(sig, ga, true),
-        new Promise<void>((res) => setTimeout(res, 15000)),
-      ]);
+      await Promise.race([call, new Promise<void>((res) => setTimeout(res, 15000))]);
     } catch { /* swallow — fall through to cache read */ }
-    finally { enrichInflightCount--; }
   }
   const fresh = clusterEnrichCache.get(sig);
   return fresh ? { label: fresh.label, summary: fresh.summary } : null;
@@ -3600,6 +3605,13 @@ router.get("/article/prefetch", (req, res) => {
 type AiSummaryEntry = { at: number; bullets: string[]; summary: string; fiveWs: string[]; eli5: string };
 const aiSummaryCache = new Map<string, AiSummaryEntry>();
 const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
+// Guards for the client pre-warm herd: coalesce identical in-flight requests,
+// cap concurrent Groq generations, and trip a 60s breaker on a 429 so the
+// whole queue backs off instead of retrying into the same rate-limit wall.
+const aiSummaryInflightMap = new Map<string, Promise<AiSummaryEntry>>();
+let aiSummaryActiveCount = 0;
+const AI_SUMMARY_MAX_CONCURRENT = 4;
+let aiSummaryRoutePausedUntil = 0;
 
 type AiSummaryType = "summary" | "fiveWs" | "eli5";
 
@@ -3810,7 +3822,27 @@ router.post("/ai-summary", async (req, res) => {
     return;
   }
 
-  try {
+  // Load shedding — client pre-warm fires 40 of these per session, so without
+  // guards a few concurrent sessions turn into a Groq 429 retry storm that
+  // also starves Deep Dive / Q&A (shared RPM).
+  if (Date.now() < aiSummaryRoutePausedUntil) {
+    res.status(503).set("Retry-After", "60").json({ error: "AI summary temporarily rate-limited" });
+    return;
+  }
+  // Coalesce: identical request already generating → share its result instead
+  // of a duplicate Groq call (two users pre-warming the same story).
+  const inflight = aiSummaryInflightMap.get(cacheKey);
+  if (inflight) {
+    try { res.json({ ...(await inflight), cached: true }); }
+    catch { res.status(502).json({ error: "AI summary unavailable" }); }
+    return;
+  }
+  if (aiSummaryActiveCount >= AI_SUMMARY_MAX_CONCURRENT) {
+    res.status(503).set("Retry-After", "5").json({ error: "AI summary busy" });
+    return;
+  }
+
+  const generate = (async (): Promise<AiSummaryEntry> => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
     const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
@@ -3849,11 +3881,25 @@ router.post("/ai-summary", async (req, res) => {
       aiSummaryCache.set(cacheKey, result);
       safeWriteJson(diskPath, result);
     }
+    return result;
+  })();
 
+  aiSummaryActiveCount++;
+  aiSummaryInflightMap.set(cacheKey, generate);
+  try {
+    const result = await generate;
     res.json({ ...result, cached: false });
   } catch (err) {
+    // Rate-limit from Groq → trip the breaker so the pre-warm herd backs off
+    // for 60s instead of each request retrying into the same wall.
+    if (err instanceof Error && /429/.test(err.message)) {
+      aiSummaryRoutePausedUntil = Date.now() + 60_000;
+    }
     req.log.error({ err }, "ai-summary failed");
     res.status(502).json({ error: "AI summary unavailable" });
+  } finally {
+    aiSummaryActiveCount--;
+    aiSummaryInflightMap.delete(cacheKey);
   }
 });
 

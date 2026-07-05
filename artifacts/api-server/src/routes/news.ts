@@ -3968,6 +3968,10 @@ interface DeepDiveResult {
 }
 const deepDiveCache = new Map<string, DeepDiveResult>();
 const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+// Coalesce concurrent generations of the same dive: the client pre-warm and a
+// user's card view often request the same url+depth seconds apart — without
+// this, both paid a full 20-40s Groq generation.
+const deepDiveInflight = new Map<string, Promise<DeepDiveResult>>();
 
 // Fetch + extract the full readable text of one article. Returns "" on failure
 // (paywall, JS-only page, timeout) so callers can fall back to summaries.
@@ -4071,7 +4075,15 @@ router.post("/deepdive", async (req, res) => {
 
   if (!process.env["GROQ_API_KEY"]) { res.status(502).json({ error: "AI not configured" }); return; }
 
-  try {
+  // Join an in-flight generation of the same dive instead of starting another.
+  const inflight = deepDiveInflight.get(cacheKey);
+  if (inflight) {
+    try { res.json({ ...(await inflight), cached: true }); }
+    catch { res.status(502).json({ error: "Deep Dive unavailable" }); }
+    return;
+  }
+
+  const gen = (async (): Promise<DeepDiveResult> => {
     // RICHER INPUT: for a multi-source story, READ THE FULL TEXT OF EVERY SOURCE
     // (capped for latency/tokens), not just the short summaries the app already
     // has. Each source is fetched in parallel; any that block (paywall/JS-only)
@@ -4263,16 +4275,22 @@ ${depth === 'quick'
     // Return whatever we got — even partial data is useful. Only fail on total emptiness.
     if (!result.tldr.length && !result.narrative && !result.insight && !result.questions.length) {
       req.log.error({ raw: raw.slice(0, 500) }, "deepdive: empty parse");
-      res.status(502).json({ error: "AI returned no parseable content", raw: raw.slice(0, 200) });
-      return;
+      throw new Error("AI returned no parseable content");
     }
 
     deepDiveCache.set(cacheKey, result);
     safeWriteJson(diskPath, result);
-    res.json({ ...result, cached: false });
+    return result;
+  })();
+
+  deepDiveInflight.set(cacheKey, gen);
+  try {
+    res.json({ ...(await gen), cached: false });
   } catch (err) {
     req.log.error({ err: err instanceof Error ? err.message : String(err) }, "deepdive failed");
     res.status(502).json({ error: "Deep Dive unavailable", detail: err instanceof Error ? err.message : String(err) });
+  } finally {
+    deepDiveInflight.delete(cacheKey);
   }
 });
 

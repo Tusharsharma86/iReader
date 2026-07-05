@@ -17,7 +17,7 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 // Four separate free-tier daily budgets, task class matched to pool size:
 //   scout    500k TPD → Deep Dive (occasional, 6k-token responses)
 //   maverick 500k TPD → article summaries incl. client pre-warm (heaviest volume)
-//   70B      100k TPD → cluster headlines + theme summaries (tiny, quality-critical)
+//   gpt-oss-120b ~200k TPD → cluster headlines + theme summaries (tiny, quality-critical)
 //   8B       500k TPD → clustering / card summaries / themes / Q&A (mechanical bulk)
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive (flagship) — dedicated daily budget
 const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks (article tools, Q&A) — separate budget
@@ -26,9 +26,11 @@ const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks (art
 // per session) exhausted that in one or two sessions. Maverick has its own
 // 500k TPD, comparable quality, and nothing else rides it.
 const GROQ_MODEL_FOREGROUND = "meta-llama/llama-4-maverick-17b-128e-instruct";
-// Cluster headlines + theme summaries: ~600 tokens/call, cached 24h (~36k/day)
-// — fits 70B's 100k TPD with room, and headline quality is the whole point.
-const GROQ_MODEL_ENRICH = "llama-3.3-70b-versatile";
+// Cluster headlines + theme summaries: ~600 tokens/call, cached 24h (~36k/day).
+// Was llama-3.3-70b — Groq deprecated it (decommission 2026-08-16); replaced
+// with their recommended gpt-oss-120b: bigger model, larger free-tier budget,
+// and headline quality is the whole point of this pool.
+const GROQ_MODEL_ENRICH = "openai/gpt-oss-120b";
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -104,7 +106,7 @@ const GROQ_TPD_LIMITS: Record<string, number> = {
   "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
   "meta-llama/llama-4-maverick-17b-128e-instruct": 500000,
   "llama-3.1-8b-instant": 500000,
-  "llama-3.3-70b-versatile": 100000,
+  "openai/gpt-oss-120b": 200000,
 };
 interface TaskUsage { tokens: number; calls: number; errors: number; }
 interface ModelUsage { tokens: number; calls: number; errors: number; tasks: Record<string, TaskUsage>; }
@@ -2926,7 +2928,7 @@ router.get("/ai-usage", (_req, res) => {
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (flagship)",
     "meta-llama/llama-4-maverick-17b-128e-instruct": "Article summaries + pre-warm",
-    "llama-3.3-70b-versatile": "Cluster headlines · theme summaries",
+    "openai/gpt-oss-120b": "Cluster headlines · theme summaries",
     "llama-3.1-8b-instant": "Clustering · card summaries · themes · Q&A",
   };
   // Always show all known models (even at 0 usage) so the split is always
@@ -2936,7 +2938,7 @@ router.get("/ai-usage", (_req, res) => {
     "meta-llama/llama-4-scout-17b-16e-instruct",
     "meta-llama/llama-4-maverick-17b-128e-instruct",
     "llama-3.1-8b-instant",
-    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
   ];
   const allModels = Array.from(new Set([...KNOWN_MODELS, ...Object.keys(aiUsageByModel)]));
   const models = allModels.map((model) => {

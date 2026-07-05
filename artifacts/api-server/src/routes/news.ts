@@ -4057,7 +4057,7 @@ router.post("/deepdive", async (req, res) => {
     rawDepth === 'quick' || rawDepth === 'deep' ? rawDepth : 'standard';
 
   // v12 — 4-signal confidence: grounding + credibility + diversity + age
-  const cacheKey = `deepdive:v14:${depth}:${url}`;
+  const cacheKey = `deepdive:v15:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -4123,19 +4123,29 @@ router.post("/deepdive", async (req, res) => {
     const diffAnglesInstruction = sourceCount <= 1
       ? `"DIFFERENT ANGLES"  — ONLY analyse the FRAMING and TONE of the single source and the key questions it leaves UNANSWERED. CRITICAL: do NOT mention or imply "various outlets", "different sources", "covered differently by outlets", or suggest multiple sources exist. There is only ONE source — write accordingly.`
       : `"DIFFERENT ANGLES"  — ONLY a META-COMMENTARY on the COVERAGE itself — do NOT restate story facts here. Contrast what each named outlet EMPHASISES, frames, or omits (e.g. "Reuters leads on the financial penalty; the BBC frames it as legal precedent; Indian outlets centre the Indian victims"). If all excerpts are one outlet/very similar, instead analyse the framing/tone used and the key questions left UNANSWERED.`;
-    const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
+    // Depth targets are baked directly INTO the JSON schema below. They used to
+    // live in a "DEPTH OVERRIDE" note at the very END of the (16k-char) prompt,
+    // AFTER "Respond with JSON only." — the model followed the inline word
+    // counts in the schema and ignored the trailing note, so quick/standard/deep
+    // produced identical lengths.
+    const tldrBullets = depth === 'quick' ? 'EXACTLY 2-3' : 'EXACTLY 3-4';
+    const tldrTotal = depth === 'quick' ? '~230-260 words (hard cap 280)' : '~400-450 words (hard cap 450)';
+    const storyWords = depth === 'quick' ? '~50-90 words' : depth === 'deep' ? '~150-220 words' : '~90-160 words';
+    const storyTotal = depth === 'quick' ? 'TOTAL 250-450 words (hard cap 480)' : depth === 'deep' ? 'TOTAL 750-1100 words (min 700)' : 'TOTAL 500-900 words (min 450)';
+    const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
+    const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + EXACTLY 3-4 bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ~400-450 words (hard cap 450 — be thorough but don't pad). First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
+  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
     { "heading": "CORE EVENT", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] },
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
-  "tldr": ["flat fallback — 6-10 complete-sentence bullets, same ~400-450 word cap"],
-  "storySections": [                                   // THE FULL STORY. EXACTLY these 5 sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (~90-160 words) of engaging plain prose (no markdown). TOTAL 500-900 words (min 450). Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
+  "tldr": ["flat fallback — 6-10 complete-sentence bullets, same ${tldrTotal} cap"],
+  "storySections": [                                   // THE FULL STORY. EXACTLY these 5 sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (${storyWords}) of engaging plain prose (no markdown). ${storyTotal}. Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
     // ── ABSOLUTE RULE: ZERO REPETITION. Each section must contain information that appears in NO other section. NEVER restate a fact, figure, name, quote or sentence you already used. If a section would repeat something, REPLACE it with new detail, analysis, or implication. A reader must learn something NEW in every section. Vary sentence openings; do not start multiple sections the same way.
     // Each section has a STRICT, NON-OVERLAPPING scope:
     //   1. "WHAT HAPPENED"     — ONLY the single core event in 2-3 sentences: who did what, the headline outcome. No numbers-dump, no background, no consequences. The spine, nothing else.
-    //   2. "THE DETAILS"       — ONLY concrete specifics NOT in section 1: exact figures, dates, the sequence of events, names/titles, locations, the mechanism/how. Pure factual texture. No consequences, no framing. FACT-DENSITY RULE: this section must include EVERY distinct concrete fact from the sources — every number, amount, percentage, date, deadline, name, title, place and direct quote that fits. Prefer packing more facts over smoother prose; it may run up to 220 words if the sources are fact-rich. NEVER drop a specific figure in favour of a vague phrase ("millions" when a source says "$4.2M").
+    //   2. "THE DETAILS"       — ONLY concrete specifics NOT in section 1: exact figures, dates, the sequence of events, names/titles, locations, the mechanism/how. Pure factual texture. No consequences, no framing. FACT-DENSITY RULE: this section must include EVERY distinct concrete fact from the sources — every number, amount, percentage, date, deadline, name, title, place and direct quote that fits. Prefer packing more facts over smoother prose; it may run up to ${depth === 'quick' ? '120' : '220'} words if the sources are fact-rich. NEVER drop a specific figure in favour of a vague phrase ("millions" when a source says "$4.2M").
     //   3. ${diffAnglesInstruction}
     //   4. "CONTEXT & BACKGROUND" — ONLY history and the bigger picture: prior events, how we got here, precedent, the pattern this fits, stakes for the wider field. NO restating today's event.
     //   5. "WHAT'S NEXT"       — ONLY the forward look: concrete expected next steps, pending decisions, appeals, timelines, awaited reactions, what to watch. Future tense only; no recap.
@@ -4147,7 +4157,7 @@ router.post("/deepdive", async (req, res) => {
   ],
   "quote": {"text": "...", "by": "..."},               // ONE notable DIRECT quote from the sources, VERBATIM (no paraphrase), with the speaker's name/title in "by". Pick the most striking on-record line. Use null if no direct quote appears in the text — NEVER invent one.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
-  "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
+  "questions": ["...", "...", "...", "..."],           // ${qCount} conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
   "keyPeople": ["..."],                                // named individuals mentioned (full names). May be empty if none.
   "keyCompanies": ["..."],                             // organisations, companies, agencies, political parties. May be empty.
@@ -4159,14 +4169,7 @@ Headline: ${headline ?? "(no headline)"}
 Article:
 ${text}
 
-Respond with JSON only.
-
-DEPTH OVERRIDE for this request: "${depth}".
-${depth === 'quick'
-  ? '- Shorten EVERY length target by ~40%. tldr bullets: 2-3 per section. storySections: 50-90 words each. questions: 3.'
-  : depth === 'deep'
-    ? '- Expand the storySections to ~150-220 words each (still no repetition). Add depth and nuance. Keep tldr crisp.'
-    : '- Use the default lengths as specified above.'}`;
+Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — each storySection body must be ${storyWords}; count your words.`;
 
     // Retry once on transient network failure.
     const ctrl = new AbortController();

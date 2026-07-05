@@ -3955,6 +3955,7 @@ interface DeepDiveResult {
   tldrSections: TldrSection[];
   narrative: string;
   storySections: StorySection[];
+  quote: { text: string; by: string } | null;
   insight: string;
   questions: string[];
   tags: string[];
@@ -4052,7 +4053,7 @@ router.post("/deepdive", async (req, res) => {
     rawDepth === 'quick' || rawDepth === 'deep' ? rawDepth : 'standard';
 
   // v12 — 4-signal confidence: grounding + credibility + diversity + age
-  const cacheKey = `deepdive:v13:${depth}:${url}`;
+  const cacheKey = `deepdive:v14:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -4132,6 +4133,7 @@ router.post("/deepdive", async (req, res) => {
     { "heading": "CONTEXT & BACKGROUND", "body": "one paragraph" },
     { "heading": "WHAT'S NEXT", "body": "one paragraph" }
   ],
+  "quote": {"text": "...", "by": "..."},               // ONE notable DIRECT quote from the sources, VERBATIM (no paraphrase), with the speaker's name/title in "by". Pick the most striking on-record line. Use null if no direct quote appears in the text — NEVER invent one.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // 3-4 conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
@@ -4244,6 +4246,9 @@ ${depth === 'quick'
       tldrSections,
       narrative,
       storySections,
+      quote: (parsed.quote && typeof parsed.quote === "object" && typeof (parsed.quote as { text?: unknown }).text === "string" && (parsed.quote as { text: string }).text.trim().length > 10)
+        ? { text: String((parsed.quote as { text: string }).text).slice(0, 400), by: String((parsed.quote as { by?: unknown }).by ?? "").slice(0, 120) }
+        : null,
       insight: typeof parsed.insight === "string" ? parsed.insight : "",
       questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 5).map(String) : [],
       tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 8).map(String) : [],

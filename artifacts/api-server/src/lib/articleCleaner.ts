@@ -5,9 +5,11 @@
  *  2. Headline echo removal — drops first sentence if it restates the title
  *  3. Sentence-level near-dedup (Jaccard ≥ 0.80 OR TF-IDF cosine ≥ 0.75)
  *  4. Caption removal
- *  5. TextRank scoring (TF-IDF cosine edge weights)
- *  6. MMR selection (relevance × diversity trade-off)
- *  7. 500-word cap
+ *  5. 2500-word safety cap (mega-pages only)
+ *
+ * TextRank + MMR selection + 500-word cap were removed: they summarised
+ * rather than cleaned, so the "Full Article" tab silently showed at most
+ * 500 cherry-picked words. Summarisation belongs to the Summary tab.
  */
 
 // ── Step 1: boilerplate patterns ────────────────────────────────────────────
@@ -404,20 +406,16 @@ export function cleanArticleParagraphs(
     return { paragraphs: originalParagraphs, originalParagraphs };
   }
 
-  // -- Step 5: TextRank scoring (TF-IDF cosine graph) ---
-  const scores = textRank(deduped);
-
-  // -- Build shared IDF for MMR ---
-  const sharedIdf = buildIdf(deduped.map(tokeniseArr));
-
-  // -- Step 6: MMR selection (target: 500 words) ---
-  const TARGET_WORDS = 500;
-  const selected = mmrSelect(deduped, scores, sharedIdf, TARGET_WORDS);
-
-  // -- Step 7: 500-word hard cap ---
+  // -- Steps 5-7 (TextRank + MMR selection + 500-word cap) REMOVED for the
+  // article reader: they summarised, not cleaned — a 1500-word article showed
+  // at most 500 selected sentences under a tab labelled "Full Article", and
+  // even short articles lost a third of their content. The Summary tab is the
+  // summarisation surface; Full Article keeps every non-duplicate sentence in
+  // original order. A very generous safety cap guards against mega-pages only.
+  const TARGET_WORDS = 2500;
   const cappedSentences: string[] = [];
   let wc = 0;
-  for (const s of selected) {
+  for (const s of deduped) {
     const sw = s.split(/\s+/).filter(Boolean).length;
     if (wc + sw > TARGET_WORDS) break;
     cappedSentences.push(s);

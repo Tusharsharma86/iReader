@@ -1868,7 +1868,17 @@ async function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], t
     // deterministic themeDigest (joined first-3 headlines) gives the reader the
     // same surface info reliably; re-enable with batching or paid Groq tier later.
     themeGroups.forEach(({ theme, arts }) => {
-      const display = arts.slice(0, COLLECTION_CAP);
+      // Rails must read newest-first and never resurrect zombies. Previously
+      // the display slice took raw feed order with NO member age check — a
+      // 10-day-old article could sit FIRST in a TREND rail because one fresh
+      // sibling kept the rail alive. Members older than 72h are dropped here
+      // (they fall through to normal singles, where freshness scoring buries
+      // them); the rest sort newest-first before the display slice.
+      const MEMBER_MAX_AGE_MS = 72 * 3_600_000;
+      const fresh = arts
+        .filter(a => { const ms = a.pubDate ? Date.parse(a.pubDate) : 0; return ms > 0 && now - ms <= MEMBER_MAX_AGE_MS; })
+        .sort((a, b) => (Date.parse(b.pubDate ?? "") || 0) - (Date.parse(a.pubDate ?? "") || 0));
+      const display = fresh.slice(0, COLLECTION_CAP);
       if (display.length < 3) return;
       const newest = Math.max(...display.map(a => (a.pubDate ? Date.parse(a.pubDate) : 0)));
       const hoursOld = Math.max(0, (now - newest) / 3_600_000);

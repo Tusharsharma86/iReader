@@ -1872,28 +1872,31 @@ async function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], t
     // vanishing into buried singles.
     const catchUpPool: NewsDataArticle[] = [];
     themeGroups.forEach(({ theme, arts }) => {
-      // Rails must read newest-first and never resurrect zombies. Previously
-      // the display slice took raw feed order with NO member age check — a
-      // 10-day-old article could sit FIRST in a TREND rail because one fresh
-      // sibling kept the rail alive. Members older than 72h are dropped here
-      // (3-7 day ones flow to the Catch Up rail below); the rest sort
-      // newest-first before the display slice.
-      const MEMBER_MAX_AGE_MS = 72 * 3_600_000;
-      const CATCHUP_MAX_AGE_MS = 7 * 24 * 3_600_000;
-      const fresh = arts
-        .filter(a => { const ms = a.pubDate ? Date.parse(a.pubDate) : 0; return ms > 0 && now - ms <= MEMBER_MAX_AGE_MS; })
+      // Rails read newest-first and hard-cap members at 7 days (the original
+      // bug was a 10-day zombie sitting FIRST because only the rail's newest
+      // member was age-checked, in raw feed order). Prefer ≤72h members, but
+      // if fewer than 3 exist, BACKFILL with 3-7 day ones so themes/companies
+      // rails don't vanish wholesale — newest-first ordering guarantees the
+      // older fill never leads the rail.
+      const MEMBER_FRESH_MS = 72 * 3_600_000;
+      const MEMBER_HARD_MAX_MS = 7 * 24 * 3_600_000;
+      const within7d = arts
+        .filter(a => { const ms = a.pubDate ? Date.parse(a.pubDate) : 0; return ms > 0 && now - ms <= MEMBER_HARD_MAX_MS; })
         .sort((a, b) => (Date.parse(b.pubDate ?? "") || 0) - (Date.parse(a.pubDate ?? "") || 0));
-      for (const a of arts) {
-        const ms = a.pubDate ? Date.parse(a.pubDate) : 0;
-        if (ms > 0 && now - ms > MEMBER_MAX_AGE_MS && now - ms <= CATCHUP_MAX_AGE_MS) catchUpPool.push(a);
+      const fresh = within7d.filter(a => now - (Date.parse(a.pubDate ?? "") || 0) <= MEMBER_FRESH_MS);
+      const display = (fresh.length >= 3 ? fresh : within7d).slice(0, COLLECTION_CAP);
+      // Anything 3-7 days old that didn't make the rail feeds the Catch Up rail.
+      const displaySet = new Set(display);
+      for (const a of within7d) {
+        if (!displaySet.has(a) && now - (Date.parse(a.pubDate ?? "") || 0) > MEMBER_FRESH_MS) catchUpPool.push(a);
       }
-      const display = fresh.slice(0, COLLECTION_CAP);
       if (display.length < 3) return;
       const newest = Math.max(...display.map(a => (a.pubDate ? Date.parse(a.pubDate) : 0)));
       const hoursOld = Math.max(0, (now - newest) / 3_600_000);
-      // Hard age cap on themes: drop the rail if even its freshest story is
-      // >12h old (was showing Aviation at 6.5 DAYS, Google at 32h).
-      if (hoursOld > 12) return;
+      // Rail-level freshness gate: drop the rail if even its freshest story is
+      // >24h old (12h proved too strict — most theme rails died off-peak; the
+      // members are newest-first so a 20h lead still reads as current).
+      if (hoursOld > 24) { for (const a of display) { if (now - (Date.parse(a.pubDate ?? "") || 0) > MEMBER_FRESH_MS) catchUpPool.push(a); } return; }
       for (const a of display) claimed.add(a);
       const cards = buildFallbackStories(display);
       const score = (1 / (hoursOld + 1)) * 0.4 + Math.log(display.length + 1) * 0.25 + 0.08;
@@ -1914,7 +1917,10 @@ async function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], t
         const cards = buildFallbackStories(catchUp);
         scored.push({
           item: { type: "cluster", topicTitle: "Catch Up · Big Stories This Week", topicSummary: themeDigest(catchUp), articles: cards, collection: true },
-          score: 0.04, // below every fresh rail and recent single — bottom of feed
+          // Above stale singles (~0.09) so it's actually findable, below every
+          // fresh rail and recent story. 0.04 buried it at the very bottom of
+          // a 300-item feed — users couldn't find it at all.
+          score: 0.15,
         });
       }
     }

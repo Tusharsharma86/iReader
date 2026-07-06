@@ -382,55 +382,64 @@ export function cleanArticleParagraphs(
   // -- Caption removal at paragraph level ---
   const afterCaptionRemoval = afterBoilerplate.filter((p) => !isCaption(p));
 
-  // -- Flatten to sentences ---
-  const allSentences: string[] = [];
-  for (const para of afterCaptionRemoval) {
-    for (const s of splitIntoSentences(para)) {
-      if (!isBoilerplate(s) && !isCaption(s)) allSentences.push(s);
+  // -- Per-paragraph sentence filtering that PRESERVES the writer's paragraph
+  // boundaries. The old pipeline flattened every sentence into one pool and
+  // regrouped every 3 into artificial paragraphs — readers saw paragraph
+  // breaks unrelated to the source, and any subtitle/standfirst text fused
+  // visually into the lead. Each original paragraph now keeps its own
+  // surviving sentences; paragraphs that lose everything disappear.
+  const paraSentences: string[][] = afterCaptionRemoval.map(para =>
+    splitIntoSentences(para).filter(s => !isBoilerplate(s) && !isCaption(s)),
+  );
+
+  if (paraSentences.every(ps => ps.length === 0)) {
+    return { paragraphs: originalParagraphs, originalParagraphs };
+  }
+
+  // -- Step 2: headline echo removal (first surviving sentence only) ---
+  if (options.headline) {
+    const firstIdx = paraSentences.findIndex(ps => ps.length > 0);
+    if (firstIdx >= 0) {
+      const first = paraSentences[firstIdx];
+      const after = removeHeadlineEcho([first[0]], options.headline);
+      if (after.length === 0) first.shift();
     }
   }
 
-  if (allSentences.length === 0) {
-    return { paragraphs: originalParagraphs, originalParagraphs };
-  }
+  // -- Step 3: hybrid Jaccard + TF-IDF cosine near-dedup, in reading order,
+  // across ALL paragraphs — but each kept sentence stays in its own paragraph.
+  const flat = paraSentences.flat();
+  const idf = buildIdf(flat.map(tokeniseArr));
+  const keptSets: Set<string>[] = [];
+  const keptVecs: Map<string, number>[] = [];
+  const isDup = (s: string): boolean => {
+    const ts = new Set(tokeniseArr(s));
+    const vec = tfidfVec(tokeniseArr(s), idf);
+    if (keptSets.some((prevTs, ki) => jaccard(prevTs, ts) >= 0.80 || cosineSim(keptVecs[ki], vec) >= 0.75)) return true;
+    keptSets.push(ts);
+    keptVecs.push(vec);
+    return false;
+  };
 
-  // -- Step 2: headline echo removal ---
-  const afterEchoRemoval = options.headline
-    ? removeHeadlineEcho(allSentences, options.headline)
-    : allSentences;
-
-  // -- Step 3: hybrid Jaccard + TF-IDF cosine near-dedup ---
-  const deduped = dedupSentences(afterEchoRemoval);
-
-  if (deduped.length === 0) {
-    return { paragraphs: originalParagraphs, originalParagraphs };
-  }
-
-  // -- Steps 5-7 (TextRank + MMR selection + 500-word cap) REMOVED for the
-  // article reader: they summarised, not cleaned — a 1500-word article showed
-  // at most 500 selected sentences under a tab labelled "Full Article", and
-  // even short articles lost a third of their content. The Summary tab is the
-  // summarisation surface; Full Article keeps every non-duplicate sentence in
-  // original order. A very generous safety cap guards against mega-pages only.
+  // Generous safety cap for mega-pages only (Full Article must stay full —
+  // summarisation is the Summary tab's job).
   const TARGET_WORDS = 2500;
-  const cappedSentences: string[] = [];
   let wc = 0;
-  for (const s of deduped) {
-    const sw = s.split(/\s+/).filter(Boolean).length;
-    if (wc + sw > TARGET_WORDS) break;
-    cappedSentences.push(s);
-    wc += sw;
-  }
-
-  if (cappedSentences.length === 0) {
-    return { paragraphs: originalParagraphs, originalParagraphs };
-  }
-
-  // Regroup sentences into ~3-sentence paragraphs for readability
-  const SENTENCES_PER_PARA = 3;
   const cleanedParagraphs: string[] = [];
-  for (let i = 0; i < cappedSentences.length; i += SENTENCES_PER_PARA) {
-    cleanedParagraphs.push(cappedSentences.slice(i, i + SENTENCES_PER_PARA).join(' '));
+  outer: for (const ps of paraSentences) {
+    const kept: string[] = [];
+    for (const s of ps) {
+      if (isDup(s)) continue;
+      const sw = s.split(/\s+/).filter(Boolean).length;
+      if (wc + sw > TARGET_WORDS) { if (kept.length) cleanedParagraphs.push(kept.join(' ')); break outer; }
+      kept.push(s);
+      wc += sw;
+    }
+    if (kept.length) cleanedParagraphs.push(kept.join(' '));
+  }
+
+  if (cleanedParagraphs.length === 0) {
+    return { paragraphs: originalParagraphs, originalParagraphs };
   }
 
   // Sanity: if cleaning removed > 90 % of original words, fall back to originals

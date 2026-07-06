@@ -1867,17 +1867,26 @@ async function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], t
     // theme-summary calls fire last in each build and 100% 429'd. The
     // deterministic themeDigest (joined first-3 headlines) gives the reader the
     // same surface info reliably; re-enable with batching or paid Groq tier later.
+    // Old-but-important stories dropped from TREND rails get their own honest
+    // rail ("Catch Up") at the bottom instead of masquerading as trending or
+    // vanishing into buried singles.
+    const catchUpPool: NewsDataArticle[] = [];
     themeGroups.forEach(({ theme, arts }) => {
       // Rails must read newest-first and never resurrect zombies. Previously
       // the display slice took raw feed order with NO member age check — a
       // 10-day-old article could sit FIRST in a TREND rail because one fresh
       // sibling kept the rail alive. Members older than 72h are dropped here
-      // (they fall through to normal singles, where freshness scoring buries
-      // them); the rest sort newest-first before the display slice.
+      // (3-7 day ones flow to the Catch Up rail below); the rest sort
+      // newest-first before the display slice.
       const MEMBER_MAX_AGE_MS = 72 * 3_600_000;
+      const CATCHUP_MAX_AGE_MS = 7 * 24 * 3_600_000;
       const fresh = arts
         .filter(a => { const ms = a.pubDate ? Date.parse(a.pubDate) : 0; return ms > 0 && now - ms <= MEMBER_MAX_AGE_MS; })
         .sort((a, b) => (Date.parse(b.pubDate ?? "") || 0) - (Date.parse(a.pubDate ?? "") || 0));
+      for (const a of arts) {
+        const ms = a.pubDate ? Date.parse(a.pubDate) : 0;
+        if (ms > 0 && now - ms > MEMBER_MAX_AGE_MS && now - ms <= CATCHUP_MAX_AGE_MS) catchUpPool.push(a);
+      }
       const display = fresh.slice(0, COLLECTION_CAP);
       if (display.length < 3) return;
       const newest = Math.max(...display.map(a => (a.pubDate ? Date.parse(a.pubDate) : 0)));
@@ -1890,6 +1899,25 @@ async function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], t
       const score = (1 / (hoursOld + 1)) * 0.4 + Math.log(display.length + 1) * 0.25 + 0.08;
       scored.push({ item: { type: "cluster", topicTitle: theme, topicSummary: themeDigest(display), articles: cards, collection: true }, score });
     });
+
+    // "Catch Up" rail — 3-7 day-old stories that were part of hot themes but
+    // aged out of TREND rails. One honest rail near the feed bottom instead of
+    // zombies posing as trending. Newest-first, capped at 8, needs ≥3.
+    if (catchUpPool.length >= 3) {
+      const seen = new Set<NewsDataArticle>();
+      const catchUp = catchUpPool
+        .filter(a => !claimed.has(a) && !seen.has(a) && (seen.add(a), true))
+        .sort((a, b) => (Date.parse(b.pubDate ?? "") || 0) - (Date.parse(a.pubDate ?? "") || 0))
+        .slice(0, COLLECTION_CAP);
+      if (catchUp.length >= 3) {
+        for (const a of catchUp) claimed.add(a);
+        const cards = buildFallbackStories(catchUp);
+        scored.push({
+          item: { type: "cluster", topicTitle: "Catch Up · Big Stories This Week", topicSummary: themeDigest(catchUp), articles: cards, collection: true },
+          score: 0.04, // below every fresh rail and recent single — bottom of feed
+        });
+      }
+    }
   }
 
   // Remaining one-off singletons → article items.

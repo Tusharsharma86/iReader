@@ -16,21 +16,25 @@ const router: IRouter = Router();
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 // Four separate free-tier daily budgets, task class matched to pool size:
 //   scout    500k TPD → Deep Dive (occasional, 6k-token responses)
-//   maverick 500k TPD → article summaries incl. client pre-warm (heaviest volume)
-//   8B       500k TPD → clustering / card summaries / themes / Q&A (mechanical bulk)
+//   8B       500k TPD → clustering / card summaries / themes / Q&A / article
+//                       summaries / cluster headlines (mechanical bulk)
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive (flagship) — dedicated daily budget
 const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks (article tools, Q&A) — separate budget
-// Foreground user-facing article summary (Summary/5Ws/ELI5 + pre-warm). Was on
-// 70B, but its 100k TPD ≈ 66 summaries/day — the client-side pre-warm (top 40
-// per session) exhausted that in one or two sessions. Maverick has its own
-// 500k TPD, comparable quality, and nothing else rides it.
-const GROQ_MODEL_FOREGROUND = "meta-llama/llama-4-maverick-17b-128e-instruct";
+// Foreground user-facing article summary (Summary/5Ws/ELI5 + pre-warm). History:
+// 70B (100k TPD too small, exhausted by client pre-warm in 1-2 sessions) →
+// maverick (assumed healthy from limited testing, but /api/news/ai-usage later
+// showed 100% call failure — 91/91 and 21/21 across two separate days, 0
+// tokens ever earned; not a quota/rate issue, the model itself never
+// succeeded once). Back on 8B, which the live dashboard confirms is actually
+// working (~7% daily tokens, ~2% error rate).
+const GROQ_MODEL_FOREGROUND = "llama-3.1-8b-instant";
 // Cluster headlines + theme summaries: ~600 tokens/call, cached 24h (~36k/day).
 // History: llama-3.3-70b (deprecated by Groq) → gpt-oss-120b (reasoning model:
 // burned the 160-token cap on hidden reasoning, returning empty labels → every
-// cluster fell back to the raw article headline) → maverick, which already
-// proves itself on this account generating article summaries reliably.
-const GROQ_MODEL_ENRICH = "meta-llama/llama-4-maverick-17b-128e-instruct";
+// cluster fell back to the raw article headline) → maverick (100% failure on
+// this account, see GROQ_MODEL_FOREGROUND above) → 8B, already proven healthy
+// and already gated via groqBgGate so it won't get burst-saturated.
+const GROQ_MODEL_ENRICH = "llama-3.1-8b-instant";
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -43,6 +47,25 @@ function groqBgGate(): Promise<void> {
   const now = Date.now();
   const at = Math.max(now, groqNextSlot);
   groqNextSlot = at + GROQ_BG_INTERVAL_MS;
+  const wait = at - now;
+  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+}
+
+// Same idea as groqBgGate but for the user-facing Deep Dive call specifically.
+// Deep Dive used to skip any gate entirely ("low volume, user-initiated"), but
+// with client-side prewarming (top-N cards on AI Feed mount) plus real opens
+// from multiple users, concurrent deepdive calls burst well past Groq's
+// free-tier RPM and 429 almost everything (observed: 46/47 failed in one
+// day, scout model, despite only 4% of its daily token budget used — this is
+// real-time rate limiting, not quota exhaustion). 3s spacing keeps it under
+// ~20/min, still far more responsive than the 4.5s background gate since this
+// is what the user is actively waiting on.
+let deepDiveNextSlot = 0;
+const DEEPDIVE_GATE_INTERVAL_MS = 3000;
+function deepDiveGate(): Promise<void> {
+  const now = Date.now();
+  const at = Math.max(now, deepDiveNextSlot);
+  deepDiveNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
@@ -104,7 +127,6 @@ async function callGroq(
 // per UTC day. In-memory (resets on container cold start) — best-effort gauge.
 const GROQ_TPD_LIMITS: Record<string, number> = {
   "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
-  "meta-llama/llama-4-maverick-17b-128e-instruct": 500000,
   "llama-3.1-8b-instant": 500000,
 };
 interface TaskUsage { tokens: number; calls: number; errors: number; }
@@ -2970,15 +2992,16 @@ router.get("/ai-usage", (_req, res) => {
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (flagship)",
-    "meta-llama/llama-4-maverick-17b-128e-instruct": "Article summaries · cluster headlines · pre-warm",
-    "llama-3.1-8b-instant": "Clustering · card summaries · themes · Q&A",
+    "llama-3.1-8b-instant": "Clustering · card summaries · themes · Q&A · article summaries · cluster headlines",
   };
   // Always show all known models (even at 0 usage) so the split is always
-  // visible — 8B does mechanical bulk, Maverick does article summaries,
-  // 70B does headlines, Scout is Deep Dive only.
+  // visible — 8B does everything except Deep Dive, Scout is Deep Dive only.
+  // Maverick dropped 2026-07-10: 100% call failure on this account across two
+  // separate days (91/91, then 21/21 + 70/70), 0 tokens ever earned — not a
+  // quota/rate issue, the model itself never once succeeded. See
+  // GROQ_MODEL_FOREGROUND/GROQ_MODEL_ENRICH history comments above.
   const KNOWN_MODELS = [
     "meta-llama/llama-4-scout-17b-16e-instruct",
-    "meta-llama/llama-4-maverick-17b-128e-instruct",
     "llama-3.1-8b-instant",
   ];
   const allModels = Array.from(new Set([...KNOWN_MODELS, ...Object.keys(aiUsageByModel)]));
@@ -4219,11 +4242,12 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     const t = setTimeout(() => ctrl.abort(), 90000);
     let raw = "";
     try {
+      await deepDiveGate();
       try {
         raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
-        await new Promise(r => setTimeout(r, 800));
+        await deepDiveGate();
         raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
       }
     } finally {

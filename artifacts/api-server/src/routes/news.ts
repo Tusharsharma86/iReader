@@ -18,23 +18,11 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 //   scout    500k TPD → Deep Dive (occasional, 6k-token responses)
 //   8B       500k TPD → clustering / card summaries / themes / Q&A / article
 //                       summaries / cluster headlines (mechanical bulk)
-const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive (flagship) — dedicated daily budget
-const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // chatty/high-volume tasks (article tools, Q&A) — separate budget
-// Foreground user-facing article summary (Summary/5Ws/ELI5 + pre-warm). History:
-// 70B (100k TPD too small, exhausted by client pre-warm in 1-2 sessions) →
-// maverick (assumed healthy from limited testing, but /api/news/ai-usage later
-// showed 100% call failure — 91/91 and 21/21 across two separate days, 0
-// tokens ever earned; not a quota/rate issue, the model itself never
-// succeeded once). Back on 8B, which the live dashboard confirms is actually
-// working (~7% daily tokens, ~2% error rate).
-const GROQ_MODEL_FOREGROUND = "llama-3.1-8b-instant";
-// Cluster headlines + theme summaries: ~600 tokens/call, cached 24h (~36k/day).
-// History: llama-3.3-70b (deprecated by Groq) → gpt-oss-120b (reasoning model:
-// burned the 160-token cap on hidden reasoning, returning empty labels → every
-// cluster fell back to the raw article headline) → maverick (100% failure on
-// this account, see GROQ_MODEL_FOREGROUND above) → 8B, already proven healthy
-// and already gated via groqBgGate so it won't get burst-saturated.
-const GROQ_MODEL_ENRICH = "llama-3.1-8b-instant";
+const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive primary — 500K TPD, 30 RPM
+const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // background bulk: clustering, card summaries, themes — 500K TPD, 14.4K RPD
+const GROQ_MODEL_QUALITY = "qwen/qwen3-32b"; // foreground quality: article summaries, Q&A, Deep Dive fallback — 500K TPD, 60 RPM
+const GROQ_MODEL_FOREGROUND = "qwen/qwen3-32b"; // user-facing article summary (Summary/5Ws/ELI5)
+const GROQ_MODEL_ENRICH = "llama-3.1-8b-instant"; // cluster headlines + theme summaries (background, high volume)
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -102,7 +90,9 @@ async function callGroq(
         usage?: { total_tokens?: number };
       };
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
-      return data.choices?.[0]?.message?.content ?? "";
+      let content = data.choices?.[0]?.message?.content ?? "";
+      if (model.includes("qwen")) content = content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      return content;
     }
     // Retry on rate-limit / transient 5xx — foreground gets up to 2 retries
     // (article-summary, deepdive etc. are user-facing), background gets 1.
@@ -128,6 +118,7 @@ async function callGroq(
 const GROQ_TPD_LIMITS: Record<string, number> = {
   "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
   "llama-3.1-8b-instant": 500000,
+  "qwen/qwen3-32b": 500000,
 };
 interface TaskUsage { tokens: number; calls: number; errors: number; }
 interface ModelUsage { tokens: number; calls: number; errors: number; tasks: Record<string, TaskUsage>; }
@@ -2992,23 +2983,20 @@ router.get("/ai-usage", (_req, res) => {
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (flagship)",
-    "llama-3.1-8b-instant": "Clustering · card summaries · themes · Q&A · article summaries · cluster headlines",
+    "qwen/qwen3-32b": "Article summaries · Q&A · Deep Dive fallback",
+    "llama-3.1-8b-instant": "Clustering · card summaries · themes · cluster headlines",
   };
-  // Always show all known models (even at 0 usage) so the split is always
-  // visible — 8B does everything except Deep Dive, Scout is Deep Dive only.
-  // Maverick dropped 2026-07-10: 100% call failure on this account across two
-  // separate days (91/91, then 21/21 + 70/70), 0 tokens ever earned — not a
-  // quota/rate issue, the model itself never once succeeded. See
-  // GROQ_MODEL_FOREGROUND/GROQ_MODEL_ENRICH history comments above.
   const KNOWN_MODELS = [
     "meta-llama/llama-4-scout-17b-16e-instruct",
+    "qwen/qwen3-32b",
     "llama-3.1-8b-instant",
   ];
   const allModels = Array.from(new Set([...KNOWN_MODELS, ...Object.keys(aiUsageByModel)]));
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMIT = 1000; // free-tier requests/day per model (approx)
+    const REQ_LIMITS: Record<string, number> = { "llama-3.1-8b-instant": 14400, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "qwen/qwen3-32b": 1000 };
+    const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     return {
       model,
       role: MODEL_ROLE[model] ?? "—",
@@ -3051,7 +3039,7 @@ router.get("/questions", async (req, res) => {
 Headlines:
 ${headlines}`;
 
-    const raw = await callGroq(prompt, 400, { model: GROQ_MODEL_FAST, task: 'questions', jsonMode: true });
+    const raw = await callGroq(prompt, 400, { model: GROQ_MODEL_QUALITY, task: 'questions', jsonMode: true });
     const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim()) as { questions?: string[] };
     const qs = (parsed.questions ?? []).filter((q): q is string => typeof q === 'string' && q.length > 0).slice(0, 5);
     const result = qs.map((text, i) => ({ text, accent: Q_ACCENTS[i % Q_ACCENTS.length] }));
@@ -3083,7 +3071,7 @@ ${context}
 
 Answer:`;
 
-    const answer = await callGroq(prompt, 220, { model: GROQ_MODEL_FAST, task: 'qa' });
+    const answer = await callGroq(prompt, 220, { model: GROQ_MODEL_QUALITY, task: 'qa' });
     res.json({ answer: answer.trim() });
   } catch (err) {
     req.log?.error?.({ err }, 'qa failed');
@@ -4202,9 +4190,9 @@ router.post("/deepdive", async (req, res) => {
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
-    { "heading": "CORE EVENT", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] },
-    { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
+  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is ONE concise sentence (~25-30 words, hard cap 35) — a self-contained pointer that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
+    { "heading": "CORE EVENT", "bullets": ["one concise ~30-word pointer.", "one concise ~30-word pointer.", "one concise ~30-word pointer."] },
+    { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["one concise ~30-word pointer.", "one concise ~30-word pointer.", "one concise ~30-word pointer."] }
   ],
   "tldr": ["flat fallback — 6-10 complete-sentence bullets, same ${tldrTotal} cap"],
   "storySections": [                                   // THE FULL STORY. EXACTLY these 5 sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (${storyWords}) of engaging plain prose (no markdown). ${storyTotal}. Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
@@ -4221,7 +4209,7 @@ router.post("/deepdive", async (req, res) => {
     { "heading": "CONTEXT & BACKGROUND", "body": "one paragraph" },
     { "heading": "WHAT'S NEXT", "body": "one paragraph" }
   ],
-  "quote": {"text": "...", "by": "..."},               // ONE notable DIRECT quote from the sources, VERBATIM (no paraphrase), with the speaker's name/title in "by". Pick the most striking on-record line. Use null if no direct quote appears in the text — NEVER invent one.
+  "quote": {"text": "...", "by": "..."},               // REQUIRED — ONE notable DIRECT quote from the sources, VERBATIM (no paraphrase), with the speaker's full name and title in "by" (e.g. "Sundar Pichai, CEO of Google"). Pick the most striking, newsworthy on-record line. Search the full text thoroughly for quoted speech (words inside quotation marks with attribution). Only return null if the text genuinely contains ZERO direct quotes — this is rare, so try hard to find one.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // ${qCount} conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
@@ -4246,9 +4234,8 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
       try {
         raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
       } catch (firstErr) {
-        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: groq fetch failed, retrying once");
-        await deepDiveGate();
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: scout failed, falling back to qwen3-32b");
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_QUALITY, task: "deepdive" });
       }
     } finally {
       clearTimeout(t);
@@ -4423,8 +4410,8 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     const t = setTimeout(() => ctrl.abort(), 60000);
     let answer = "";
     try {
-      try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_FAST, task: "qna" })).trim(); }
-      catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_FAST, task: "qna" })).trim(); }
+      try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+      catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
     } finally { clearTimeout(t); }
     if (!answer) throw new Error("Empty answer");
 

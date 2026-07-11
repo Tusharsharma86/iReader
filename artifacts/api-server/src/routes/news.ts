@@ -82,6 +82,19 @@ function model8bGate(): Promise<void> {
 }
 function pause8bModel() { model8bPausedUntil = Date.now() + 65_000; }
 
+let qwenNextSlot = 0;
+let qwenPausedUntil = 0;
+const QWEN_GATE_MS = 1100;
+function qwenGate(): Promise<void> {
+  const now = Date.now();
+  if (now < qwenPausedUntil) return Promise.reject(new Error("Groq 429"));
+  const at = Math.max(now, qwenNextSlot);
+  qwenNextSlot = at + QWEN_GATE_MS;
+  const wait = at - now;
+  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+}
+function pauseQwenModel() { qwenPausedUntil = Date.now() + 65_000; }
+
 async function callGroq(
   prompt: string,
   maxTokens: number,
@@ -92,6 +105,7 @@ async function callGroq(
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
   if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH) await model8bGate();
+  else if (model === GROQ_MODEL_QUALITY || model === GROQ_MODEL_FOREGROUND) await qwenGate();
   else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
@@ -131,6 +145,7 @@ async function callGroq(
     if (r.status === 429) {
       if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH) pause8bModel();
       else if (model === GROQ_MODEL) pauseScoutModel();
+      else if (model === GROQ_MODEL_QUALITY || model === GROQ_MODEL_FOREGROUND) pauseQwenModel();
     }
     throw new Error(`Groq ${r.status}`);
   }

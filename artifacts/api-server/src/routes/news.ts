@@ -61,6 +61,20 @@ function deepDiveGate(): Promise<void> {
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
 
+// Unified gate for ALL 8b calls (background + foreground). 8b has 30 RPM on
+// Groq free tier. Background gate at 4.5s + separate foreground calls easily
+// exceed 30 RPM combined, causing 429 → breaker cascade. Single 2s gate
+// (= max 30/min) shared across all 8b callers prevents this.
+let model8bNextSlot = 0;
+const MODEL_8B_GATE_MS = 2200;
+function model8bGate(): Promise<void> {
+  const now = Date.now();
+  const at = Math.max(now, model8bNextSlot);
+  model8bNextSlot = at + MODEL_8B_GATE_MS;
+  const wait = at - now;
+  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+}
+
 async function callGroq(
   prompt: string,
   maxTokens: number,
@@ -70,7 +84,8 @@ async function callGroq(
   if (!key) throw new Error("GROQ_API_KEY missing");
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
-  if (opts.background) await groqBgGate();
+  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_FOREGROUND) await model8bGate();
+  else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
       model,
@@ -3924,8 +3939,6 @@ router.post("/ai-summary", async (req, res) => {
   const generate = (async (): Promise<AiSummaryEntry> => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
-    // No fallback to scout — scout's 30 RPM is reserved for Deep Dive.
-    // If 8b is rate-limited, fail fast and let the breaker back off.
     const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};

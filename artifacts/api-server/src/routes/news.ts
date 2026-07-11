@@ -4183,14 +4183,19 @@ router.post("/deepdive", async (req, res) => {
     // counts in the schema and ignored the trailing note, so quick/standard/deep
     // produced identical lengths.
     const tldrBullets = depth === 'quick' ? 'EXACTLY 2-3' : 'EXACTLY 3-4';
-    const tldrTotal = depth === 'quick' ? '~230-260 words (hard cap 280)' : '~400-450 words (hard cap 450)';
+    // Raised alongside the 60-word bullet target below — the old totals (280/450
+    // hard caps) were sized for ~30-45-word bullets and would force the model to
+    // either shrink bullets back down or drop sections/bullets to stay under cap,
+    // fighting the per-bullet instruction. New totals give 2-3 sections of
+    // EXACTLY-count 60-word bullets room to breathe.
+    const tldrTotal = depth === 'quick' ? '~340-400 words (hard cap 420)' : '~550-650 words (hard cap 700)';
     const storyWords = depth === 'quick' ? '~50-90 words' : depth === 'deep' ? '~150-220 words' : '~90-160 words';
     const storyTotal = depth === 'quick' ? 'TOTAL 250-450 words (hard cap 480)' : depth === 'deep' ? 'TOTAL 750-1100 words (min 700)' : 'TOTAL 500-900 words (min 450)';
     const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~40-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
+  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~55-60 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
     { "heading": "CORE EVENT", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] },
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],

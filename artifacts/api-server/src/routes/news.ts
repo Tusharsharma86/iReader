@@ -4268,9 +4268,9 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     const t = setTimeout(() => ctrl.abort(), 90000);
     let raw = "";
     try {
-      await deepDiveGate();
       // Scout primary for Deep Dive (no thinking tokens). 8b fallback.
       try {
+        await deepDiveGate();
         raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: scout failed, falling back to 8b");

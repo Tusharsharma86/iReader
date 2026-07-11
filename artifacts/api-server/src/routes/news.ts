@@ -3924,15 +3924,9 @@ router.post("/ai-summary", async (req, res) => {
   const generate = (async (): Promise<AiSummaryEntry> => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
-    // Model fallback: if maverick is unavailable on this Groq account/region
-    // (404/400 model errors are non-retryable and would 502 EVERY summary),
-    // retry once on the deep-dive model rather than failing the user's tab.
-    let raw: string;
-    try {
-      raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
-    } catch {
-      raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
-    }
+    // No fallback to scout — scout's 30 RPM is reserved for Deep Dive.
+    // If 8b is rate-limited, fail fast and let the breaker back off.
+    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();
@@ -4261,11 +4255,7 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     let raw = "";
     try {
       await deepDiveGate();
-      // Qwen 3 32B is now primary — 60 RPM vs Scout's 30 RPM, and Scout kept
-      // getting rate-limited under real traffic (46/47 calls failed one day
-      // despite only 4% of its daily token budget used — a burst/RPM problem,
-      // not quota). Scout kept as fallback since it's still a capable model,
-      // just more prone to bursting past its lower RPM ceiling.
+      // Scout primary for Deep Dive (no thinking tokens). 8b fallback.
       try {
         raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
       } catch (firstErr) {

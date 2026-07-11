@@ -739,7 +739,15 @@ function parseRssFeed(
       }
       if (!imageUrl) imageUrl = extractFirstImage(contentRaw);
 
-      const description = stripHtml(descRaw).slice(0, 600);
+      // Wire-syndicated items (PTI via India Today, etc.) commonly ship an
+      // empty <description> with the real text only in <content:encoded>.
+      // contentRaw already falls back to descRaw when content:encoded is
+      // missing — description needs the same fallback in reverse, otherwise
+      // an empty descRaw locks the summary to "" (not undefined, so the
+      // `rep.description ?? rep.content` fallback chain downstream never
+      // kicks in) and it ultimately surfaces as the headline repeated as
+      // its own "summary".
+      const description = stripHtml(descRaw || contentRaw).slice(0, 600);
       const content = stripHtml(contentRaw).slice(0, 2000);
 
       // Use GUID as stable article ID when it looks like a real identifier.
@@ -805,7 +813,9 @@ function parseRssFeed(
       const summaryRaw = pickText(entry["summary"]);
       const contentRaw = pickText(entry["content"]) || summaryRaw;
       const imageUrl = extractFirstImage(contentRaw) ?? extractFirstImage(summaryRaw);
-      const description = stripHtml(summaryRaw).slice(0, 600);
+      // Same fallback as the RSS 2.0 branch above — an empty <summary> with
+      // real text only in <content> must not lock description to "".
+      const description = stripHtml(summaryRaw || contentRaw).slice(0, 600);
       const content = stripHtml(contentRaw).slice(0, 2000);
 
       return {
@@ -1125,7 +1135,7 @@ function deterministicCluster(articles: NewsDataArticle[]): ClusterResult {
 
     const repArticle = clusterRepresentative(members.map((idx) => articles[idx]!));
     const desc = stripHtml(
-      (repArticle.description ?? repArticle.content ?? repArticle.title ?? "").trim(),
+      (repArticle.description || repArticle.content || repArticle.title || "").trim(),
     );
     const summary = naiveParagraph(desc);
 
@@ -1856,7 +1866,11 @@ async function buildMixedFeed(articles: NewsDataArticle[], groups: number[][], t
     // lead description.
     const topicSummary =
       (enrich?.summary) ||
-      clampWords25(naiveParagraph(stripUrlJunk(stripHtml((rep.description ?? rep.content ?? rep.title ?? "").trim()))));
+      // `||` not `??` — an empty-string description (common on wire-syndicated
+      // items with a blank <description>) must fall through to content/title
+      // same as a genuinely missing field, otherwise it locks to "" and the
+      // card ends up showing its own headline as the "summary".
+      clampWords25(naiveParagraph(stripUrlJunk(stripHtml((rep.description || rep.content || rep.title || "").trim()))));
     scored.push({ item: { type: "cluster", topicTitle, topicSummary, articles: cards }, score });
   });
 
@@ -2093,7 +2107,7 @@ function stripUrlJunk(text: string): string {
 
 function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
   return articles.map((a, idx) => {
-    const rawText = (a.description ?? a.content ?? a.title ?? "").trim();
+    const rawText = (a.description || a.content || a.title || "").trim();
     // Drop "Article URL: … Comments URL: … Points: …" aggregator boilerplate so
     // raw links never show as the summary; falls back to the title if nothing
     // meaningful remains (e.g. a Hacker News item with only links).
@@ -2170,7 +2184,7 @@ function buildStoryCards(
       imageUrl: firstWithImage?.image_url ?? null,
       publishedAt: firstArticle?.pubDate ?? new Date().toISOString(),
       summary: first50Words(
-        firstArticle?.description ?? firstArticle?.content ?? firstArticle?.title ?? "",
+        firstArticle?.description || firstArticle?.content || firstArticle?.title || "",
       ),
       summaries: {
         fiveWs: cluster.fiveWs ?? [],

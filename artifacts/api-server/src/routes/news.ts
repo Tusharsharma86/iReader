@@ -52,28 +52,35 @@ function groqBgGate(): Promise<void> {
 // ~20/min, still far more responsive than the 4.5s background gate since this
 // is what the user is actively waiting on.
 let deepDiveNextSlot = 0;
+let scoutPausedUntil = 0;
 const DEEPDIVE_GATE_INTERVAL_MS = 3000;
 function deepDiveGate(): Promise<void> {
   const now = Date.now();
+  if (now < scoutPausedUntil) return Promise.reject(new Error("Groq 429"));
   const at = Math.max(now, deepDiveNextSlot);
   deepDiveNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
+function pauseScoutModel() { scoutPausedUntil = Date.now() + 65_000; }
 
 // Unified gate for ALL 8b calls (background + foreground). 8b has 30 RPM on
-// Groq free tier. Background gate at 4.5s + separate foreground calls easily
-// exceed 30 RPM combined, causing 429 → breaker cascade. Single 2s gate
-// (= max 30/min) shared across all 8b callers prevents this.
+// Groq free tier. 2.2s spacing = ~27 RPM, under the limit. On 429, pause ALL
+// 8b calls for 65s so Groq's sliding window fully resets before we resume.
 let model8bNextSlot = 0;
+let model8bPausedUntil = 0;
 const MODEL_8B_GATE_MS = 2200;
 function model8bGate(): Promise<void> {
   const now = Date.now();
+  if (now < model8bPausedUntil) {
+    return Promise.reject(new Error("Groq 429"));
+  }
   const at = Math.max(now, model8bNextSlot);
   model8bNextSlot = at + MODEL_8B_GATE_MS;
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
+function pause8bModel() { model8bPausedUntil = Date.now() + 65_000; }
 
 async function callGroq(
   prompt: string,
@@ -121,6 +128,10 @@ async function callGroq(
       continue;
     }
     recordAiUsage(model, task, 0, false);
+    if (r.status === 429) {
+      if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_FOREGROUND) pause8bModel();
+      else if (model === GROQ_MODEL) pauseScoutModel();
+    }
     throw new Error(`Groq ${r.status}`);
   }
 }

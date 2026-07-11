@@ -15,16 +15,16 @@ const router: IRouter = Router();
 // optional fallback for now (some routes still call Claude until migrated).
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 // Four separate free-tier daily budgets, task class matched to pool size:
-//   qwen3-32b 500k TPD → Deep Dive primary (60 RPM — Scout's 30 RPM kept
-//                        getting burst-limited under real traffic), article
-//                        summaries, Q&A
-//   scout     500k TPD → Deep Dive fallback only, if qwen3-32b errors
-//   8B        500k TPD → clustering / card summaries / themes / cluster
-//                        headlines (mechanical bulk)
-const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive fallback only — 500K TPD, 30 RPM
-const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // background bulk: clustering, card summaries, themes — 500K TPD, 14.4K RPD
-const GROQ_MODEL_QUALITY = "qwen/qwen3-32b"; // Deep Dive primary + Q&A — 500K TPD, 60 RPM
-const GROQ_MODEL_FOREGROUND = "llama-3.1-8b-instant"; // user-facing article summary — speed over quality (1-2s vs 5-10s on 32B)
+//   scout    500k TPD → Deep Dive primary (no thinking tokens, reliable
+//                       structured JSON output — qwen3-32b's <think> tokens
+//                       consume the 6000 max_tokens budget, truncating output)
+//   qwen3-32b 500k TPD → Q&A only (short output, thinking ok at 220-600 tokens)
+//   8B       500k TPD → article summaries, clustering, card summaries, themes,
+//                       cluster headlines (speed-sensitive bulk work)
+const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive primary — 500K TPD, 30 RPM
+const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // background bulk — 500K TPD, 14.4K RPD
+const GROQ_MODEL_QUALITY = "qwen/qwen3-32b"; // Q&A only — 500K TPD, 60 RPM (NOT for Deep Dive: <think> eats token budget)
+const GROQ_MODEL_FOREGROUND = "llama-3.1-8b-instant"; // user-facing article summary — speed (1-2s vs 5-10s on 32B)
 const GROQ_MODEL_ENRICH = "llama-3.1-8b-instant"; // cluster headlines + theme summaries (background, high volume)
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
@@ -2999,9 +2999,9 @@ router.get("/ai-usage", (_req, res) => {
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
-    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive fallback",
-    "qwen/qwen3-32b": "Deep Dive (primary) · Q&A",
-    "llama-3.1-8b-instant": "Article summaries · clustering · card summaries · themes · cluster headlines",
+    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (primary)",
+    "qwen/qwen3-32b": "Q&A only",
+    "llama-3.1-8b-instant": "Article summaries · Deep Dive fallback · clustering · themes · cluster headlines",
   };
   const KNOWN_MODELS = [
     "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -4267,10 +4267,10 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
       // not quota). Scout kept as fallback since it's still a capable model,
       // just more prone to bursting past its lower RPM ceiling.
       try {
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_QUALITY, task: "deepdive" });
-      } catch (firstErr) {
-        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: qwen3-32b failed, falling back to scout");
         raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+      } catch (firstErr) {
+        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: scout failed, falling back to 8b");
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
       }
     } finally {
       clearTimeout(t);

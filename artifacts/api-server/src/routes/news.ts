@@ -4150,7 +4150,7 @@ router.post("/deepdive", async (req, res) => {
     rawDepth === 'quick' || rawDepth === 'deep' ? rawDepth : 'standard';
 
   // v12 — 4-signal confidence: grounding + credibility + diversity + age
-  const cacheKey = `deepdive:v16:${depth}:${url}`;
+  const cacheKey = `deepdive:v17:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -4221,18 +4221,19 @@ router.post("/deepdive", async (req, res) => {
     // AFTER "Respond with JSON only." — the model followed the inline word
     // counts in the schema and ignored the trailing note, so quick/standard/deep
     // produced identical lengths.
-    const tldrBullets = 'EXACTLY 3';
-    const tldrTotal = depth === 'quick' ? '~120-150 words (hard cap 160)' : '~120-150 words (hard cap 160)';
+    const tldrBullets = depth === 'quick' ? 'EXACTLY 2-3' : 'EXACTLY 3-4';
+    const tldrTotal = depth === 'quick' ? '~230-260 words (hard cap 280)' : '~400-450 words (hard cap 450)';
     const storyWords = depth === 'quick' ? '~50-90 words' : depth === 'deep' ? '~150-220 words' : '~90-160 words';
     const storyTotal = depth === 'quick' ? 'TOTAL 250-450 words (hard cap 480)' : depth === 'deep' ? 'TOTAL 750-1100 words (min 700)' : 'TOTAL 500-900 words (min 450)';
     const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldrSections": [                                    // EXACTLY 1 section. Heading = "KEY TAKEAWAYS". ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~40-50 words) — a self-contained insight that ALWAYS ends with proper punctuation; NEVER a fragment. ${tldrTotal}. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
-    { "heading": "KEY TAKEAWAYS", "bullets": ["40-50 word complete summary.", "40-50 word complete summary.", "40-50 word complete summary."] }
+  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
+    { "heading": "CORE EVENT", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] },
+    { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
-  "tldr": ["flat fallback — 3 complete-sentence bullets, same ${tldrTotal} cap"],
+  "tldr": ["flat fallback — 6-10 complete-sentence bullets, same ${tldrTotal} cap"],
   "storySections": [                                   // THE FULL STORY. EXACTLY these 5 sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (${storyWords}) of engaging plain prose (no markdown). ${storyTotal}. Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
     // ── ABSOLUTE RULE: ZERO REPETITION. Each section must contain information that appears in NO other section. NEVER restate a fact, figure, name, quote or sentence you already used. If a section would repeat something, REPLACE it with new detail, analysis, or implication. A reader must learn something NEW in every section. Vary sentence openings; do not start multiple sections the same way.
     // Each section has a STRICT, NON-OVERLAPPING scope:

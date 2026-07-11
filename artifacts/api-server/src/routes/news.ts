@@ -3688,7 +3688,7 @@ function aiPrompt(
   text: string,
   opts: { maxWords?: number; keyPoints?: number; eli5Tone?: 'kid' | 'casual' | 'plain' } = {},
 ): { prompt: string; maxTokens: number } {
-  const maxWords = Math.max(80, Math.min(600, opts.maxWords ?? 250));
+  const maxWords = Math.max(80, Math.min(750, opts.maxWords ?? 250));
   const keyPoints = Math.max(3, Math.min(10, opts.keyPoints ?? 3));
   const eli5Tone = opts.eli5Tone ?? 'casual';
   // Map words → paragraph count for the summary prompt.
@@ -3727,19 +3727,27 @@ Article: ${text}`,
     }
     default: {
       const bulletExamples = Array.from({ length: keyPoints },
-        () => '"<takeaway, ≤25 words>"').join(',');
+        () => '"<complete 1-2 sentence takeaway, ~30-40 words>"').join(',');
       const wordRange = `${Math.round(maxWords * 0.85)}-${Math.round(maxWords * 1.1)}`;
       return {
         maxTokens: summaryTokens,
-        prompt: `You are a news editor. Write a short story-style summary of this article. Return ONLY a valid JSON object, no prose before or after, no markdown fences.
+        prompt: `You are an experienced news editor writing for an intelligent, time-pressed reader. Write a story-style summary of this article that reads like sharp journalism, not a mechanical shortening. Return ONLY a valid JSON object, no prose before or after, no markdown fences.
 
 Schema:
 {"summary":"<news-style narrative, ${wordRange} words, ${paraCount} paragraphs separated by \\n\\n. Plain journalistic prose. NO bullets, NO headers.>","bullets":[${bulletExamples}]}
 
+Editorial rules:
+- Lead with the single most important fact, not a scene-setting preamble.
+- Be specific: name the people, organizations, exact figures, dates and places from the source — never vague placeholders like "officials said" or "a significant number" when the article gives you the real name or number.
+- Explain WHY it matters or what happens next, not just what happened — one sentence of context or consequence beats a restated fact.
+- Every sentence must add new information; never restate the same fact two different ways to fill space.
+- Avoid generic AI phrasing ("in a significant development", "this comes as", "it remains to be seen") — write like a human editor, not a template.
+- "bullets" are NOT a compressed rehash of the summary — each one should surface a distinct concrete detail (a figure, a quote, a name, a next step) that a skimming reader would want even if they only read the bullets.
+
 Hard rules:
 - "summary" MUST be ${wordRange} words across ${paraCount} paragraphs separated by \\n\\n.
 - "bullets" array MUST have EXACTLY ${keyPoints} entries.
-- Each bullet ≤ 25 words.
+- Each bullet is 1-2 COMPLETE sentences, ~30-40 words — never a sentence fragment, never cut off mid-thought.
 
 Article:
 ${text}`,

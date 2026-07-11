@@ -1484,7 +1484,7 @@ ${lines}`;
       for (const u of clusterUrls(ga)) clusterEnrichUrlIndex.set(u, sig);
     }
   } catch {
-    enrichPausedUntil = Date.now() + 3 * 60 * 1000;
+    enrichPausedUntil = Date.now() + 60_000;
   } finally {
     clusterEnrichInflight.delete(sig);
   }
@@ -1556,7 +1556,7 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
     const summary = clampWords25(stripHtml(text));
     if (summary) articleSummaryCache.set(sig, { summary, at: Date.now() });
   } catch {
-    articleSummaryPausedUntil = Date.now() + 15 * 60 * 1000;
+    articleSummaryPausedUntil = Date.now() + 60_000;
   } finally {
     articleSummaryInflight.delete(sig);
   }
@@ -1793,7 +1793,7 @@ async function generateThemeSummary(key: string, theme: string, arts: NewsDataAr
     const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : "")).split(/\s+/).slice(0, 20).join(" ");
     if (summary) clusterEnrichCache.set(key, { label: "", summary, at: Date.now() });
   } catch {
-    themeSummaryPausedUntil = Date.now() + 10 * 60 * 1000; // own 10-min backoff on error
+    themeSummaryPausedUntil = Date.now() + 60_000;
   }
 }
 let themeSummaryPausedUntil = 0; // OWN pause — don't inherit cluster-enrich's

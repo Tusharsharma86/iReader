@@ -23,8 +23,8 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 //                        headlines (mechanical bulk)
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive fallback only — 500K TPD, 30 RPM
 const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // background bulk: clustering, card summaries, themes — 500K TPD, 14.4K RPD
-const GROQ_MODEL_QUALITY = "qwen/qwen3-32b"; // Deep Dive primary + article summaries, Q&A — 500K TPD, 60 RPM
-const GROQ_MODEL_FOREGROUND = "qwen/qwen3-32b"; // user-facing article summary (Summary/5Ws/ELI5)
+const GROQ_MODEL_QUALITY = "qwen/qwen3-32b"; // Deep Dive primary + Q&A — 500K TPD, 60 RPM
+const GROQ_MODEL_FOREGROUND = "llama-3.1-8b-instant"; // user-facing article summary — speed over quality (1-2s vs 5-10s on 32B)
 const GROQ_MODEL_ENRICH = "llama-3.1-8b-instant"; // cluster headlines + theme summaries (background, high volume)
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
@@ -2999,9 +2999,9 @@ router.get("/ai-usage", (_req, res) => {
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
-    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive fallback only",
-    "qwen/qwen3-32b": "Deep Dive (primary) · article summaries · Q&A",
-    "llama-3.1-8b-instant": "Clustering · card summaries · themes · cluster headlines",
+    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive fallback",
+    "qwen/qwen3-32b": "Deep Dive (primary) · Q&A",
+    "llama-3.1-8b-instant": "Article summaries · clustering · card summaries · themes · cluster headlines",
   };
   const KNOWN_MODELS = [
     "meta-llama/llama-4-scout-17b-16e-instruct",

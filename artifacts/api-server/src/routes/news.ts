@@ -23,8 +23,8 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 //                       cluster headlines (speed-sensitive bulk work)
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive primary — 500K TPD, 30 RPM
 const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // background bulk — 500K TPD, 14.4K RPD
-const GROQ_MODEL_QUALITY = "qwen/qwen3-32b"; // Q&A only — 500K TPD, 60 RPM (NOT for Deep Dive: <think> eats token budget)
-const GROQ_MODEL_FOREGROUND = "llama-3.1-8b-instant"; // user-facing article summary — speed (1-2s vs 5-10s on 32B)
+const GROQ_MODEL_QUALITY = "qwen/qwen3-32b"; // Q&A — 500K TPD, 60 RPM (NOT for Deep Dive: <think> eats 6K token budget)
+const GROQ_MODEL_FOREGROUND = "qwen/qwen3-32b"; // user-facing article summary — 60 RPM, separate budget from scout/8b
 const GROQ_MODEL_ENRICH = "llama-3.1-8b-instant"; // cluster headlines + theme summaries (background, high volume)
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
@@ -91,7 +91,7 @@ async function callGroq(
   if (!key) throw new Error("GROQ_API_KEY missing");
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
-  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_FOREGROUND) await model8bGate();
+  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH) await model8bGate();
   else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
@@ -129,7 +129,7 @@ async function callGroq(
     }
     recordAiUsage(model, task, 0, false);
     if (r.status === 429) {
-      if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_FOREGROUND) pause8bModel();
+      if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH) pause8bModel();
       else if (model === GROQ_MODEL) pauseScoutModel();
     }
     throw new Error(`Groq ${r.status}`);
@@ -3021,8 +3021,8 @@ router.get("/ai-usage", (_req, res) => {
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (primary)",
-    "qwen/qwen3-32b": "Q&A only",
-    "llama-3.1-8b-instant": "Article summaries · Deep Dive fallback · clustering · themes · cluster headlines",
+    "qwen/qwen3-32b": "Article summaries · Q&A",
+    "llama-3.1-8b-instant": "Deep Dive fallback · clustering · themes · cluster headlines · card summaries",
   };
   const KNOWN_MODELS = [
     "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -3945,7 +3945,8 @@ router.post("/ai-summary", async (req, res) => {
   const generate = (async (): Promise<AiSummaryEntry> => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
-    const raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
+    // qwen3-32b thinking tokens consume max_tokens budget — pad 500 extra
+    const raw = (await callGroq(prompt, maxTokens + 500, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();

@@ -112,17 +112,12 @@ async function callGroq(
       if (model.includes("qwen")) content = content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
       return content;
     }
-    // Retry on rate-limit / transient 5xx — foreground gets up to 2 retries
-    // (article-summary, deepdive etc. are user-facing), background gets 1.
-    const retryable = r.status === 429 || r.status === 502 || r.status === 503;
-    const maxAttempts = opts.background ? 1 : 2;
-    if (retryable && attempt < maxAttempts) {
-      // Honor Retry-After if present, else exponential back-off (2s, 5s).
-      const ra = Number(r.headers.get("retry-after"));
-      const waitMs = Number.isFinite(ra) && ra > 0
-        ? Math.min(ra * 1000, 8000)
-        : (attempt === 0 ? 2000 : 5000);
-      await new Promise((res) => setTimeout(res, waitMs));
+    // Only retry on transient server errors (502/503), NOT on 429 — retrying
+    // rate-limits multiplies the RPM pressure and makes the window worse.
+    // The per-model gate prevents 429s; if one still happens, fail fast.
+    const retryable = r.status === 502 || r.status === 503;
+    if (retryable && attempt < 1) {
+      await new Promise((res) => setTimeout(res, 3000));
       continue;
     }
     recordAiUsage(model, task, 0, false);

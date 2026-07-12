@@ -18,8 +18,8 @@ const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive pri
 const GROQ_MODEL_FAST = "openai/gpt-oss-20b"; // background bulk (replaced deprecated 8b)
 const GROQ_MODEL_QUALITY = "openai/gpt-oss-20b"; // Q&A (replaced deprecated qwen)
 const GROQ_MODEL_ENRICH = "openai/gpt-oss-20b"; // cluster headlines + themes
-const CEREBRAS_MODEL = "llama-3.1-8b"; // article summaries — fast, separate free budget
-const CEREBRAS_MODEL_SCOUT = "llama-4-scout"; // Deep Dive — 2600+ tok/s on Cerebras
+const CEREBRAS_MODEL = "llama3.1-8b"; // article summaries — fast, separate free budget
+const CEREBRAS_MODEL_SCOUT = "llama-4-scout-17b-16e-instruct"; // Deep Dive — 2600+ tok/s on Cerebras
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -177,8 +177,8 @@ async function callGroq(
 const GROQ_TPD_LIMITS: Record<string, number> = {
   "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
   "openai/gpt-oss-20b": 500000,
-  "llama-4-scout": 1000000,
-  "llama-3.1-8b": 1000000,
+  "llama-4-scout-17b-16e-instruct": 1000000,
+  "llama3.1-8b": 1000000,
 };
 interface TaskUsage { tokens: number; calls: number; errors: number; }
 interface ModelUsage { tokens: number; calls: number; errors: number; tasks: Record<string, TaskUsage>; }
@@ -3056,14 +3056,14 @@ router.get("/ai-usage", (_req, res) => {
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
-    "llama-4-scout": "Deep Dive (Cerebras, primary)",
+    "llama-4-scout-17b-16e-instruct": "Deep Dive (Cerebras primary / Groq fallback)",
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (Groq fallback)",
     "openai/gpt-oss-20b": "Q&A · clustering · themes · Deep Dive fallback",
-    "llama-3.1-8b": "Article summaries (Cerebras)",
+    "llama3.1-8b": "Article summaries (Cerebras)",
   };
   const KNOWN_MODELS = [
-    "llama-4-scout",
-    "llama-3.1-8b",
+    "llama-4-scout-17b-16e-instruct",
+    "llama3.1-8b",
     "meta-llama/llama-4-scout-17b-16e-instruct",
     "openai/gpt-oss-20b",
   ];
@@ -3071,7 +3071,7 @@ router.get("/ai-usage", (_req, res) => {
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "llama-4-scout": 5000, "llama-3.1-8b": 5000 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "llama-4-scout-17b-16e-instruct": 5000, "llama3.1-8b": 5000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     return {
       model,

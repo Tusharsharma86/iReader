@@ -75,13 +75,31 @@ function model8bGate(): Promise<void> {
 function pause8bModel() { model8bPausedUntil = Date.now() + 65_000; }
 
 // ── Cerebras inference (article summaries) ──────────────────────────────────
+// Free tier is ~30 RPM. Background calls (feed card summaries) are serialized
+// at 2.5s spacing so a feed build's ~25-call burst can't starve user-facing
+// summaries/Deep Dives. A 429 pauses ALL Cerebras calls 30s so the window
+// resets; callers fail fast to their Groq fallback instead of queueing.
+let cerebrasBgNextSlot = 0;
+const CEREBRAS_BG_INTERVAL_MS = 2500;
+function cerebrasBgGate(): Promise<void> {
+  const now = Date.now();
+  const at = Math.max(now, cerebrasBgNextSlot);
+  cerebrasBgNextSlot = at + CEREBRAS_BG_INTERVAL_MS;
+  const wait = at - now;
+  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+}
+let cerebrasPausedUntil = 0;
+function pauseCerebras() { cerebrasPausedUntil = Date.now() + 30_000; }
+
 async function callCerebras(
   prompt: string,
   maxTokens: number,
-  opts: { temperature?: number; task?: string; jsonMode?: boolean; model?: string; signal?: AbortSignal } = {},
+  opts: { temperature?: number; task?: string; jsonMode?: boolean; model?: string; signal?: AbortSignal; background?: boolean } = {},
 ): Promise<string> {
   const key = process.env["CEREBRAS_API_KEY"];
   if (!key) throw new Error("CEREBRAS_API_KEY missing");
+  if (Date.now() < cerebrasPausedUntil) throw new Error("cerebras-paused");
+  if (opts.background) await cerebrasBgGate();
   const model = opts.model ?? CEREBRAS_MODEL;
   const task = opts.task ?? "other";
   // gpt-oss-120b is a reasoning model: its chain-of-thought consumes
@@ -121,6 +139,7 @@ async function callCerebras(
       continue;
     }
     recordAiUsage(model, task, 0, false);
+    if (r.status === 429) pauseCerebras();
     throw new Error(`Cerebras ${r.status}`);
   }
 }
@@ -135,6 +154,7 @@ async function callGroq(
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
   if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate();
+  else if (model === GROQ_MODEL && Date.now() < scoutPausedUntil) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
@@ -1619,7 +1639,7 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
     let rawText: string;
     if (process.env["CEREBRAS_API_KEY"]) {
       try {
-        rawText = await callCerebras(prompt, 80, { task: "article-summary-feed" });
+        rawText = await callCerebras(prompt, 80, { task: "article-summary-feed", background: true });
       } catch {
         rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
       }

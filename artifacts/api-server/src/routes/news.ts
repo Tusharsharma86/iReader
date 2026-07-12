@@ -3054,9 +3054,9 @@ router.get("/ai-usage", (_req, res) => {
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
-    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive primary",
-    "openai/gpt-oss-20b": "Q&A · clustering · Deep Dive fallback",
-    "gpt-oss-120b": "Article summaries (Cerebras, ~3000 tok/s)",
+    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive fallback (Groq)",
+    "openai/gpt-oss-20b": "Q&A · clustering · Deep Dive last-resort",
+    "gpt-oss-120b": "Summaries + Deep Dive (Cerebras, ~3000 tok/s)",
   };
   const KNOWN_MODELS = [
     "llama-4-scout-17b-16e-instruct",
@@ -4305,13 +4305,22 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     const t = setTimeout(() => ctrl.abort(), 90000);
     let raw = "";
     try {
-      // Groq Scout primary → Groq gpt-oss-20b fallback
+      // Cerebras gpt-oss-120b primary → Groq Scout → Groq gpt-oss-20b
       try {
-        await deepDiveGate();
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+        if (process.env["CEREBRAS_API_KEY"]) {
+          raw = await callCerebras(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+        } else {
+          await deepDiveGate();
+          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+        }
       } catch (firstErr) {
-        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: Scout failed, falling back to gpt-oss-20b");
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
+        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
+        try {
+          await deepDiveGate();
+          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+        } catch {
+          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
+        }
       }
     } finally {
       clearTimeout(t);

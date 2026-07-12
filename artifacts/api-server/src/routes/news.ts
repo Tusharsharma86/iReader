@@ -56,7 +56,7 @@ let scoutPausedUntil = 0;
 const DEEPDIVE_GATE_INTERVAL_MS = 3000;
 function deepDiveGate(): Promise<void> {
   const now = Date.now();
-  if (now < scoutPausedUntil) return Promise.reject(new Error("Groq 429"));
+  if (now < scoutPausedUntil) return Promise.reject(new Error("rate-gate-paused"));
   const at = Math.max(now, deepDiveNextSlot);
   deepDiveNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
   const wait = at - now;
@@ -73,7 +73,7 @@ const MODEL_8B_GATE_MS = 2200;
 function model8bGate(): Promise<void> {
   const now = Date.now();
   if (now < model8bPausedUntil) {
-    return Promise.reject(new Error("Groq 429"));
+    return Promise.reject(new Error("rate-gate-paused"));
   }
   const at = Math.max(now, model8bNextSlot);
   model8bNextSlot = at + MODEL_8B_GATE_MS;
@@ -87,7 +87,7 @@ let qwenPausedUntil = 0;
 const QWEN_GATE_MS = 1100;
 function qwenGate(): Promise<void> {
   const now = Date.now();
-  if (now < qwenPausedUntil) return Promise.reject(new Error("Groq 429"));
+  if (now < qwenPausedUntil) return Promise.reject(new Error("rate-gate-paused"));
   const at = Math.max(now, qwenNextSlot);
   qwenNextSlot = at + QWEN_GATE_MS;
   const wait = at - now;

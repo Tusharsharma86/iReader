@@ -17,7 +17,7 @@ const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive pri
 const GROQ_MODEL_FAST = "openai/gpt-oss-20b"; // background bulk + article summaries
 const GROQ_MODEL_QUALITY = "openai/gpt-oss-20b"; // Q&A
 const GROQ_MODEL_ENRICH = "openai/gpt-oss-20b"; // cluster headlines + themes
-const CEREBRAS_MODEL = "llama-4-scout-17b-16e-instruct"; // optional Cerebras boost
+const CEREBRAS_MODEL = "gpt-oss-120b"; // ~3000 tok/s, free tier
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -3055,8 +3055,8 @@ router.get("/ai-usage", (_req, res) => {
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive primary",
-    "openai/gpt-oss-20b": "Summaries · Q&A · clustering · Deep Dive fallback",
-    "llama-4-scout-17b-16e-instruct": "Cerebras (optional)",
+    "openai/gpt-oss-20b": "Q&A · clustering · Deep Dive fallback",
+    "gpt-oss-120b": "Article summaries (Cerebras, ~3000 tok/s)",
   };
   const KNOWN_MODELS = [
     "llama-4-scout-17b-16e-instruct",
@@ -3978,7 +3978,16 @@ router.post("/ai-summary", async (req, res) => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
     let raw = "{}";
-    raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
+    if (process.env["CEREBRAS_API_KEY"]) {
+      try {
+        raw = (await callCerebras(prompt, maxTokens, { task: "article-summary" })) || "{}";
+      } catch (cerebrasErr) {
+        req.log.warn({ err: cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr) }, "ai-summary: Cerebras failed, falling back to Groq");
+        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
+      }
+    } else {
+      raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
+    }
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();

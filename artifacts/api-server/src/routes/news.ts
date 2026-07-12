@@ -1616,7 +1616,17 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
     const prompt = body.length > 12
       ? `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${card.headline ?? ""}\n${body}\n\nSummary:`
       : `Write ONE neutral, informative sentence of AT MOST 25 words describing what this article is most likely about, based on its headline. No preamble, no markdown, no speculation beyond the headline.\n\nHeadline: ${card.headline ?? ""}\n\nSummary:`;
-    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true })).trim().replace(/^summary:\s*/i, "");
+    let rawText: string;
+    if (process.env["CEREBRAS_API_KEY"]) {
+      try {
+        rawText = await callCerebras(prompt, 80, { task: "article-summary-feed" });
+      } catch {
+        rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+      }
+    } else {
+      rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+    }
+    const text = rawText.trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
     if (summary) articleSummaryCache.set(sig, { summary, at: Date.now() });
   } catch {

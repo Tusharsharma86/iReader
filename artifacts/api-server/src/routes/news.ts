@@ -18,7 +18,7 @@ const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive pri
 const GROQ_MODEL_FAST = "openai/gpt-oss-20b"; // background bulk (replaced deprecated 8b)
 const GROQ_MODEL_QUALITY = "openai/gpt-oss-20b"; // Q&A (replaced deprecated qwen)
 const GROQ_MODEL_ENRICH = "openai/gpt-oss-20b"; // cluster headlines + themes
-const CEREBRAS_MODEL = "llama3.1-8b"; // article summaries — fast, separate free budget
+const CEREBRAS_MODEL = "llama-4-scout-17b-16e-instruct"; // article summaries — same model as Deep Dive, fast on Cerebras
 const CEREBRAS_MODEL_SCOUT = "llama-4-scout-17b-16e-instruct"; // Deep Dive — 2600+ tok/s on Cerebras
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,

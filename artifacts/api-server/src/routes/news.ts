@@ -3983,7 +3983,7 @@ router.post("/ai-summary", async (req, res) => {
     let raw = "{}";
     if (process.env["CEREBRAS_API_KEY"]) {
       try {
-        raw = (await callCerebras(prompt, maxTokens, { task: "article-summary", jsonMode: true })) || "{}";
+        raw = (await callCerebras(prompt, maxTokens, { task: "article-summary" })) || "{}";
       } catch {
         raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_QUALITY, task: "article-summary", jsonMode: true })) || "{}";
       }

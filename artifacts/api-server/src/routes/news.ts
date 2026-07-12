@@ -225,6 +225,18 @@ function recordAiUsage(model: string, task: string, tokens: number, ok: boolean)
 // container (dev workflow restarts, autoscale instance reuse). Replit Autoscale
 // instances get a fresh /tmp on cold-start, so this is best-effort persistence
 // — the next user request will trigger a fresh refresh if cache is empty.
+// ── Keep-alive self-ping ─────────────────────────────────────────────────────
+// Render free tier spins the container down after ~15 min without inbound
+// traffic; the next visitor then eats a 30-60s cold start. Pinging our own
+// public URL every 10 min counts as inbound and keeps the instance warm.
+// 750 free instance-hours/month covers one service running 24/7.
+const SELF_PING_URL = process.env["RENDER_EXTERNAL_URL"]
+  ? `${process.env["RENDER_EXTERNAL_URL"]}/api/news/ai-usage`
+  : "https://ireader.onrender.com/api/news/ai-usage";
+if (process.env["NODE_ENV"] === "production") {
+  setInterval(() => { fetch(SELF_PING_URL).catch(() => {}); }, 10 * 60 * 1000).unref();
+}
+
 const FEED_DISK_CACHE_PATH = "/tmp/particle-news-feed-cache.json";
 
 type Source = {
@@ -243,11 +255,6 @@ type StoryCard = {
   publishedAt: string;
   summary: string;
   aiSummary?: string;
-  summaries: {
-    fiveWs: string[];
-    eli5: string;
-    keyHighlights: string;
-  };
   sources: Source[];
   sourceCount: number;
   isTrending?: boolean;
@@ -2215,8 +2222,6 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
     const sourceType = classifySource(sourceUrl, sourceName);
 
     const headline = (a.title ?? text.slice(0, 90) ?? "Untitled").trim();
-    const fiveWs = naiveFiveWs(text);
-    const paragraph = naiveParagraph(text);
 
     return {
       id: createHash("md5").update(sourceUrl || a.article_id || `${Date.now()}-${idx}`).digest("hex").slice(0, 16),
@@ -2227,11 +2232,6 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
       // Display summary = cleaned description only (empty if it was just links/
       // points — top cards then get an AI summary post-sort).
       summary: first50Words(cleaned),
-      summaries: {
-        fiveWs,
-        eli5: paragraph,
-        keyHighlights: paragraph,
-      },
       sources: [
         {
           name: sourceName,
@@ -2283,14 +2283,6 @@ function buildStoryCards(
       summary: first50Words(
         firstArticle?.description || firstArticle?.content || firstArticle?.title || "",
       ),
-      summaries: {
-        fiveWs: cluster.fiveWs ?? [],
-        eli5: typeof cluster.eli5 === "string" ? cluster.eli5 : "",
-        keyHighlights:
-          typeof cluster.keyHighlights === "string"
-            ? cluster.keyHighlights
-            : "",
-      },
       sources,
       sourceCount: sources.length,
     };
@@ -3991,6 +3983,10 @@ router.post("/ai-summary", async (req, res) => {
     return;
   }
 
+  // Expired-but-present copy → stale-while-revalidate below: serve it
+  // instantly, refresh in the background. Same pattern clusters use.
+  const staleEntry = cached ?? diskCached ?? null;
+
   if (!process.env["GROQ_API_KEY"]) {
     res.status(502).json({ error: "AI not configured" });
     return;
@@ -4004,11 +4000,13 @@ router.post("/ai-summary", async (req, res) => {
   // of a duplicate Groq call (two users pre-warming the same story).
   const inflight = aiSummaryInflightMap.get(cacheKey);
   if (inflight) {
+    if (staleEntry) { res.json({ ...staleEntry, cached: true, stale: true }); return; }
     try { res.json({ ...(await inflight), cached: true }); }
     catch { res.status(502).json({ error: "AI summary unavailable" }); }
     return;
   }
   if (aiSummaryActiveCount >= AI_SUMMARY_MAX_CONCURRENT) {
+    if (staleEntry) { res.json({ ...staleEntry, cached: true, stale: true }); return; }
     res.status(503).set("Retry-After", "5").json({ error: "AI summary busy" });
     return;
   }
@@ -4026,16 +4024,24 @@ router.post("/ai-summary", async (req, res) => {
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords: effectiveMaxWords, keyPoints: effectiveKeyPoints, eli5Tone });
     let raw = "{}";
     let cerebrasNote = "";
-    if (process.env["CEREBRAS_API_KEY"]) {
-      try {
-        raw = (await callCerebras(prompt, maxTokens, { task: "article-summary" })) || "{}";
-      } catch (cerebrasErr) {
-        cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
-        req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
-        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
+    // 30s abort — without it a hung provider held the request until the
+    // client gave up (Deep Dive always had one; summaries didn't).
+    const ctrl = new AbortController();
+    const abortTimer = setTimeout(() => ctrl.abort(), 30000);
+    try {
+      if (process.env["CEREBRAS_API_KEY"]) {
+        try {
+          raw = (await callCerebras(prompt, maxTokens, { task: "article-summary", signal: ctrl.signal })) || "{}";
+        } catch (cerebrasErr) {
+          cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
+          req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
+          raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
+        }
+      } else {
+        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
       }
-    } else {
-      raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
+    } finally {
+      clearTimeout(abortTimer);
     }
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
@@ -4075,6 +4081,16 @@ router.post("/ai-summary", async (req, res) => {
 
   aiSummaryActiveCount++;
   aiSummaryInflightMap.set(cacheKey, generate);
+  // Stale-while-revalidate: expired copy goes out instantly; the refresh
+  // continues in the background and lands in cache for the next request.
+  if (staleEntry) {
+    generate.catch(() => {}).finally(() => {
+      aiSummaryActiveCount--;
+      aiSummaryInflightMap.delete(cacheKey);
+    });
+    res.json({ ...staleEntry, cached: true, stale: true });
+    return;
+  }
   try {
     const result = await generate;
     res.json({ ...result, cached: false });
@@ -4542,8 +4558,14 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     const t = setTimeout(() => ctrl.abort(), 60000);
     let answer = "";
     try {
-      try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
-      catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+      // Cerebras primary (fast, separate RPM pool) → Groq gpt-oss-20b fallback
+      if (process.env["CEREBRAS_API_KEY"]) {
+        try { answer = (await callCerebras(prompt, 600, { signal: ctrl.signal, temperature: 0.5, task: "qna" })).trim(); }
+        catch { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+      } else {
+        try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+        catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+      }
     } finally { clearTimeout(t); }
     if (!answer) throw new Error("Empty answer");
 

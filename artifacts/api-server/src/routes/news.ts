@@ -3989,12 +3989,11 @@ router.post("/ai-summary", async (req, res) => {
       raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
     }
 
+    req.log.info({ rawLen: raw.length, rawSnippet: raw.slice(0, 300) }, "ai-summary raw response");
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();
     try { parsed = JSON.parse(cleaned); }
     catch {
-      // Forgiving recovery: extract the largest {...} block and escape stray
-      // raw newlines inside string values so a model quirk never blanks output.
       try {
         const m = cleaned.match(/\{[\s\S]*\}/);
         if (m) {
@@ -4004,12 +4003,13 @@ router.post("/ai-summary", async (req, res) => {
       } catch { /* give up */ }
     }
 
-    const result: AiSummaryEntry = {
+    const result: AiSummaryEntry & { _raw?: string } = {
       at: Date.now(),
       bullets: Array.isArray(parsed.bullets) ? parsed.bullets.slice(0, 12) : [],
       summary: typeof parsed.summary === "string" ? parsed.summary : "",
       fiveWs: Array.isArray(parsed.fiveWs) ? parsed.fiveWs.slice(0, 5) : [],
       eli5: typeof parsed.eli5 === "string" ? parsed.eli5 : "",
+      _raw: raw.slice(0, 500),
     };
 
     // Only cache if the result is genuinely useful. For "summary" we now

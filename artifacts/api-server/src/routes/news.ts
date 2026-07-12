@@ -4015,7 +4015,15 @@ router.post("/ai-summary", async (req, res) => {
 
   const generate = (async (): Promise<AiSummaryEntry> => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
-    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
+    // Ratio guard — a summary must be meaningfully shorter than its source or
+    // the model pads/hallucinates to hit the word target. Cap at ~45% of the
+    // article, floor 60 words so tiny articles still get a usable summary.
+    // Long articles (800+ words) honor the user's Customize setting untouched.
+    const sourceWords = text.split(/\s+/).filter(Boolean).length;
+    const ratioCap = Math.max(60, Math.round(sourceWords * 0.45));
+    const effectiveMaxWords = Math.min(maxWords ?? 250, ratioCap);
+    const effectiveKeyPoints = sourceWords < 150 ? Math.min(keyPoints ?? 3, 2) : keyPoints;
+    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords: effectiveMaxWords, keyPoints: effectiveKeyPoints, eli5Tone });
     let raw = "{}";
     let cerebrasNote = "";
     if (process.env["CEREBRAS_API_KEY"]) {

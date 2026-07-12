@@ -9,23 +9,16 @@ import { getNotifHistoryForToken, getMutedThemesForToken, setMutedThemesForToken
 
 const router: IRouter = Router();
 
-// ── Groq AI helper ──────────────────────────────────────────────────────────
-// All AI summaries now go through Groq's Llama 4 Scout. Free tier, much faster
-// than Claude, similar quality for structured JSON. ANTHROPIC_API_KEY kept as
-// optional fallback for now (some routes still call Claude until migrated).
+// ── AI inference providers ──────────────────────────────────────────────────
+// Groq (LPU) for Deep Dive, Q&A, background bulk.
+// Cerebras (wafer-scale) for article summaries — 2600+ tok/s, separate free budget.
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-// Four separate free-tier daily budgets, task class matched to pool size:
-//   scout    500k TPD → Deep Dive primary (no thinking tokens, reliable
-//                       structured JSON output — qwen3-32b's <think> tokens
-//                       consume the 6000 max_tokens budget, truncating output)
-//   qwen3-32b 500k TPD → Q&A only (short output, thinking ok at 220-600 tokens)
-//   8B       500k TPD → article summaries, clustering, card summaries, themes,
-//                       cluster headlines (speed-sensitive bulk work)
-const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive primary — 500K TPD, 30 RPM
-const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // background bulk — 500K TPD, 14.4K RPD
-const GROQ_MODEL_QUALITY = "qwen/qwen3-32b"; // Q&A — 500K TPD, 60 RPM (NOT for Deep Dive: <think> eats 6K token budget)
-const GROQ_MODEL_FOREGROUND = "qwen/qwen3-32b"; // user-facing article summary — 60 RPM, separate budget from scout/8b
-const GROQ_MODEL_ENRICH = "llama-3.1-8b-instant"; // cluster headlines + theme summaries (background, high volume)
+const CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions";
+const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive primary
+const GROQ_MODEL_FAST = "openai/gpt-oss-20b"; // background bulk (replaced deprecated 8b)
+const GROQ_MODEL_QUALITY = "openai/gpt-oss-20b"; // Q&A (replaced deprecated qwen)
+const GROQ_MODEL_ENRICH = "openai/gpt-oss-20b"; // cluster headlines + themes
+const CEREBRAS_MODEL = "llama-3.1-8b"; // article summaries — fast, separate free budget
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -82,18 +75,45 @@ function model8bGate(): Promise<void> {
 }
 function pause8bModel() { model8bPausedUntil = Date.now() + 65_000; }
 
-let qwenNextSlot = 0;
-let qwenPausedUntil = 0;
-const QWEN_GATE_MS = 1100;
-function qwenGate(): Promise<void> {
-  const now = Date.now();
-  if (now < qwenPausedUntil) return Promise.reject(new Error("rate-gate-paused"));
-  const at = Math.max(now, qwenNextSlot);
-  qwenNextSlot = at + QWEN_GATE_MS;
-  const wait = at - now;
-  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+// ── Cerebras inference (article summaries) ──────────────────────────────────
+async function callCerebras(
+  prompt: string,
+  maxTokens: number,
+  opts: { temperature?: number; task?: string; jsonMode?: boolean } = {},
+): Promise<string> {
+  const key = process.env["CEREBRAS_API_KEY"];
+  if (!key) throw new Error("CEREBRAS_API_KEY missing");
+  const task = opts.task ?? "other";
+  const body: Record<string, unknown> = {
+    model: CEREBRAS_MODEL,
+    max_tokens: maxTokens,
+    temperature: opts.temperature ?? 0.3,
+    messages: [{ role: "user", content: prompt }],
+  };
+  if (opts.jsonMode) body["response_format"] = { type: "json_object" };
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(CEREBRAS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      const data = (await r.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+        usage?: { total_tokens?: number };
+      };
+      recordAiUsage(CEREBRAS_MODEL, task, data.usage?.total_tokens ?? 0, true);
+      return data.choices?.[0]?.message?.content ?? "";
+    }
+    const retryable = r.status === 502 || r.status === 503;
+    if (retryable && attempt < 1) {
+      await new Promise((res) => setTimeout(res, 2000));
+      continue;
+    }
+    recordAiUsage(CEREBRAS_MODEL, task, 0, false);
+    throw new Error(`Cerebras ${r.status}`);
+  }
 }
-function pauseQwenModel() { qwenPausedUntil = Date.now() + 65_000; }
 
 async function callGroq(
   prompt: string,
@@ -104,8 +124,7 @@ async function callGroq(
   if (!key) throw new Error("GROQ_API_KEY missing");
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
-  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH) await model8bGate();
-  else if (model === GROQ_MODEL_QUALITY || model === GROQ_MODEL_FOREGROUND) await qwenGate();
+  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate();
   else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
@@ -129,8 +148,7 @@ async function callGroq(
         usage?: { total_tokens?: number };
       };
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
-      let content = data.choices?.[0]?.message?.content ?? "";
-      if (model.includes("qwen")) content = content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      const content = data.choices?.[0]?.message?.content ?? "";
       return content;
     }
     // Only retry on transient server errors (502/503), NOT on 429 — retrying
@@ -143,9 +161,8 @@ async function callGroq(
     }
     recordAiUsage(model, task, 0, false);
     if (r.status === 429) {
-      if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH) pause8bModel();
+      if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) pause8bModel();
       else if (model === GROQ_MODEL) pauseScoutModel();
-      else if (model === GROQ_MODEL_QUALITY || model === GROQ_MODEL_FOREGROUND) pauseQwenModel();
     }
     throw new Error(`Groq ${r.status}`);
   }
@@ -156,8 +173,8 @@ async function callGroq(
 // per UTC day. In-memory (resets on container cold start) — best-effort gauge.
 const GROQ_TPD_LIMITS: Record<string, number> = {
   "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
-  "llama-3.1-8b-instant": 500000,
-  "qwen/qwen3-32b": 500000,
+  "openai/gpt-oss-20b": 500000,
+  "llama-3.1-8b": 1000000,
 };
 interface TaskUsage { tokens: number; calls: number; errors: number; }
 interface ModelUsage { tokens: number; calls: number; errors: number; tasks: Record<string, TaskUsage>; }
@@ -3036,19 +3053,19 @@ router.get("/ai-usage", (_req, res) => {
   };
   const MODEL_ROLE: Record<string, string> = {
     "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (primary)",
-    "qwen/qwen3-32b": "Article summaries · Q&A",
-    "llama-3.1-8b-instant": "Deep Dive fallback · clustering · themes · cluster headlines · card summaries",
+    "openai/gpt-oss-20b": "Q&A · clustering · themes · Deep Dive fallback",
+    "llama-3.1-8b": "Article summaries (Cerebras)",
   };
   const KNOWN_MODELS = [
     "meta-llama/llama-4-scout-17b-16e-instruct",
-    "qwen/qwen3-32b",
-    "llama-3.1-8b-instant",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b",
   ];
   const allModels = Array.from(new Set([...KNOWN_MODELS, ...Object.keys(aiUsageByModel)]));
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMITS: Record<string, number> = { "llama-3.1-8b-instant": 14400, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "qwen/qwen3-32b": 1000 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "llama-3.1-8b": 5000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     return {
       model,
@@ -3718,8 +3735,7 @@ const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
 const aiSummaryInflightMap = new Map<string, Promise<AiSummaryEntry>>();
 let aiSummaryActiveCount = 0;
 const AI_SUMMARY_MAX_CONCURRENT = 4;
-// Route-level breaker removed — per-request qwenGate + pauseQwenModel
-// already handle rate limiting without blanket-blocking all requests for 60s.
+// Article summaries now use Cerebras (separate free budget, no gate needed).
 
 type AiSummaryType = "summary" | "fiveWs" | "eli5";
 
@@ -3941,7 +3957,7 @@ router.post("/ai-summary", async (req, res) => {
   // Load shedding — client pre-warm fires 40 of these per session, so without
   // guards a few concurrent sessions turn into a Groq 429 retry storm that
   // also starves Deep Dive / Q&A (shared RPM).
-  // Per-request qwenGate handles spacing; no route-level breaker needed.
+  // Article summaries use Cerebras (separate provider, no Groq RPM contention).
   // Coalesce: identical request already generating → share its result instead
   // of a duplicate Groq call (two users pre-warming the same story).
   const inflight = aiSummaryInflightMap.get(cacheKey);
@@ -3958,8 +3974,16 @@ router.post("/ai-summary", async (req, res) => {
   const generate = (async (): Promise<AiSummaryEntry> => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
-    // qwen3-32b thinking tokens consume max_tokens budget — pad 500 extra
-    const raw = (await callGroq(prompt, maxTokens + 500, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
+    let raw = "{}";
+    if (process.env["CEREBRAS_API_KEY"]) {
+      try {
+        raw = (await callCerebras(prompt, maxTokens, { task: "article-summary", jsonMode: true })) || "{}";
+      } catch {
+        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_QUALITY, task: "article-summary", jsonMode: true })) || "{}";
+      }
+    } else {
+      raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_QUALITY, task: "article-summary", jsonMode: true })) || "{}";
+    }
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();

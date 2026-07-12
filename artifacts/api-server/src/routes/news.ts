@@ -3718,7 +3718,8 @@ const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
 const aiSummaryInflightMap = new Map<string, Promise<AiSummaryEntry>>();
 let aiSummaryActiveCount = 0;
 const AI_SUMMARY_MAX_CONCURRENT = 4;
-let aiSummaryRoutePausedUntil = 0;
+// Route-level breaker removed — per-request qwenGate + pauseQwenModel
+// already handle rate limiting without blanket-blocking all requests for 60s.
 
 type AiSummaryType = "summary" | "fiveWs" | "eli5";
 
@@ -3940,10 +3941,7 @@ router.post("/ai-summary", async (req, res) => {
   // Load shedding — client pre-warm fires 40 of these per session, so without
   // guards a few concurrent sessions turn into a Groq 429 retry storm that
   // also starves Deep Dive / Q&A (shared RPM).
-  if (Date.now() < aiSummaryRoutePausedUntil) {
-    res.status(503).set("Retry-After", "60").json({ error: "AI summary temporarily rate-limited" });
-    return;
-  }
+  // Per-request qwenGate handles spacing; no route-level breaker needed.
   // Coalesce: identical request already generating → share its result instead
   // of a duplicate Groq call (two users pre-warming the same story).
   const inflight = aiSummaryInflightMap.get(cacheKey);
@@ -4006,11 +4004,6 @@ router.post("/ai-summary", async (req, res) => {
     const result = await generate;
     res.json({ ...result, cached: false });
   } catch (err) {
-    // Rate-limit from Groq → trip the breaker so the pre-warm herd backs off
-    // for 60s instead of each request retrying into the same wall.
-    if (err instanceof Error && /429/.test(err.message)) {
-      aiSummaryRoutePausedUntil = Date.now() + 60_000;
-    }
     req.log.error({ err }, "ai-summary failed");
     res.status(502).json({ error: "AI summary unavailable" });
   } finally {

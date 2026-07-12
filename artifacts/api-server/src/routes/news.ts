@@ -104,11 +104,16 @@ async function callCerebras(
     });
     if (r.ok) {
       const data = (await r.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
         usage?: { total_tokens?: number };
       };
+      const content = data.choices?.[0]?.message?.content ?? "";
+      if (!content.trim()) {
+        recordAiUsage(model, task, data.usage?.total_tokens ?? 0, false);
+        throw new Error(`Cerebras empty content: ${JSON.stringify(data.choices?.[0]).slice(0, 300)}`);
+      }
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
-      return data.choices?.[0]?.message?.content ?? "";
+      return content;
     }
     const retryable = r.status === 502 || r.status === 503;
     if (retryable && attempt < 1) {
@@ -3982,11 +3987,13 @@ router.post("/ai-summary", async (req, res) => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
     let raw = "{}";
+    let cerebrasNote = "";
     if (process.env["CEREBRAS_API_KEY"]) {
       try {
         raw = (await callCerebras(prompt, maxTokens, { task: "article-summary" })) || "{}";
       } catch (cerebrasErr) {
-        req.log.warn({ err: cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr) }, "ai-summary: Cerebras failed, falling back to Groq");
+        cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
+        req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
         raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
       }
     } else {
@@ -4013,7 +4020,7 @@ router.post("/ai-summary", async (req, res) => {
       summary: typeof parsed.summary === "string" ? parsed.summary : "",
       fiveWs: Array.isArray(parsed.fiveWs) ? parsed.fiveWs.slice(0, 5) : [],
       eli5: typeof parsed.eli5 === "string" ? parsed.eli5 : "",
-      _raw: raw.slice(0, 500),
+      _raw: (cerebrasNote ? `[cerebras: ${cerebrasNote}] ` : "") + raw.slice(0, 500),
     };
 
     // Only cache if the result is genuinely useful. For "summary" we now

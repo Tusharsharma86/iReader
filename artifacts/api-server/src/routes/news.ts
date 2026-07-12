@@ -3112,7 +3112,7 @@ router.get("/questions", async (req, res) => {
 Headlines:
 ${headlines}`;
 
-    const raw = await callGroq(prompt, 400, { model: GROQ_MODEL_QUALITY, task: 'questions', jsonMode: true });
+    const raw = await callGroq(prompt, 400, { model: GROQ_MODEL, task: 'questions', jsonMode: true });
     const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim()) as { questions?: string[] };
     const qs = (parsed.questions ?? []).filter((q): q is string => typeof q === 'string' && q.length > 0).slice(0, 5);
     const result = qs.map((text, i) => ({ text, accent: Q_ACCENTS[i % Q_ACCENTS.length] }));
@@ -3978,7 +3978,7 @@ router.post("/ai-summary", async (req, res) => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
     let raw = "{}";
-    raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST, task: "article-summary" })) || "{}";
+    raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();
@@ -4412,7 +4412,7 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     res.json({ ...(await gen), cached: false });
   } catch (err) {
     req.log.error({ err: err instanceof Error ? err.message : String(err) }, "deepdive failed");
-    res.status(502).json({ error: "Deep Dive unavailable", detail: err instanceof Error ? err.message : String(err) });
+    res.status(502).json({ error: "Deep Dive unavailable" });
   } finally {
     deepDiveInflight.delete(cacheKey);
   }
@@ -4488,7 +4488,7 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     res.json({ answer, cached: false });
   } catch (err) {
     req.log.error({ err: err instanceof Error ? err.message : String(err) }, "ask failed");
-    res.status(502).json({ error: "Q&A unavailable", detail: err instanceof Error ? err.message : String(err) });
+    res.status(502).json({ error: "Q&A unavailable" });
   }
 });
 

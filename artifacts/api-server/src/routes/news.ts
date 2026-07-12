@@ -10,16 +10,14 @@ import { getNotifHistoryForToken, getMutedThemesForToken, setMutedThemesForToken
 const router: IRouter = Router();
 
 // ── AI inference providers ──────────────────────────────────────────────────
-// Groq (LPU) for Deep Dive, Q&A, background bulk.
-// Cerebras (wafer-scale) for article summaries — 2600+ tok/s, separate free budget.
+// Groq (LPU) primary for everything. Cerebras optional boost when available.
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions";
 const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive primary
-const GROQ_MODEL_FAST = "openai/gpt-oss-20b"; // background bulk (replaced deprecated 8b)
-const GROQ_MODEL_QUALITY = "openai/gpt-oss-20b"; // Q&A (replaced deprecated qwen)
+const GROQ_MODEL_FAST = "openai/gpt-oss-20b"; // background bulk + article summaries
+const GROQ_MODEL_QUALITY = "openai/gpt-oss-20b"; // Q&A
 const GROQ_MODEL_ENRICH = "openai/gpt-oss-20b"; // cluster headlines + themes
-const CEREBRAS_MODEL = "llama-4-scout-17b-16e-instruct"; // article summaries — same model as Deep Dive, fast on Cerebras
-const CEREBRAS_MODEL_SCOUT = "llama-4-scout-17b-16e-instruct"; // Deep Dive — 2600+ tok/s on Cerebras
+const CEREBRAS_MODEL = "llama-4-scout-17b-16e-instruct"; // optional Cerebras boost
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -3056,10 +3054,9 @@ router.get("/ai-usage", (_req, res) => {
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
-    "llama-4-scout-17b-16e-instruct": "Deep Dive (Cerebras primary / Groq fallback)",
-    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (Groq fallback)",
-    "openai/gpt-oss-20b": "Q&A · clustering · themes · Deep Dive fallback",
-    "llama3.1-8b": "Article summaries (Cerebras)",
+    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive primary",
+    "openai/gpt-oss-20b": "Summaries · Q&A · clustering · Deep Dive fallback",
+    "llama-4-scout-17b-16e-instruct": "Cerebras (optional)",
   };
   const KNOWN_MODELS = [
     "llama-4-scout-17b-16e-instruct",
@@ -3981,16 +3978,7 @@ router.post("/ai-summary", async (req, res) => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
     let raw = "{}";
-    if (process.env["CEREBRAS_API_KEY"]) {
-      try {
-        raw = (await callCerebras(prompt, maxTokens, { task: "article-summary" })) || "{}";
-      } catch (cerebrasErr) {
-        req.log.warn({ err: cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr) }, "ai-summary: Cerebras failed, falling back to Groq");
-        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_QUALITY, task: "article-summary" })) || "{}";
-      }
-    } else {
-      raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_QUALITY, task: "article-summary" })) || "{}";
-    }
+    raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST, task: "article-summary" })) || "{}";
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();
@@ -4036,8 +4024,7 @@ router.post("/ai-summary", async (req, res) => {
     res.json({ ...result, cached: false });
   } catch (err) {
     req.log.error({ err }, "ai-summary failed");
-    const msg = err instanceof Error ? err.message : String(err);
-    res.status(502).json({ error: "AI summary unavailable", debug: msg });
+    res.status(502).json({ error: "AI summary unavailable" });
   } finally {
     aiSummaryActiveCount--;
     aiSummaryInflightMap.delete(cacheKey);
@@ -4309,22 +4296,13 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     const t = setTimeout(() => ctrl.abort(), 90000);
     let raw = "";
     try {
-      // Cerebras Scout primary (2600+ tok/s) → Groq Scout → Groq gpt-oss-20b
+      // Groq Scout primary → Groq gpt-oss-20b fallback
       try {
-        if (process.env["CEREBRAS_API_KEY"]) {
-          raw = await callCerebras(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: CEREBRAS_MODEL_SCOUT, task: "deepdive" });
-        } else {
-          await deepDiveGate();
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
-        }
+        await deepDiveGate();
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
       } catch (firstErr) {
-        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back");
-        try {
-          await deepDiveGate();
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
-        } catch {
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
-        }
+        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: Scout failed, falling back to gpt-oss-20b");
+        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
       }
     } finally {
       clearTimeout(t);

@@ -84,10 +84,14 @@ async function callCerebras(
   if (!key) throw new Error("CEREBRAS_API_KEY missing");
   const model = opts.model ?? CEREBRAS_MODEL;
   const task = opts.task ?? "other";
+  // gpt-oss-120b is a reasoning model: its chain-of-thought consumes
+  // max_tokens BEFORE the visible answer. Keep effort low and give the
+  // budget generous headroom or small calls return empty content.
   const body: Record<string, unknown> = {
     model,
-    max_tokens: maxTokens,
+    max_tokens: maxTokens + 2000,
     temperature: opts.temperature ?? 0.3,
+    reasoning_effort: "low",
     messages: [{ role: "user", content: prompt }],
   };
   if (opts.jsonMode) body["response_format"] = { type: "json_object" };

@@ -4035,7 +4035,8 @@ router.post("/ai-summary", async (req, res) => {
     res.json({ ...result, cached: false });
   } catch (err) {
     req.log.error({ err }, "ai-summary failed");
-    res.status(502).json({ error: "AI summary unavailable" });
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: "AI summary unavailable", debug: msg });
   } finally {
     aiSummaryActiveCount--;
     aiSummaryInflightMap.delete(cacheKey);

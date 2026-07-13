@@ -4329,7 +4329,9 @@ router.post("/deepdive", async (req, res) => {
     const sourceWords = text.split(/\s+/).filter(Boolean).length;
     const depthMax = depth === 'quick' ? 480 : depth === 'deep' ? 1100 : 900;
     const depthMin = depth === 'quick' ? 250 : depth === 'deep' ? 700 : 450;
-    const storyMax = Math.min(depthMax, Math.max(250, Math.round(sourceWords * 0.9)));
+    // 90% of source is the true ceiling; the 100-word floor only keeps the
+    // 3-section format coherent for ultra-thin sources (< ~110 words).
+    const storyMax = Math.min(depthMax, Math.max(100, Math.round(sourceWords * 0.9)));
     const thinSource = sourceWords < 600;
     // Thin source: no minimum — "shorter than target" must beat "padded".
     const storyMin = thinSource ? 0 : Math.min(depthMin, Math.round(storyMax * 0.6));

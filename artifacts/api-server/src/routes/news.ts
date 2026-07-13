@@ -4320,10 +4320,31 @@ router.post("/deepdive", async (req, res) => {
     // AFTER "Respond with JSON only." — the model followed the inline word
     // counts in the schema and ignored the trailing note, so quick/standard/deep
     // produced identical lengths.
+    //
+    // Ratio guard — same principle as ai-summary: output must stay under the
+    // source material or the model pads sections 4-5 (context/what's-next)
+    // with invented history and predictions. Deep Dive synthesises across 5
+    // sections so it may run closer to source length than a summary (0.9x),
+    // but never past it. Rich sources (>= depth max / 0.9) are unaffected.
+    const sourceWords = text.split(/\s+/).filter(Boolean).length;
+    const depthMax = depth === 'quick' ? 480 : depth === 'deep' ? 1100 : 900;
+    const depthMin = depth === 'quick' ? 250 : depth === 'deep' ? 700 : 450;
+    const storyMax = Math.min(depthMax, Math.max(250, Math.round(sourceWords * 0.9)));
+    const thinSource = sourceWords < 600;
+    // Thin source: no minimum — "shorter than target" must beat "padded".
+    const storyMin = thinSource ? 0 : Math.min(depthMin, Math.round(storyMax * 0.6));
+    // Very thin source (< 300 words): 3 sections — DIFFERENT ANGLES and
+    // CONTEXT & BACKGROUND need material to analyse; with none they invent.
+    const sectionCount = sourceWords < 300 ? 3 : 5;
+    const perHi = Math.round(storyMax / sectionCount);
+    const perLo = Math.max(35, Math.round(perHi * 0.55));
+    const storyWords = `~${perLo}-${perHi} words`;
+    const storyTotal = storyMin > 0
+      ? `TOTAL ${storyMin}-${storyMax} words (hard cap ${storyMax})`
+      : `TOTAL at most ${storyMax} words (hard cap) — the source is short, so shorter and accurate beats longer and padded; NEVER pad to fill`;
     const tldrBullets = depth === 'quick' ? 'EXACTLY 2-3' : 'EXACTLY 3-4';
-    const tldrTotal = depth === 'quick' ? '~230-260 words (hard cap 280)' : '~400-450 words (hard cap 450)';
-    const storyWords = depth === 'quick' ? '~50-90 words' : depth === 'deep' ? '~150-220 words' : '~90-160 words';
-    const storyTotal = depth === 'quick' ? 'TOTAL 250-450 words (hard cap 480)' : depth === 'deep' ? 'TOTAL 750-1100 words (min 700)' : 'TOTAL 500-900 words (min 450)';
+    const tldrCap = Math.min(depth === 'quick' ? 280 : 450, Math.max(150, Math.round(sourceWords * 0.6)));
+    const tldrTotal = `~${Math.round(tldrCap * 0.85)}-${tldrCap} words (hard cap ${tldrCap})`;
     const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
@@ -4333,19 +4354,23 @@ router.post("/deepdive", async (req, res) => {
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
   "tldr": ["flat fallback — 6-10 complete-sentence bullets, same ${tldrTotal} cap"],
-  "storySections": [                                   // THE FULL STORY. EXACTLY these 5 sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (${storyWords}) of engaging plain prose (no markdown). ${storyTotal}. Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
+  "storySections": [                                   // THE FULL STORY. EXACTLY these ${sectionCount} sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (${storyWords}) of engaging plain prose (no markdown). ${storyTotal}. Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
     // ── ABSOLUTE RULE: ZERO REPETITION. Each section must contain information that appears in NO other section. NEVER restate a fact, figure, name, quote or sentence you already used. If a section would repeat something, REPLACE it with new detail, analysis, or implication. A reader must learn something NEW in every section. Vary sentence openings; do not start multiple sections the same way.
+    // ── GROUNDING RULE: every fact, figure, name and event must come from the source text. For background/history/what's-next, use ONLY what the sources state or directly imply; if the sources give no history or next steps, SAY what is unknown or pending rather than inventing it. Never import outside knowledge that the sources don't mention.
     // Each section has a STRICT, NON-OVERLAPPING scope:
     //   1. "WHAT HAPPENED"     — ONLY the single core event in 2-3 sentences: who did what, the headline outcome. No numbers-dump, no background, no consequences. The spine, nothing else.
     //   2. "THE DETAILS"       — ONLY concrete specifics NOT in section 1: exact figures, dates, the sequence of events, names/titles, locations, the mechanism/how. Pure factual texture. No consequences, no framing. FACT-DENSITY RULE: this section must include EVERY distinct concrete fact from the sources — every number, amount, percentage, date, deadline, name, title, place and direct quote that fits. Prefer packing more facts over smoother prose; it may run up to ${depth === 'quick' ? '120' : '220'} words if the sources are fact-rich. NEVER drop a specific figure in favour of a vague phrase ("millions" when a source says "$4.2M").
-    //   3. ${diffAnglesInstruction}
-    //   4. "CONTEXT & BACKGROUND" — ONLY history and the bigger picture: prior events, how we got here, precedent, the pattern this fits, stakes for the wider field. NO restating today's event.
+${sectionCount === 5 ? `    //   3. ${diffAnglesInstruction}
+    //   4. "CONTEXT & BACKGROUND" — ONLY history and the bigger picture AS GIVEN IN THE SOURCES: prior events, how we got here, precedent, the pattern this fits, stakes for the wider field. NO restating today's event.
     //   5. "WHAT'S NEXT"       — ONLY the forward look: concrete expected next steps, pending decisions, appeals, timelines, awaited reactions, what to watch. Future tense only; no recap.
     { "heading": "WHAT HAPPENED", "body": "one paragraph" },
     { "heading": "THE DETAILS", "body": "one paragraph" },
     { "heading": "DIFFERENT ANGLES", "body": "one paragraph" },
     { "heading": "CONTEXT & BACKGROUND", "body": "one paragraph" },
-    { "heading": "WHAT'S NEXT", "body": "one paragraph" }
+    { "heading": "WHAT'S NEXT", "body": "one paragraph" }` : `    //   3. "WHAT'S NEXT"       — ONLY the forward look stated or implied by the sources: expected next steps, pending decisions, timelines, what to watch. If the sources name none, say what remains unknown. Future tense only; no recap.
+    { "heading": "WHAT HAPPENED", "body": "one paragraph" },
+    { "heading": "THE DETAILS", "body": "one paragraph" },
+    { "heading": "WHAT'S NEXT", "body": "one paragraph" }`}
   ],
   "quote": {"text": "...", "by": "..."},               // REQUIRED — ONE notable DIRECT quote from the sources, VERBATIM (no paraphrase), with the speaker's full name and title in "by" (e.g. "Sundar Pichai, CEO of Google"). Pick the most striking, newsworthy on-record line. Search the full text thoroughly for quoted speech (words inside quotation marks with attribution). Only return null if the text genuinely contains ZERO direct quotes — this is rare, so try hard to find one.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.

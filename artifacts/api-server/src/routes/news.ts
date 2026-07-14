@@ -4249,7 +4249,8 @@ router.post("/deepdive", async (req, res) => {
     rawDepth === 'quick' || rawDepth === 'deep' ? rawDepth : 'standard';
 
   // v12 — 4-signal confidence: grounding + credibility + diversity + age
-  const cacheKey = `deepdive:v17:${depth}:${url}`;
+  // v18 — ratio guard + tighter quick mode; invalidates pre-guard caches.
+  const cacheKey = `deepdive:v18:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -4327,8 +4328,10 @@ router.post("/deepdive", async (req, res) => {
     // sections so it may run closer to source length than a summary (0.9x),
     // but never past it. Rich sources (>= depth max / 0.9) are unaffected.
     const sourceWords = text.split(/\s+/).filter(Boolean).length;
-    const depthMax = depth === 'quick' ? 480 : depth === 'deep' ? 1100 : 900;
-    const depthMin = depth === 'quick' ? 250 : depth === 'deep' ? 700 : 450;
+    // Quick = genuinely short: 300-word ceiling (was 480 — users picking
+    // "short" were still getting ~400-word stories on rich sources).
+    const depthMax = depth === 'quick' ? 300 : depth === 'deep' ? 1100 : 900;
+    const depthMin = depth === 'quick' ? 150 : depth === 'deep' ? 700 : 450;
     // 90% of source is the true ceiling; the 100-word floor only keeps the
     // 3-section format coherent for ultra-thin sources (< ~110 words).
     const storyMax = Math.min(depthMax, Math.max(100, Math.round(sourceWords * 0.9)));
@@ -4337,7 +4340,9 @@ router.post("/deepdive", async (req, res) => {
     const storyMin = thinSource ? 0 : Math.min(depthMin, Math.round(storyMax * 0.6));
     // Very thin source (< 300 words): 3 sections — DIFFERENT ANGLES and
     // CONTEXT & BACKGROUND need material to analyse; with none they invent.
-    const sectionCount = sourceWords < 300 ? 3 : 5;
+    // Quick mode: ALWAYS 3 sections — "short" means a tight read, and five
+    // 60-word paragraphs read worse than three proper ones.
+    const sectionCount = depth === 'quick' || sourceWords < 300 ? 3 : 5;
     const perHi = Math.round(storyMax / sectionCount);
     const perLo = Math.max(35, Math.round(perHi * 0.55));
     const storyWords = `~${perLo}-${perHi} words`;
@@ -4345,7 +4350,7 @@ router.post("/deepdive", async (req, res) => {
       ? `TOTAL ${storyMin}-${storyMax} words (hard cap ${storyMax})`
       : `TOTAL at most ${storyMax} words (hard cap) — the source is short, so shorter and accurate beats longer and padded; NEVER pad to fill`;
     const tldrBullets = depth === 'quick' ? 'EXACTLY 2-3' : 'EXACTLY 3-4';
-    const tldrCap = Math.min(depth === 'quick' ? 280 : 450, Math.max(150, Math.round(sourceWords * 0.6)));
+    const tldrCap = Math.min(depth === 'quick' ? 200 : 450, Math.max(120, Math.round(sourceWords * 0.6)));
     const tldrTotal = `~${Math.round(tldrCap * 0.85)}-${tldrCap} words (hard cap ${tldrCap})`;
     const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:

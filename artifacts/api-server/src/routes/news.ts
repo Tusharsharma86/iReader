@@ -4414,7 +4414,14 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
           await deepDiveGate();
           raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
         } catch {
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
+          // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
+          // window — the full 20k-char prompt + 6000-token budget exceeded it
+          // on every attempt ever made (16/16 errors). Trim the input to the
+          // lead article and cap output so the request actually fits.
+          const trimmed = prompt.length > 9000
+            ? prompt.slice(0, 7000) + "\n\n[additional sources truncated]\n\nRespond with JSON only as specified above."
+            : prompt;
+          raw = await callGroq(trimmed, 2000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
         }
       }
     } finally {

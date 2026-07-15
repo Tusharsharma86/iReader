@@ -9,23 +9,15 @@ import { getNotifHistoryForToken, getMutedThemesForToken, setMutedThemesForToken
 
 const router: IRouter = Router();
 
-// ── Groq AI helper ──────────────────────────────────────────────────────────
-// All AI summaries now go through Groq's Llama 4 Scout. Free tier, much faster
-// than Claude, similar quality for structured JSON. ANTHROPIC_API_KEY kept as
-// optional fallback for now (some routes still call Claude until migrated).
+// ── AI inference providers ──────────────────────────────────────────────────
+// Groq (LPU) primary for everything. Cerebras optional boost when available.
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-// Four separate free-tier daily budgets, task class matched to pool size:
-//   scout    500k TPD → Deep Dive primary (no thinking tokens, reliable
-//                       structured JSON output — qwen3-32b's <think> tokens
-//                       consume the 6000 max_tokens budget, truncating output)
-//   qwen3-32b 500k TPD → Q&A only (short output, thinking ok at 220-600 tokens)
-//   8B       500k TPD → article summaries, clustering, card summaries, themes,
-//                       cluster headlines (speed-sensitive bulk work)
-const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive primary — 500K TPD, 30 RPM
-const GROQ_MODEL_FAST = "llama-3.1-8b-instant"; // background bulk — 500K TPD, 14.4K RPD
-const GROQ_MODEL_QUALITY = "qwen/qwen3-32b"; // Q&A — 500K TPD, 60 RPM (NOT for Deep Dive: <think> eats 6K token budget)
-const GROQ_MODEL_FOREGROUND = "qwen/qwen3-32b"; // user-facing article summary — 60 RPM, separate budget from scout/8b
-const GROQ_MODEL_ENRICH = "llama-3.1-8b-instant"; // cluster headlines + theme summaries (background, high volume)
+const CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions";
+const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive primary
+const GROQ_MODEL_FAST = "openai/gpt-oss-20b"; // background bulk + article summaries
+const GROQ_MODEL_QUALITY = "openai/gpt-oss-20b"; // Q&A
+const GROQ_MODEL_ENRICH = "openai/gpt-oss-20b"; // cluster headlines + themes
+const CEREBRAS_MODEL = "gpt-oss-120b"; // ~3000 tok/s, free tier
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -82,18 +74,75 @@ function model8bGate(): Promise<void> {
 }
 function pause8bModel() { model8bPausedUntil = Date.now() + 65_000; }
 
-let qwenNextSlot = 0;
-let qwenPausedUntil = 0;
-const QWEN_GATE_MS = 1100;
-function qwenGate(): Promise<void> {
+// ── Cerebras inference (article summaries) ──────────────────────────────────
+// Free tier is ~30 RPM. Background calls (feed card summaries) are serialized
+// at 2.5s spacing so a feed build's ~25-call burst can't starve user-facing
+// summaries/Deep Dives. A 429 pauses ALL Cerebras calls 30s so the window
+// resets; callers fail fast to their Groq fallback instead of queueing.
+let cerebrasBgNextSlot = 0;
+const CEREBRAS_BG_INTERVAL_MS = 2500;
+function cerebrasBgGate(): Promise<void> {
   const now = Date.now();
-  if (now < qwenPausedUntil) return Promise.reject(new Error("rate-gate-paused"));
-  const at = Math.max(now, qwenNextSlot);
-  qwenNextSlot = at + QWEN_GATE_MS;
+  const at = Math.max(now, cerebrasBgNextSlot);
+  cerebrasBgNextSlot = at + CEREBRAS_BG_INTERVAL_MS;
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
-function pauseQwenModel() { qwenPausedUntil = Date.now() + 65_000; }
+let cerebrasPausedUntil = 0;
+function pauseCerebras() { cerebrasPausedUntil = Date.now() + 30_000; }
+
+async function callCerebras(
+  prompt: string,
+  maxTokens: number,
+  opts: { temperature?: number; task?: string; jsonMode?: boolean; model?: string; signal?: AbortSignal; background?: boolean } = {},
+): Promise<string> {
+  const key = process.env["CEREBRAS_API_KEY"];
+  if (!key) throw new Error("CEREBRAS_API_KEY missing");
+  if (Date.now() < cerebrasPausedUntil) throw new Error("cerebras-paused");
+  if (opts.background) await cerebrasBgGate();
+  const model = opts.model ?? CEREBRAS_MODEL;
+  const task = opts.task ?? "other";
+  // gpt-oss-120b is a reasoning model: its chain-of-thought consumes
+  // max_tokens BEFORE the visible answer. Keep effort low and give the
+  // budget generous headroom or small calls return empty content.
+  const body: Record<string, unknown> = {
+    model,
+    max_tokens: maxTokens + 2000,
+    temperature: opts.temperature ?? 0.3,
+    reasoning_effort: "low",
+    messages: [{ role: "user", content: prompt }],
+  };
+  if (opts.jsonMode) body["response_format"] = { type: "json_object" };
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(CEREBRAS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    });
+    if (r.ok) {
+      const data = (await r.json()) as {
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+        usage?: { total_tokens?: number };
+      };
+      const content = data.choices?.[0]?.message?.content ?? "";
+      if (!content.trim()) {
+        recordAiUsage(model, task, data.usage?.total_tokens ?? 0, false);
+        throw new Error(`Cerebras empty content: ${JSON.stringify(data.choices?.[0]).slice(0, 300)}`);
+      }
+      recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
+      return content;
+    }
+    const retryable = r.status === 502 || r.status === 503;
+    if (retryable && attempt < 1) {
+      await new Promise((res) => setTimeout(res, 2000));
+      continue;
+    }
+    recordAiUsage(model, task, 0, false);
+    if (r.status === 429) pauseCerebras();
+    throw new Error(`Cerebras ${r.status}`);
+  }
+}
 
 async function callGroq(
   prompt: string,
@@ -104,8 +153,8 @@ async function callGroq(
   if (!key) throw new Error("GROQ_API_KEY missing");
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
-  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH) await model8bGate();
-  else if (model === GROQ_MODEL_QUALITY || model === GROQ_MODEL_FOREGROUND) await qwenGate();
+  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate();
+  else if (model === GROQ_MODEL && Date.now() < scoutPausedUntil) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
@@ -129,8 +178,7 @@ async function callGroq(
         usage?: { total_tokens?: number };
       };
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
-      let content = data.choices?.[0]?.message?.content ?? "";
-      if (model.includes("qwen")) content = content.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+      const content = data.choices?.[0]?.message?.content ?? "";
       return content;
     }
     // Only retry on transient server errors (502/503), NOT on 429 — retrying
@@ -143,9 +191,8 @@ async function callGroq(
     }
     recordAiUsage(model, task, 0, false);
     if (r.status === 429) {
-      if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH) pause8bModel();
+      if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) pause8bModel();
       else if (model === GROQ_MODEL) pauseScoutModel();
-      else if (model === GROQ_MODEL_QUALITY || model === GROQ_MODEL_FOREGROUND) pauseQwenModel();
     }
     throw new Error(`Groq ${r.status}`);
   }
@@ -156,8 +203,9 @@ async function callGroq(
 // per UTC day. In-memory (resets on container cold start) — best-effort gauge.
 const GROQ_TPD_LIMITS: Record<string, number> = {
   "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
-  "llama-3.1-8b-instant": 500000,
-  "qwen/qwen3-32b": 500000,
+  "openai/gpt-oss-20b": 500000,
+  "llama-4-scout-17b-16e-instruct": 1000000,
+  "llama3.1-8b": 1000000,
 };
 interface TaskUsage { tokens: number; calls: number; errors: number; }
 interface ModelUsage { tokens: number; calls: number; errors: number; tasks: Record<string, TaskUsage>; }
@@ -177,6 +225,18 @@ function recordAiUsage(model: string, task: string, tokens: number, ok: boolean)
 // container (dev workflow restarts, autoscale instance reuse). Replit Autoscale
 // instances get a fresh /tmp on cold-start, so this is best-effort persistence
 // — the next user request will trigger a fresh refresh if cache is empty.
+// ── Keep-alive self-ping ─────────────────────────────────────────────────────
+// Render free tier spins the container down after ~15 min without inbound
+// traffic; the next visitor then eats a 30-60s cold start. Pinging our own
+// public URL every 10 min counts as inbound and keeps the instance warm.
+// 750 free instance-hours/month covers one service running 24/7.
+const SELF_PING_URL = process.env["RENDER_EXTERNAL_URL"]
+  ? `${process.env["RENDER_EXTERNAL_URL"]}/api/news/ai-usage`
+  : "https://ireader.onrender.com/api/news/ai-usage";
+if (process.env["NODE_ENV"] === "production") {
+  setInterval(() => { fetch(SELF_PING_URL).catch(() => {}); }, 10 * 60 * 1000).unref();
+}
+
 const FEED_DISK_CACHE_PATH = "/tmp/particle-news-feed-cache.json";
 
 type Source = {
@@ -195,11 +255,6 @@ type StoryCard = {
   publishedAt: string;
   summary: string;
   aiSummary?: string;
-  summaries: {
-    fiveWs: string[];
-    eli5: string;
-    keyHighlights: string;
-  };
   sources: Source[];
   sourceCount: number;
   isTrending?: boolean;
@@ -1588,7 +1643,17 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
     const prompt = body.length > 12
       ? `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${card.headline ?? ""}\n${body}\n\nSummary:`
       : `Write ONE neutral, informative sentence of AT MOST 25 words describing what this article is most likely about, based on its headline. No preamble, no markdown, no speculation beyond the headline.\n\nHeadline: ${card.headline ?? ""}\n\nSummary:`;
-    const text = (await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true })).trim().replace(/^summary:\s*/i, "");
+    let rawText: string;
+    if (process.env["CEREBRAS_API_KEY"]) {
+      try {
+        rawText = await callCerebras(prompt, 80, { task: "article-summary-feed", background: true });
+      } catch {
+        rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+      }
+    } else {
+      rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+    }
+    const text = rawText.trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
     if (summary) articleSummaryCache.set(sig, { summary, at: Date.now() });
   } catch {
@@ -2157,8 +2222,6 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
     const sourceType = classifySource(sourceUrl, sourceName);
 
     const headline = (a.title ?? text.slice(0, 90) ?? "Untitled").trim();
-    const fiveWs = naiveFiveWs(text);
-    const paragraph = naiveParagraph(text);
 
     return {
       id: createHash("md5").update(sourceUrl || a.article_id || `${Date.now()}-${idx}`).digest("hex").slice(0, 16),
@@ -2169,11 +2232,6 @@ function buildFallbackStories(articles: NewsDataArticle[]): StoryCard[] {
       // Display summary = cleaned description only (empty if it was just links/
       // points — top cards then get an AI summary post-sort).
       summary: first50Words(cleaned),
-      summaries: {
-        fiveWs,
-        eli5: paragraph,
-        keyHighlights: paragraph,
-      },
       sources: [
         {
           name: sourceName,
@@ -2225,14 +2283,6 @@ function buildStoryCards(
       summary: first50Words(
         firstArticle?.description || firstArticle?.content || firstArticle?.title || "",
       ),
-      summaries: {
-        fiveWs: cluster.fiveWs ?? [],
-        eli5: typeof cluster.eli5 === "string" ? cluster.eli5 : "",
-        keyHighlights:
-          typeof cluster.keyHighlights === "string"
-            ? cluster.keyHighlights
-            : "",
-      },
       sources,
       sourceCount: sources.length,
     };
@@ -3081,20 +3131,21 @@ router.get("/ai-usage", (_req, res) => {
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
-    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive (primary)",
-    "qwen/qwen3-32b": "Article summaries · Q&A",
-    "llama-3.1-8b-instant": "Deep Dive fallback · clustering · themes · cluster headlines · card summaries",
+    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive fallback (Groq)",
+    "openai/gpt-oss-20b": "Q&A · clustering · Deep Dive last-resort",
+    "gpt-oss-120b": "Summaries + Deep Dive (Cerebras, ~3000 tok/s)",
   };
   const KNOWN_MODELS = [
+    "llama-4-scout-17b-16e-instruct",
+    "llama3.1-8b",
     "meta-llama/llama-4-scout-17b-16e-instruct",
-    "qwen/qwen3-32b",
-    "llama-3.1-8b-instant",
+    "openai/gpt-oss-20b",
   ];
   const allModels = Array.from(new Set([...KNOWN_MODELS, ...Object.keys(aiUsageByModel)]));
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMITS: Record<string, number> = { "llama-3.1-8b-instant": 14400, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "qwen/qwen3-32b": 1000 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "llama-4-scout-17b-16e-instruct": 5000, "llama3.1-8b": 5000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     return {
       model,
@@ -3138,7 +3189,7 @@ router.get("/questions", async (req, res) => {
 Headlines:
 ${headlines}`;
 
-    const raw = await callGroq(prompt, 400, { model: GROQ_MODEL_QUALITY, task: 'questions', jsonMode: true });
+    const raw = await callGroq(prompt, 400, { model: GROQ_MODEL, task: 'questions', jsonMode: true });
     const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim()) as { questions?: string[] };
     const qs = (parsed.questions ?? []).filter((q): q is string => typeof q === 'string' && q.length > 0).slice(0, 5);
     const result = qs.map((text, i) => ({ text, accent: Q_ACCENTS[i % Q_ACCENTS.length] }));
@@ -3764,8 +3815,7 @@ const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
 const aiSummaryInflightMap = new Map<string, Promise<AiSummaryEntry>>();
 let aiSummaryActiveCount = 0;
 const AI_SUMMARY_MAX_CONCURRENT = 4;
-// Route-level breaker removed — per-request qwenGate + pauseQwenModel
-// already handle rate limiting without blanket-blocking all requests for 60s.
+// Article summaries now use Cerebras (separate free budget, no gate needed).
 
 type AiSummaryType = "summary" | "fiveWs" | "eli5";
 
@@ -3979,6 +4029,10 @@ router.post("/ai-summary", async (req, res) => {
     return;
   }
 
+  // Expired-but-present copy → stale-while-revalidate below: serve it
+  // instantly, refresh in the background. Same pattern clusters use.
+  const staleEntry = cached ?? diskCached ?? null;
+
   if (!process.env["GROQ_API_KEY"]) {
     res.status(502).json({ error: "AI not configured" });
     return;
@@ -3987,32 +4041,59 @@ router.post("/ai-summary", async (req, res) => {
   // Load shedding — client pre-warm fires 40 of these per session, so without
   // guards a few concurrent sessions turn into a Groq 429 retry storm that
   // also starves Deep Dive / Q&A (shared RPM).
-  // Per-request qwenGate handles spacing; no route-level breaker needed.
+  // Article summaries use Cerebras (separate provider, no Groq RPM contention).
   // Coalesce: identical request already generating → share its result instead
   // of a duplicate Groq call (two users pre-warming the same story).
   const inflight = aiSummaryInflightMap.get(cacheKey);
   if (inflight) {
+    if (staleEntry) { res.json({ ...staleEntry, cached: true, stale: true }); return; }
     try { res.json({ ...(await inflight), cached: true }); }
     catch { res.status(502).json({ error: "AI summary unavailable" }); }
     return;
   }
   if (aiSummaryActiveCount >= AI_SUMMARY_MAX_CONCURRENT) {
+    if (staleEntry) { res.json({ ...staleEntry, cached: true, stale: true }); return; }
     res.status(503).set("Retry-After", "5").json({ error: "AI summary busy" });
     return;
   }
 
   const generate = (async (): Promise<AiSummaryEntry> => {
     const text = paragraphs.slice(0, 20).join(" ").slice(0, 2500);
-    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords, keyPoints, eli5Tone });
-    // qwen3-32b thinking tokens consume max_tokens budget — pad 500 extra
-    const raw = (await callGroq(prompt, maxTokens + 500, { model: GROQ_MODEL_FOREGROUND, task: "article-summary", jsonMode: true })) || "{}";
+    // Ratio guard — a summary must be meaningfully shorter than its source or
+    // the model pads/hallucinates to hit the word target. Cap at ~45% of the
+    // article, floor 60 words so tiny articles still get a usable summary.
+    // Long articles (800+ words) honor the user's Customize setting untouched.
+    const sourceWords = text.split(/\s+/).filter(Boolean).length;
+    const ratioCap = Math.max(60, Math.round(sourceWords * 0.45));
+    const effectiveMaxWords = Math.min(maxWords ?? 250, ratioCap);
+    const effectiveKeyPoints = sourceWords < 150 ? Math.min(keyPoints ?? 3, 2) : keyPoints;
+    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords: effectiveMaxWords, keyPoints: effectiveKeyPoints, eli5Tone });
+    let raw = "{}";
+    let cerebrasNote = "";
+    // 30s abort — without it a hung provider held the request until the
+    // client gave up (Deep Dive always had one; summaries didn't).
+    const ctrl = new AbortController();
+    const abortTimer = setTimeout(() => ctrl.abort(), 30000);
+    try {
+      if (process.env["CEREBRAS_API_KEY"]) {
+        try {
+          raw = (await callCerebras(prompt, maxTokens, { task: "article-summary", signal: ctrl.signal })) || "{}";
+        } catch (cerebrasErr) {
+          cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
+          req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
+          raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
+        }
+      } else {
+        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
+      }
+    } finally {
+      clearTimeout(abortTimer);
+    }
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
     const cleaned = raw.replace(/```json|```/g, "").trim();
     try { parsed = JSON.parse(cleaned); }
     catch {
-      // Forgiving recovery: extract the largest {...} block and escape stray
-      // raw newlines inside string values so a model quirk never blanks output.
       try {
         const m = cleaned.match(/\{[\s\S]*\}/);
         if (m) {
@@ -4046,6 +4127,16 @@ router.post("/ai-summary", async (req, res) => {
 
   aiSummaryActiveCount++;
   aiSummaryInflightMap.set(cacheKey, generate);
+  // Stale-while-revalidate: expired copy goes out instantly; the refresh
+  // continues in the background and lands in cache for the next request.
+  if (staleEntry) {
+    generate.catch(() => {}).finally(() => {
+      aiSummaryActiveCount--;
+      aiSummaryInflightMap.delete(cacheKey);
+    });
+    res.json({ ...staleEntry, cached: true, stale: true });
+    return;
+  }
   try {
     const result = await generate;
     res.json({ ...result, cached: false });
@@ -4204,7 +4295,8 @@ router.post("/deepdive", async (req, res) => {
     rawDepth === 'quick' || rawDepth === 'deep' ? rawDepth : 'standard';
 
   // v12 — 4-signal confidence: grounding + credibility + diversity + age
-  const cacheKey = `deepdive:v17:${depth}:${url}`;
+  // v18 — ratio guard + tighter quick mode; invalidates pre-guard caches.
+  const cacheKey = `deepdive:v18:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -4275,10 +4367,37 @@ router.post("/deepdive", async (req, res) => {
     // AFTER "Respond with JSON only." — the model followed the inline word
     // counts in the schema and ignored the trailing note, so quick/standard/deep
     // produced identical lengths.
+    //
+    // Ratio guard — same principle as ai-summary: output must stay under the
+    // source material or the model pads sections 4-5 (context/what's-next)
+    // with invented history and predictions. Deep Dive synthesises across 5
+    // sections so it may run closer to source length than a summary (0.9x),
+    // but never past it. Rich sources (>= depth max / 0.9) are unaffected.
+    const sourceWords = text.split(/\s+/).filter(Boolean).length;
+    // Quick = genuinely short: 300-word ceiling (was 480 — users picking
+    // "short" were still getting ~400-word stories on rich sources).
+    const depthMax = depth === 'quick' ? 300 : depth === 'deep' ? 1100 : 900;
+    const depthMin = depth === 'quick' ? 150 : depth === 'deep' ? 700 : 450;
+    // 90% of source is the true ceiling; the 100-word floor only keeps the
+    // 3-section format coherent for ultra-thin sources (< ~110 words).
+    const storyMax = Math.min(depthMax, Math.max(100, Math.round(sourceWords * 0.9)));
+    const thinSource = sourceWords < 600;
+    // Thin source: no minimum — "shorter than target" must beat "padded".
+    const storyMin = thinSource ? 0 : Math.min(depthMin, Math.round(storyMax * 0.6));
+    // Very thin source (< 300 words): 3 sections — DIFFERENT ANGLES and
+    // CONTEXT & BACKGROUND need material to analyse; with none they invent.
+    // Quick mode: ALWAYS 3 sections — "short" means a tight read, and five
+    // 60-word paragraphs read worse than three proper ones.
+    const sectionCount = depth === 'quick' || sourceWords < 300 ? 3 : 5;
+    const perHi = Math.round(storyMax / sectionCount);
+    const perLo = Math.max(35, Math.round(perHi * 0.55));
+    const storyWords = `~${perLo}-${perHi} words`;
+    const storyTotal = storyMin > 0
+      ? `TOTAL ${storyMin}-${storyMax} words (hard cap ${storyMax})`
+      : `TOTAL at most ${storyMax} words (hard cap) — the source is short, so shorter and accurate beats longer and padded; NEVER pad to fill`;
     const tldrBullets = depth === 'quick' ? 'EXACTLY 2-3' : 'EXACTLY 3-4';
-    const tldrTotal = depth === 'quick' ? '~230-260 words (hard cap 280)' : '~400-450 words (hard cap 450)';
-    const storyWords = depth === 'quick' ? '~50-90 words' : depth === 'deep' ? '~150-220 words' : '~90-160 words';
-    const storyTotal = depth === 'quick' ? 'TOTAL 250-450 words (hard cap 480)' : depth === 'deep' ? 'TOTAL 750-1100 words (min 700)' : 'TOTAL 500-900 words (min 450)';
+    const tldrCap = Math.min(depth === 'quick' ? 200 : 450, Math.max(120, Math.round(sourceWords * 0.6)));
+    const tldrTotal = `~${Math.round(tldrCap * 0.85)}-${tldrCap} words (hard cap ${tldrCap})`;
     const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
@@ -4288,19 +4407,23 @@ router.post("/deepdive", async (req, res) => {
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
   "tldr": ["flat fallback — 6-10 complete-sentence bullets, same ${tldrTotal} cap"],
-  "storySections": [                                   // THE FULL STORY. EXACTLY these 5 sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (${storyWords}) of engaging plain prose (no markdown). ${storyTotal}. Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
+  "storySections": [                                   // THE FULL STORY. EXACTLY these ${sectionCount} sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (${storyWords}) of engaging plain prose (no markdown). ${storyTotal}. Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
     // ── ABSOLUTE RULE: ZERO REPETITION. Each section must contain information that appears in NO other section. NEVER restate a fact, figure, name, quote or sentence you already used. If a section would repeat something, REPLACE it with new detail, analysis, or implication. A reader must learn something NEW in every section. Vary sentence openings; do not start multiple sections the same way.
+    // ── GROUNDING RULE: every fact, figure, name and event must come from the source text. For background/history/what's-next, use ONLY what the sources state or directly imply; if the sources give no history or next steps, SAY what is unknown or pending rather than inventing it. Never import outside knowledge that the sources don't mention.
     // Each section has a STRICT, NON-OVERLAPPING scope:
     //   1. "WHAT HAPPENED"     — ONLY the single core event in 2-3 sentences: who did what, the headline outcome. No numbers-dump, no background, no consequences. The spine, nothing else.
     //   2. "THE DETAILS"       — ONLY concrete specifics NOT in section 1: exact figures, dates, the sequence of events, names/titles, locations, the mechanism/how. Pure factual texture. No consequences, no framing. FACT-DENSITY RULE: this section must include EVERY distinct concrete fact from the sources — every number, amount, percentage, date, deadline, name, title, place and direct quote that fits. Prefer packing more facts over smoother prose; it may run up to ${depth === 'quick' ? '120' : '220'} words if the sources are fact-rich. NEVER drop a specific figure in favour of a vague phrase ("millions" when a source says "$4.2M").
-    //   3. ${diffAnglesInstruction}
-    //   4. "CONTEXT & BACKGROUND" — ONLY history and the bigger picture: prior events, how we got here, precedent, the pattern this fits, stakes for the wider field. NO restating today's event.
+${sectionCount === 5 ? `    //   3. ${diffAnglesInstruction}
+    //   4. "CONTEXT & BACKGROUND" — ONLY history and the bigger picture AS GIVEN IN THE SOURCES: prior events, how we got here, precedent, the pattern this fits, stakes for the wider field. NO restating today's event.
     //   5. "WHAT'S NEXT"       — ONLY the forward look: concrete expected next steps, pending decisions, appeals, timelines, awaited reactions, what to watch. Future tense only; no recap.
     { "heading": "WHAT HAPPENED", "body": "one paragraph" },
     { "heading": "THE DETAILS", "body": "one paragraph" },
     { "heading": "DIFFERENT ANGLES", "body": "one paragraph" },
     { "heading": "CONTEXT & BACKGROUND", "body": "one paragraph" },
-    { "heading": "WHAT'S NEXT", "body": "one paragraph" }
+    { "heading": "WHAT'S NEXT", "body": "one paragraph" }` : `    //   3. "WHAT'S NEXT"       — ONLY the forward look stated or implied by the sources: expected next steps, pending decisions, timelines, what to watch. If the sources name none, say what remains unknown. Future tense only; no recap.
+    { "heading": "WHAT HAPPENED", "body": "one paragraph" },
+    { "heading": "THE DETAILS", "body": "one paragraph" },
+    { "heading": "WHAT'S NEXT", "body": "one paragraph" }`}
   ],
   "quote": {"text": "...", "by": "..."},               // REQUIRED — ONE notable DIRECT quote from the sources, VERBATIM (no paraphrase), with the speaker's full name and title in "by" (e.g. "Sundar Pichai, CEO of Google"). Pick the most striking, newsworthy on-record line. Search the full text thoroughly for quoted speech (words inside quotation marks with attribution). Only return null if the text genuinely contains ZERO direct quotes — this is rare, so try hard to find one.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
@@ -4323,13 +4446,29 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     const t = setTimeout(() => ctrl.abort(), 90000);
     let raw = "";
     try {
-      // Scout primary for Deep Dive (no thinking tokens). 8b fallback.
+      // Cerebras gpt-oss-120b primary → Groq Scout → Groq gpt-oss-20b
       try {
-        await deepDiveGate();
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+        if (process.env["CEREBRAS_API_KEY"]) {
+          raw = await callCerebras(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+        } else {
+          await deepDiveGate();
+          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+        }
       } catch (firstErr) {
-        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: scout failed, falling back to 8b");
-        raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
+        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
+        try {
+          await deepDiveGate();
+          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+        } catch {
+          // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
+          // window — the full 20k-char prompt + 6000-token budget exceeded it
+          // on every attempt ever made (16/16 errors). Trim the input to the
+          // lead article and cap output so the request actually fits.
+          const trimmed = prompt.length > 9000
+            ? prompt.slice(0, 7000) + "\n\n[additional sources truncated]\n\nRespond with JSON only as specified above."
+            : prompt;
+          raw = await callGroq(trimmed, 2000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
+        }
       }
     } finally {
       clearTimeout(t);
@@ -4439,7 +4578,7 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     res.json({ ...(await gen), cached: false });
   } catch (err) {
     req.log.error({ err: err instanceof Error ? err.message : String(err) }, "deepdive failed");
-    res.status(502).json({ error: "Deep Dive unavailable", detail: err instanceof Error ? err.message : String(err) });
+    res.status(502).json({ error: "Deep Dive unavailable" });
   } finally {
     deepDiveInflight.delete(cacheKey);
   }
@@ -4504,8 +4643,14 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     const t = setTimeout(() => ctrl.abort(), 60000);
     let answer = "";
     try {
-      try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
-      catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+      // Cerebras primary (fast, separate RPM pool) → Groq gpt-oss-20b fallback
+      if (process.env["CEREBRAS_API_KEY"]) {
+        try { answer = (await callCerebras(prompt, 600, { signal: ctrl.signal, temperature: 0.5, task: "qna" })).trim(); }
+        catch { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+      } else {
+        try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+        catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+      }
     } finally { clearTimeout(t); }
     if (!answer) throw new Error("Empty answer");
 
@@ -4515,7 +4660,7 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     res.json({ answer, cached: false });
   } catch (err) {
     req.log.error({ err: err instanceof Error ? err.message : String(err) }, "ask failed");
-    res.status(502).json({ error: "Q&A unavailable", detail: err instanceof Error ? err.message : String(err) });
+    res.status(502).json({ error: "Q&A unavailable" });
   }
 });
 

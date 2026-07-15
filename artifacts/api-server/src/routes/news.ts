@@ -2664,6 +2664,38 @@ function alreadySent(fp: string): boolean {
   return true;
 }
 
+// Breaking News Sensitivity levels. "super-critical" is velocity-based, not
+// just a higher source-count bar — a story that slowly accumulates 8 sources
+// over 2 hours is NOT super-critical, but one where 6+ independent outlets
+// all published within the same 30-minute window is (the whole industry
+// scrambling on it at once is a much stronger "this actually matters" signal
+// than raw source count alone).
+const SUPER_CRITICAL_MIN_SOURCES = 6;
+const SUPER_CRITICAL_WINDOW_MS = 30 * 60 * 1000;
+
+function isSuperCriticalCluster(cluster: StoryCard): boolean {
+  const timestamps = (cluster.sources ?? [])
+    .map((s) => (s.publishedAt ? Date.parse(s.publishedAt) : NaN))
+    .filter((t) => Number.isFinite(t));
+  if (timestamps.length < SUPER_CRITICAL_MIN_SOURCES) return false;
+  const span = Math.max(...timestamps) - Math.min(...timestamps);
+  return span <= SUPER_CRITICAL_WINDOW_MS;
+}
+
+function sensitivitySatisfied(
+  level: string,
+  sourceCount: number,
+  superCritical: boolean,
+): boolean {
+  switch (level) {
+    case "all": return sourceCount >= 1;
+    case "important": return sourceCount >= 2;
+    case "super-critical": return superCritical;
+    case "critical":
+    default: return sourceCount >= 3; // also the fallback for unknown/legacy values
+  }
+}
+
 async function notifyOnNewClusters(
   stories: StoryCard[],
   previousFps: Set<string>,
@@ -2698,6 +2730,7 @@ async function notifyOnNewClusters(
   const allPrefs = await db.select({
     token: notificationPrefsTable.token,
     breakingEnabled: notificationPrefsTable.breakingEnabled,
+    breakingSensitivity: notificationPrefsTable.breakingSensitivity,
     aiFeedEnabled: notificationPrefsTable.aiFeedEnabled,
     topicsEnabled: notificationPrefsTable.topicsEnabled,
     topicsKeywords: notificationPrefsTable.topicsKeywords,
@@ -2706,9 +2739,10 @@ async function notifyOnNewClusters(
   }).from(notificationPrefsTable);
   if (allPrefs.length === 0) return;
 
-  const breakingTokens = allPrefs
-    .filter((p) => p.breakingEnabled)
-    .map((p) => p.token);
+  // Breaking News prefs keep their per-user sensitivity level — filtered
+  // per-cluster below, not flattened to a single token list like the other
+  // categories (which have no sensitivity dimension).
+  const breakingPrefs = allPrefs.filter((p) => p.breakingEnabled);
   const aiFeedTokens = allPrefs
     .filter((p) => p.aiFeedEnabled)
     .map((p) => p.token);
@@ -2744,7 +2778,12 @@ async function notifyOnNewClusters(
 
   // No volume caps anywhere (per user request). Dedup + freshness still apply.
   for (const { s: cluster, fp } of fresh) {
-    const isBreaking = (cluster.sourceCount ?? cluster.sources?.length ?? 0) >= 3;
+    const sourceCount = cluster.sourceCount ?? cluster.sources?.length ?? 0;
+    const superCritical = isSuperCriticalCluster(cluster);
+    // AI Feed alerts (B2 below) have no sensitivity picker of their own —
+    // they keep the flat 3+-source bar. Only main Breaking News (B) is
+    // gated per-user by Sensitivity now.
+    const isBreaking = sourceCount >= 3;
     const primary = cluster.sources?.[0];
     const articlePayload = {
       id: cluster.id,
@@ -2756,9 +2795,14 @@ async function notifyOnNewClusters(
       publishedAt: (cluster as { publishedAt?: string }).publishedAt ?? "",
     };
 
-    // B) Breaking news: 3+ publisher confirmation, rate-limited per-token.
-    if (isBreaking && breakingTokens.length > 0) {
-      const allowed = tokensUnderLimit(breakingTokens);
+    // B) Breaking news: gated per-user by Breaking News Sensitivity
+    // (All 1+ / Important 2+ / Critical 3+ / Super Critical — 6+ sources
+    // within 30 min), rate-limited per-token.
+    const qualifyingBreakingTokens = breakingPrefs
+      .filter((p) => sensitivitySatisfied(p.breakingSensitivity, sourceCount, superCritical))
+      .map((p) => p.token);
+    if (qualifyingBreakingTokens.length > 0) {
+      const allowed = tokensUnderLimit(qualifyingBreakingTokens);
       if (allowed.length > 0) {
         // Detect which of the 73 themes the cluster matches so the notif
         // title reads "Breaking · <theme>" instead of just "Breaking".
@@ -2774,7 +2818,9 @@ async function notifyOnNewClusters(
         const muteKey = matchedTheme ?? "Other Breaking";
         const recipients = allowed.filter(tk => !getMutedThemesForToken(tk).has(muteKey));
         if (recipients.length === 0) continue;
-        const title = matchedTheme ? `Breaking · ${matchedTheme}` : "Breaking";
+        const title = superCritical
+          ? (matchedTheme ? `🚨 Super Critical · ${matchedTheme}` : "🚨 Super Critical")
+          : (matchedTheme ? `Breaking · ${matchedTheme}` : "Breaking");
         await sendPushToTokens(recipients, {
           title,
           body: cluster.headline,

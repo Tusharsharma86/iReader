@@ -27,6 +27,9 @@ export const notificationPrefsTable = pgTable("notification_prefs", {
   digestEveningMinute: integer("digest_evening_minute").notNull().default(0),
   lastDigestEveningSentAt: timestamp("last_digest_evening_sent_at", { withTimezone: true }),
   breakingEnabled: boolean("breaking_enabled").notNull().default(false),
+  // 'all' | 'important' | 'critical' | 'super-critical' — see
+  // sensitivitySatisfied() in routes/news.ts for what each level requires.
+  breakingSensitivity: text("breaking_sensitivity").notNull().default("important"),
   aiFeedEnabled: boolean("ai_feed_enabled").notNull().default(false),
   topicsEnabled: boolean("topics_enabled").notNull().default(false),
   topicsKeywords: text("topics_keywords").array().notNull().default([]),

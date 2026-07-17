@@ -4361,8 +4361,16 @@ router.post("/deepdive", async (req, res) => {
         ? `You have the FULL text of ${sourceCount} source article(s) covering the SAME story, plus short summaries from any sources that couldn't be fetched. Read them ALL.\n\n${fullArticles}\n\n=== OTHER SOURCE SUMMARIES ===\n${summaries}`
         : summaries
     ).slice(0, 20000);
-    const diffAnglesInstruction = sourceCount <= 1
-      ? `"DIFFERENT ANGLES"  — ONLY analyse the FRAMING and TONE of the single source and the key questions it leaves UNANSWERED. CRITICAL: do NOT mention or imply "various outlets", "different sources", "covered differently by outlets", or suggest multiple sources exist. There is only ONE source — write accordingly.`
+    // With only one source, there ARE no different angles to contrast — the
+    // old fallback ("analyse the framing and tone") just produced generic
+    // meta-commentary about the article itself ("the report frames...",
+    // "it leaves unanswered whether...") instead of substance. Swap the
+    // whole section for something a single source CAN support: stakes and
+    // consequences, grounded only in what that source actually says.
+    const singleSource = sourceCount <= 1;
+    const section3Heading = singleSource ? "WHY IT MATTERS" : "DIFFERENT ANGLES";
+    const diffAnglesInstruction = singleSource
+      ? `"WHY IT MATTERS"    — ONLY the stakes and consequences: who is affected and how, what changes as a result, why a reader should care. Ground this ENTIRELY in what the source states or directly implies. Do NOT describe the article or report itself ("the report frames...", "this piece focuses on...", "it leaves unanswered whether...") — that's meta-commentary, not substance. If the source gives no clear stakes, say plainly what remains unclear instead of padding with commentary about the coverage.`
       : `"DIFFERENT ANGLES"  — ONLY a META-COMMENTARY on the COVERAGE itself — do NOT restate story facts here. Contrast what each named outlet EMPHASISES, frames, or omits (e.g. "Reuters leads on the financial penalty; the BBC frames it as legal precedent; Indian outlets centre the Indian victims"). If all excerpts are one outlet/very similar, instead analyse the framing/tone used and the key questions left UNANSWERED.`;
     // Depth targets are baked directly INTO the JSON schema below. They used to
     // live in a "DEPTH OVERRIDE" note at the very END of the (16k-char) prompt,
@@ -4420,7 +4428,7 @@ ${sectionCount === 5 ? `    //   3. ${diffAnglesInstruction}
     //   5. "WHAT'S NEXT"       — ONLY the forward look: concrete expected next steps, pending decisions, appeals, timelines, awaited reactions, what to watch. Future tense only; no recap.
     { "heading": "WHAT HAPPENED", "body": "one paragraph" },
     { "heading": "THE DETAILS", "body": "one paragraph" },
-    { "heading": "DIFFERENT ANGLES", "body": "one paragraph" },
+    { "heading": "${section3Heading}", "body": "one paragraph" },
     { "heading": "CONTEXT & BACKGROUND", "body": "one paragraph" },
     { "heading": "WHAT'S NEXT", "body": "one paragraph" }` : `    //   3. "WHAT'S NEXT"       — ONLY the forward look stated or implied by the sources: expected next steps, pending decisions, timelines, what to watch. If the sources name none, say what remains unknown. Future tense only; no recap.
     { "heading": "WHAT HAPPENED", "body": "one paragraph" },

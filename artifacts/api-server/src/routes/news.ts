@@ -4187,13 +4187,15 @@ router.get("/image", async (req, res) => {
 // Claude call. Cached aggressively (memory + disk) to keep cost down.
 interface TldrSection { heading: string; bullets: string[]; }
 interface StorySection { heading: string; body: string; }
+interface Quote { text: string; by: string; }
 interface DeepDiveResult {
   at: number;
   tldr: string[];
   tldrSections: TldrSection[];
   narrative: string;
   storySections: StorySection[];
-  quote: { text: string; by: string } | null;
+  quote: Quote | null;
+  keyQuotes: Quote[];
   insight: string;
   questions: string[];
   tags: string[];
@@ -4402,7 +4404,7 @@ router.post("/deepdive", async (req, res) => {
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 {
-  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal").
+  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal"). ZERO REPETITION — every bullet, in every section, must state a fact that appears in NO other bullet. Never restate the same number/comparison/fact in different words to fill the bullet count — go back to the source for another genuinely distinct fact, angle, or implication instead.
     { "heading": "CORE EVENT", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] },
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],
@@ -4425,7 +4427,7 @@ ${sectionCount === 5 ? `    //   3. ${diffAnglesInstruction}
     { "heading": "THE DETAILS", "body": "one paragraph" },
     { "heading": "WHAT'S NEXT", "body": "one paragraph" }`}
   ],
-  "quote": {"text": "...", "by": "..."},               // REQUIRED — ONE notable DIRECT quote from the sources, VERBATIM (no paraphrase), with the speaker's full name and title in "by" (e.g. "Sundar Pichai, CEO of Google"). Pick the most striking, newsworthy on-record line. Search the full text thoroughly for quoted speech (words inside quotation marks with attribution). Only return null if the text genuinely contains ZERO direct quotes — this is rare, so try hard to find one.
+  "keyQuotes": [{"text": "...", "by": "..."}],         // 2-4 notable DIRECT quotes from the sources, VERBATIM (no paraphrase), each with the speaker's full name and title in "by" (e.g. "Sundar Pichai, CEO of Google"). Search the full text thoroughly for quoted speech (words inside quotation marks with attribution) — different speakers/moments where possible, never the same line twice. Order by newsworthiness, most striking first. Empty array only if the sources genuinely contain ZERO direct quotes — this is rare, so try hard to find at least one.
   "insight": "...",                                    // ONE sharp takeaway sentence: why this matters or what to watch. Max 32 words.
   "questions": ["...", "...", "...", "..."],           // ${qCount} conversational follow-up questions a curious reader would ask. Mix article-specific and broader context questions. Each ends with "?"
   "tags": ["...", "...", "..."],                       // 4-7 short noun-phrase entity/topic tags (e.g. "Federal Reserve", "Interest Rates", "Inflation"). Use exact names that appear in the text.
@@ -4542,15 +4544,38 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     const credibility = credibilityScore(urlsToRead);
     const age         = ageScore(publishedAt);
     const confidence  = Math.round(grounding * 40 + credibility * 20 + diversity * 20 + age * 20);
+    // Parse keyQuotes — sanitize, drop dupes/near-dupes by text, cap at 4.
+    // "quote" (the single pull-quote AI Feed cards use) derives from
+    // keyQuotes[0] instead of asking the model for both separately, so the
+    // pull-quote and the Key Quotations section can never disagree.
+    const rawQuotes = Array.isArray((parsed as { keyQuotes?: unknown }).keyQuotes)
+      ? ((parsed as { keyQuotes: unknown[] }).keyQuotes)
+      : [];
+    const seenQuoteText = new Set<string>();
+    const keyQuotes: Quote[] = rawQuotes
+      .map((q) => {
+        const obj = q as { text?: unknown; by?: unknown };
+        return {
+          text: typeof obj?.text === "string" ? obj.text.trim().slice(0, 400) : "",
+          by: typeof obj?.by === "string" ? obj.by.trim().slice(0, 120) : "",
+        };
+      })
+      .filter((q) => {
+        if (q.text.length <= 10) return false;
+        const key = q.text.toLowerCase();
+        if (seenQuoteText.has(key)) return false;
+        seenQuoteText.add(key);
+        return true;
+      })
+      .slice(0, 4);
     const result: DeepDiveResult = {
       at: Date.now(),
       tldr: flatTldr,
       tldrSections,
       narrative,
       storySections,
-      quote: (parsed.quote && typeof parsed.quote === "object" && typeof (parsed.quote as { text?: unknown }).text === "string" && (parsed.quote as { text: string }).text.trim().length > 10)
-        ? { text: String((parsed.quote as { text: string }).text).slice(0, 400), by: String((parsed.quote as { by?: unknown }).by ?? "").slice(0, 120) }
-        : null,
+      quote: keyQuotes[0] ?? null,
+      keyQuotes,
       insight: typeof parsed.insight === "string" ? parsed.insight : "",
       questions: Array.isArray(parsed.questions) ? parsed.questions.slice(0, 5).map(String) : [],
       tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 8).map(String) : [],

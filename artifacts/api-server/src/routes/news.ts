@@ -3822,13 +3822,23 @@ type AiSummaryType = "summary" | "fiveWs" | "eli5";
 function aiPrompt(
   type: AiSummaryType,
   text: string,
-  opts: { maxWords?: number; keyPoints?: number; eli5Tone?: 'kid' | 'casual' | 'plain' } = {},
+  opts: { maxWords?: number; keyPoints?: number; eli5Tone?: 'kid' | 'casual' | 'plain'; publishedAt?: string } = {},
 ): { prompt: string; maxTokens: number } {
   const maxWords = Math.max(80, Math.min(750, opts.maxWords ?? 250));
   const keyPoints = Math.max(3, Math.min(10, opts.keyPoints ?? 3));
   const eli5Tone = opts.eli5Tone ?? 'casual';
   // Map words → paragraph count for the summary prompt.
   const paraCount = maxWords < 180 ? 2 : maxWords < 320 ? 3 : 4;
+  // Same fix as Deep Dive (v19): with no date, the model has nothing to
+  // check "who currently holds this office/role" against and falls back to
+  // its own training-data priors, which can flip current/former status on
+  // stories set well after those priors were formed. This prompt previously
+  // had ZERO date context at all — worse than Deep Dive, which at least had
+  // a headline.
+  const dateLine = opts.publishedAt && Number.isFinite(Date.parse(opts.publishedAt))
+    ? `Published: ${new Date(opts.publishedAt).toDateString()}\n`
+    : `Published: unknown — do not assume a date\n`;
+  const titlesRule = ' Use ONLY the exact title/status (e.g. "President", "former President", "CEO") the article itself gives each person — never your own assumed knowledge of who currently holds a role, which may predate this article.';
   // Token budget = ~1.6x word target, plus 200 for bullets + JSON overhead.
   const summaryTokens = Math.round(maxWords * 1.6) + 250;
   switch (type) {
@@ -3845,8 +3855,9 @@ Rules:
 - TOTAL across all 5 entries ~300 words (range 280-340). Distribute as the story demands; WHAT and WHY usually carry the most.
 - Be specific: named parties, exact figures, dates, places. No filler.
 - Neutral tone. No bullets, no markdown inside the strings.
+-${titlesRule}
 
-Article: ${text}`,
+${dateLine}Article: ${text}`,
       };
     case "eli5": {
       const toneInstruction = eli5Tone === 'kid'
@@ -3858,7 +3869,8 @@ Article: ${text}`,
         maxTokens: 300,
         prompt: `${toneInstruction} Return ONLY valid JSON:
 {"eli5":"<explanation in 80-100 words, simple language, no jargon>"}
-Article: ${text}`,
+(${titlesRule.trim()})
+${dateLine}Article: ${text}`,
       };
     }
     default: {
@@ -3879,13 +3891,14 @@ Editorial rules:
 - Every sentence must add new information; never restate the same fact two different ways to fill space.
 - Avoid generic AI phrasing ("in a significant development", "this comes as", "it remains to be seen") — write like a human editor, not a template.
 - "bullets" are NOT a compressed rehash of the summary — each one should surface a distinct concrete detail (a figure, a quote, a name, a next step) that a skimming reader would want even if they only read the bullets.
+-${titlesRule}
 
 Hard rules:
 - "summary" MUST be ${wordRange} words across ${paraCount} paragraphs separated by \\n\\n.
 - "bullets" array MUST have EXACTLY ${keyPoints} entries.
 - Each bullet is 1-2 COMPLETE sentences, ~30-40 words — never a sentence fragment, never cut off mid-thought.
 
-Article:
+${dateLine}Article:
 ${text}`,
       };
     }
@@ -3993,13 +4006,14 @@ router.post("/cluster-labels", async (req, res) => {
 });
 
 router.post("/ai-summary", async (req, res) => {
-  const { url, paragraphs, type = "summary", maxWords, keyPoints, eli5Tone } = req.body as {
+  const { url, paragraphs, type = "summary", maxWords, keyPoints, eli5Tone, publishedAt } = req.body as {
     url?: string;
     paragraphs?: string[];
     type?: AiSummaryType;
     maxWords?: number;
     keyPoints?: number;
     eli5Tone?: 'kid' | 'casual' | 'plain';
+    publishedAt?: string;
   };
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
@@ -4010,7 +4024,10 @@ router.post("/ai-summary", async (req, res) => {
   // → summary length / key points count yields a fresh response instead of
   // serving the prior result. (Server-side previously ignored those params.)
   // v5 — include eli5Tone so kid/casual/plain yield distinct caches.
-  const cacheKey = `${url}:${type}:v5:${maxWords ?? 'd'}:${keyPoints ?? 'd'}:${eli5Tone ?? 'd'}`;
+  // v6 — added publish-date anchor + titles/office grounding rule (same fix
+  // as Deep Dive v19) — this prompt had ZERO date context, worse than Deep
+  // Dive which at least got a headline. Bump invalidates stale caches.
+  const cacheKey = `${url}:${type}:v6:${maxWords ?? 'd'}:${keyPoints ?? 'd'}:${eli5Tone ?? 'd'}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/ai-summary-${hashKey}.json`;
 
@@ -4067,7 +4084,7 @@ router.post("/ai-summary", async (req, res) => {
     const ratioCap = Math.max(60, Math.round(sourceWords * 0.45));
     const effectiveMaxWords = Math.min(maxWords ?? 250, ratioCap);
     const effectiveKeyPoints = sourceWords < 150 ? Math.min(keyPoints ?? 3, 2) : keyPoints;
-    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords: effectiveMaxWords, keyPoints: effectiveKeyPoints, eli5Tone });
+    const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords: effectiveMaxWords, keyPoints: effectiveKeyPoints, eli5Tone, publishedAt });
     let raw = "{}";
     let cerebrasNote = "";
     // 30s abort — without it a hung provider held the request until the
@@ -4633,18 +4650,24 @@ const askCache = new Map<string, AskCacheEntry>();
 const ASK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 router.post("/ask", async (req, res) => {
-  const { question, headline, summary, narrative } = req.body as {
+  const { question, headline, summary, narrative, publishedAt } = req.body as {
     question?: string;
     headline?: string;
     summary?: string;
     narrative?: string;
+    publishedAt?: string;
   };
   if (!question || !headline) {
     res.status(400).json({ error: "question and headline required" });
     return;
   }
 
-  const cacheKey = createHash("md5").update(`${headline}::${question}`).digest("hex");
+  // v2 — added publish-date anchor + titles/office rule (same fix as Deep
+  // Dive v19 / ai-summary v6). This prompt explicitly invites "your own
+  // general knowledge" for broader questions, making it the highest-risk of
+  // the three for exactly the "current vs. former officeholder" confusion —
+  // and it had no date context at all to check that knowledge against.
+  const cacheKey = createHash("md5").update(`v2:${headline}::${question}`).digest("hex");
   const diskPath = `/tmp/ask-${cacheKey}.json`;
 
   const cached = askCache.get(cacheKey);
@@ -4662,6 +4685,9 @@ router.post("/ask", async (req, res) => {
   if (!process.env["GROQ_API_KEY"]) { res.status(502).json({ error: "AI not configured" }); return; }
 
   const context = [headline, summary, narrative].filter(Boolean).join("\n\n").slice(0, 2500);
+  const dateLine = publishedAt && Number.isFinite(Date.parse(publishedAt))
+    ? `STORY PUBLISHED: ${new Date(publishedAt).toDateString()}\n\n`
+    : "";
   const prompt = `You are a knowledgeable, friendly assistant answering a curious reader's follow-up question. Use the story context below as your primary source, and combine it with your own general knowledge to give a complete, useful answer.
 
 Rules:
@@ -4670,8 +4696,9 @@ Rules:
 - If the question is broader than the story (e.g. "what happens next?", "how does this compare historically?"), use general knowledge to answer thoughtfully.
 - If you genuinely don't know something specific, say so briefly, then offer the closest useful context.
 - Never invent specific facts (names, dates, numbers) that aren't in the story or well-established public knowledge.
+- For anyone's title, office, or role (e.g. "President", "CEO"), your own knowledge may be stale relative to when this story was published — defer to the story context's framing, or the STORY PUBLISHED date below, over your own assumption of "current."
 
-STORY CONTEXT:
+${dateLine}STORY CONTEXT:
 ${context}
 
 QUESTION: ${question}

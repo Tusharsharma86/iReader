@@ -4298,7 +4298,12 @@ router.post("/deepdive", async (req, res) => {
 
   // v12 — 4-signal confidence: grounding + credibility + diversity + age
   // v18 — ratio guard + tighter quick mode; invalidates pre-guard caches.
-  const cacheKey = `deepdive:v18:${depth}:${url}`;
+  // v19 — added publish-date anchor + explicit titles/office grounding rule
+  // (was hallucinating "President Biden" / "former President Trump" on
+  // stories set well into Trump's actual term — the model had no date to
+  // check its own stale knowledge against). Bump invalidates old caches so
+  // this doesn't wait out the 7-day TTL on already-generated dives.
+  const cacheKey = `deepdive:v19:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -4420,6 +4425,7 @@ router.post("/deepdive", async (req, res) => {
   "storySections": [                                   // THE FULL STORY. EXACTLY these ${sectionCount} sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (${storyWords}) of engaging plain prose (no markdown). ${storyTotal}. Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
     // ── ABSOLUTE RULE: ZERO REPETITION. Each section must contain information that appears in NO other section. NEVER restate a fact, figure, name, quote or sentence you already used. If a section would repeat something, REPLACE it with new detail, analysis, or implication. A reader must learn something NEW in every section. Vary sentence openings; do not start multiple sections the same way.
     // ── GROUNDING RULE: every fact, figure, name and event must come from the source text. For background/history/what's-next, use ONLY what the sources state or directly imply; if the sources give no history or next steps, SAY what is unknown or pending rather than inventing it. Never import outside knowledge that the sources don't mention.
+    // ── TITLES/OFFICE RULE: never use your own assumed knowledge of who currently holds an office, title, or role — that knowledge may predate this article. Use ONLY the exact title/status (e.g. "President", "former President", "CEO") the source text itself gives each person. If the source doesn't specify current vs. former, use the article's stated publish date (given below) as the reference point, not your own assumption of "today."
     // Each section has a STRICT, NON-OVERLAPPING scope:
     //   1. "WHAT HAPPENED"     — ONLY the single core event in 2-3 sentences: who did what, the headline outcome. No numbers-dump, no background, no consequences. The spine, nothing else.
     //   2. "THE DETAILS"       — ONLY concrete specifics NOT in section 1: exact figures, dates, the sequence of events, names/titles, locations, the mechanism/how. Pure factual texture. No consequences, no framing. FACT-DENSITY RULE: this section must include EVERY distinct concrete fact from the sources — every number, amount, percentage, date, deadline, name, title, place and direct quote that fits. Prefer packing more facts over smoother prose; it may run up to ${depth === 'quick' ? '120' : '220'} words if the sources are fact-rich. NEVER drop a specific figure in favour of a vague phrase ("millions" when a source says "$4.2M").
@@ -4445,6 +4451,7 @@ ${sectionCount === 5 ? `    //   3. ${diffAnglesInstruction}
 }
 
 Headline: ${headline ?? "(no headline)"}
+Published: ${publishedAt && Number.isFinite(Date.parse(publishedAt)) ? new Date(publishedAt).toDateString() : "unknown — do not assume a date"}
 
 Article:
 ${text}

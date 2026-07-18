@@ -2723,6 +2723,32 @@ function alreadySent(fp: string): boolean {
 const SUPER_CRITICAL_MIN_SOURCES = 6;
 const SUPER_CRITICAL_WINDOW_MS = 30 * 60 * 1000;
 
+// Hard daily cap, separate from the rest of the pipeline's deliberate
+// "no volume caps anywhere" policy. That policy makes sense for
+// All/Important/Critical (a user picked a bar, every story clearing it is
+// wanted), but Super Critical's whole premise is rarity — and the velocity
+// heuristic alone doesn't guarantee that: with dozens of outlets now
+// wire-republishing within minutes of each other, "6+ sources in 30 min"
+// can clear more often in practice than "should not be all articles"
+// implies. This caps how many distinct clusters can wear the Super
+// Critical badge per rolling 24h, independent of subscriber count.
+const SUPER_CRITICAL_DAILY_CAP = 3;
+const SUPER_CRITICAL_DAY_MS = 24 * 60 * 60 * 1000;
+const SUPER_CRITICAL_RATE_PATH = "/tmp/super-critical-rate.json";
+let superCriticalSentAt: number[] = ((): number[] => {
+  try { return JSON.parse(readFileSync(SUPER_CRITICAL_RATE_PATH, "utf8")) as number[]; }
+  catch { return []; }
+})();
+function superCriticalCapAvailable(): boolean {
+  const cutoff = Date.now() - SUPER_CRITICAL_DAY_MS;
+  superCriticalSentAt = superCriticalSentAt.filter((t) => t > cutoff);
+  return superCriticalSentAt.length < SUPER_CRITICAL_DAILY_CAP;
+}
+function recordSuperCriticalSent(): void {
+  superCriticalSentAt.push(Date.now());
+  try { writeFileSync(SUPER_CRITICAL_RATE_PATH, JSON.stringify(superCriticalSentAt)); } catch {}
+}
+
 function isSuperCriticalCluster(cluster: StoryCard): boolean {
   const timestamps = (cluster.sources ?? [])
     .map((s) => (s.publishedAt ? Date.parse(s.publishedAt) : NaN))
@@ -2736,11 +2762,12 @@ function sensitivitySatisfied(
   level: string,
   sourceCount: number,
   superCritical: boolean,
+  superCriticalCapOk: boolean,
 ): boolean {
   switch (level) {
     case "all": return sourceCount >= 1;
     case "important": return sourceCount >= 2;
-    case "super-critical": return superCritical;
+    case "super-critical": return superCritical && superCriticalCapOk;
     case "critical":
     default: return sourceCount >= 3; // also the fallback for unknown/legacy values
   }
@@ -2830,6 +2857,10 @@ async function notifyOnNewClusters(
   for (const { s: cluster, fp } of fresh) {
     const sourceCount = cluster.sourceCount ?? cluster.sources?.length ?? 0;
     const superCritical = isSuperCriticalCluster(cluster);
+    // Only check/consume the daily cap for clusters that actually clear the
+    // velocity bar — avoids pruning the timestamp array on every single
+    // cluster when it's irrelevant.
+    const superCriticalCapOk = !superCritical || superCriticalCapAvailable();
     // AI Feed alerts (B2 below) have no sensitivity picker of their own —
     // they keep the flat 3+-source bar. Only main Breaking News (B) is
     // gated per-user by Sensitivity now.
@@ -2849,11 +2880,15 @@ async function notifyOnNewClusters(
     // (All 1+ / Important 2+ / Critical 3+ / Super Critical — 6+ sources
     // within 30 min), rate-limited per-token.
     const qualifyingBreakingTokens = breakingPrefs
-      .filter((p) => sensitivitySatisfied(p.breakingSensitivity, sourceCount, superCritical))
+      .filter((p) => sensitivitySatisfied(p.breakingSensitivity, sourceCount, superCritical, superCriticalCapOk))
       .map((p) => p.token);
     if (qualifyingBreakingTokens.length > 0) {
       const allowed = tokensUnderLimit(qualifyingBreakingTokens);
       if (allowed.length > 0) {
+        // Consume the daily Super Critical slot here — this cluster cleared
+        // the velocity bar AND the cap AND is actually about to send to at
+        // least one recipient, so it counts as one of today's uses.
+        if (superCritical && superCriticalCapOk) recordSuperCriticalSent();
         // Detect which of the 73 themes the cluster matches so the notif
         // title reads "Breaking · <theme>" instead of just "Breaking".
         const breakingRules = themeRulesFor("breaking");
@@ -2868,7 +2903,11 @@ async function notifyOnNewClusters(
         const muteKey = matchedTheme ?? "Other Breaking";
         const recipients = allowed.filter(tk => !getMutedThemesForToken(tk).has(muteKey));
         if (recipients.length === 0) continue;
-        const title = superCritical
+        // Must match the cap, not just the velocity bar — otherwise a
+        // cluster over today's cap (so no super-critical-tier subscriber is
+        // even in `recipients`) could still badge as "Super Critical" for
+        // whichever other-tier recipients matched it via source count.
+        const title = superCritical && superCriticalCapOk
           ? (matchedTheme ? `🚨 Super Critical · ${matchedTheme}` : "🚨 Super Critical")
           : (matchedTheme ? `Breaking · ${matchedTheme}` : "Breaking");
         await sendPushToTokens(recipients, {

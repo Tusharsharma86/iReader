@@ -1887,7 +1887,7 @@ function themeKey(theme: string, arts: NewsDataArticle[]): string {
 async function generateThemeSummary(key: string, theme: string, arts: NewsDataArticle[]): Promise<void> {
   try {
     const lines = arts.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 100))}`).join("\n");
-    const prompt = `These articles all relate to the topic "${theme}" but are DIFFERENT stories. Summarise the current state of "${theme}" coverage in ONE neutral sentence of AT MOST 20 words. Capture WHAT'S HAPPENING ACROSS the stories (multiple angles, recurring entities, key developments) — NOT one story. Return JSON ONLY: {"summary":"..."}\n\n${lines}`;
+    const prompt = `These articles all relate to the topic "${theme}" but are DIFFERENT stories. Summarise the current state of "${theme}" coverage in ONE neutral sentence of AT MOST 20 words. Capture WHAT'S HAPPENING ACROSS the stories (multiple angles, recurring entities, key developments) — NOT one story. Use ONLY facts stated below — do not add outside knowledge, and for anyone's title/role use only what's stated here, not your own assumption of who currently holds it. Return JSON ONLY: {"summary":"..."}\n\n${lines}`;
     const raw = (await callGroq(prompt, 120, { model: GROQ_MODEL_ENRICH, task: "theme-summary", background: true })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { summary?: string }) : {};
@@ -3251,7 +3251,12 @@ router.get("/qa", async (req, res) => {
       return `${h}. ${s}`;
     }).join('\n\n').slice(0, 1800);
 
-    const prompt = `You are a concise news analyst. Answer the question based on recent news. Be direct and specific. 80-120 words max.
+    // No grounding rule at all previously — general "answer based on recent
+    // news" with zero instruction against inventing facts, and zero date
+    // anchor (same hallucination class fixed elsewhere: a model with no
+    // date defaults to stale training-data assumptions, e.g. current vs.
+    // former officeholders).
+    const prompt = `You are a concise news analyst. Answer the question using ONLY the recent news context below — do not invent facts, figures, or names that aren't in it. If the context doesn't cover the question, say so briefly rather than filling in from assumption. For anyone's title or role (President, CEO, etc.), use only what the context states — your own knowledge of who currently holds a role may predate today. Today's date: ${new Date().toDateString()}. Be direct and specific. 80-120 words max.
 
 Question: ${q}
 

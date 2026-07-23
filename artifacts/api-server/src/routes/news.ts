@@ -4045,7 +4045,7 @@ router.post("/cluster-labels", async (req, res) => {
 });
 
 router.post("/ai-summary", async (req, res) => {
-  const { url, paragraphs, type = "summary", maxWords, keyPoints, eli5Tone, publishedAt } = req.body as {
+  const { url, paragraphs, type = "summary", maxWords, keyPoints, eli5Tone, publishedAt, background } = req.body as {
     url?: string;
     paragraphs?: string[];
     type?: AiSummaryType;
@@ -4053,6 +4053,7 @@ router.post("/ai-summary", async (req, res) => {
     keyPoints?: number;
     eli5Tone?: 'kid' | 'casual' | 'plain';
     publishedAt?: string;
+    background?: boolean;
   };
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
@@ -4133,7 +4134,7 @@ router.post("/ai-summary", async (req, res) => {
     try {
       if (process.env["CEREBRAS_API_KEY"]) {
         try {
-          raw = (await callCerebras(prompt, maxTokens, { task: "article-summary", signal: ctrl.signal })) || "{}";
+          raw = (await callCerebras(prompt, maxTokens, { task: "article-summary", signal: ctrl.signal, background: !!background })) || "{}";
         } catch (cerebrasErr) {
           cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
           req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
@@ -4337,13 +4338,14 @@ function ageScore(publishedAt?: string): number {
 }
 
 router.post("/deepdive", async (req, res) => {
-  const { url, headline, paragraphs, sourceUrls, depth: rawDepth, publishedAt } = req.body as {
+  const { url, headline, paragraphs, sourceUrls, depth: rawDepth, publishedAt, background } = req.body as {
     url?: string;
     headline?: string;
     paragraphs?: string[];
     sourceUrls?: string[];
     depth?: 'quick' | 'standard' | 'deep';
     publishedAt?: string;
+    background?: boolean;
   };
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
@@ -4520,9 +4522,14 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     let raw = "";
     try {
       // Cerebras gpt-oss-120b primary → Groq Scout → Groq gpt-oss-20b
+      // Cerebras free tier is ~30 RPM SHARED across every caller — pre-warm
+      // fires many of these back-to-back, so background=true routes through
+      // cerebrasBgGate() (2.5s spacing, ~24 RPM, under the cap). On-demand
+      // opens (background=false, the default) skip the gate — a user
+      // actively waiting on one open shouldn't queue behind a warm burst.
       try {
         if (process.env["CEREBRAS_API_KEY"]) {
-          raw = await callCerebras(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+          raw = await callCerebras(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         } else {
           await deepDiveGate();
           raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });

@@ -4356,12 +4356,16 @@ router.post("/deepdive", async (req, res) => {
 
   // v12 — 4-signal confidence: grounding + credibility + diversity + age
   // v18 — ratio guard + tighter quick mode; invalidates pre-guard caches.
-  // v19 — added publish-date anchor + explicit titles/office grounding rule
-  // (was hallucinating "President Biden" / "former President Trump" on
-  // stories set well into Trump's actual term — the model had no date to
-  // check its own stale knowledge against). Bump invalidates old caches so
-  // this doesn't wait out the 7-day TTL on already-generated dives.
-  const cacheKey = `deepdive:v19:${depth}:${url}`;
+  // v19 — added publish-date anchor + titles/office grounding rule, but only
+  // scoped to storySections' local comment block — tldrSections (which the
+  // model writes FIRST, before ever reaching that comment) wasn't covered
+  // at all, so "CORE EVENT"/"CONTEXT & WHY IT MATTERS" bullets kept calling
+  // Trump "former President" on a story about "the Trump administration's"
+  // own current-term nuclear deal — a direct contradiction within the same
+  // response. v20 — moved the rule to a GLOBAL instruction before the JSON
+  // schema starts, covering every field, plus an explicit self-consistency
+  // check ("does this contradict the headline or another bullet?").
+  const cacheKey = `deepdive:v20:${depth}:${url}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/deepdive-${hashKey}.json`;
 
@@ -4474,6 +4478,8 @@ router.post("/deepdive", async (req, res) => {
     const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
+GLOBAL RULE — TITLES/OFFICE, applies to EVERY field below (tldrSections, tldr, storySections, everything, not just one section): never use your own assumed knowledge of who currently holds an office, title, or role — that knowledge may predate this article. The source's OWN framing is authoritative: if the headline or article calls it "the Trump administration's policy" or "President Biden announced," that framing tells you their status as of this story — do not relabel them "former President" (or vice versa) elsewhere in your response based on your own assumption. If the source doesn't specify, use the article's stated publish date (given below) as the reference point, not "today." Before finalizing, check your own output for this specific contradiction: does any bullet's title/status conflict with another bullet, or with how the headline itself frames the same person?
+
 {
   "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal"). ZERO REPETITION — every bullet, in every section, must state a fact that appears in NO other bullet. Never restate the same number/comparison/fact in different words to fill the bullet count — go back to the source for another genuinely distinct fact, angle, or implication instead.
     { "heading": "CORE EVENT", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] },
@@ -4483,7 +4489,7 @@ router.post("/deepdive", async (req, res) => {
   "storySections": [                                   // THE FULL STORY. EXACTLY these ${sectionCount} sections, IN THIS ORDER. Each "body" = ONE well-developed paragraph (${storyWords}) of engaging plain prose (no markdown). ${storyTotal}. Attribute specific facts to their source inline in parentheses using the [Source] tags, e.g. "...228 died (Reuters)."
     // ── ABSOLUTE RULE: ZERO REPETITION. Each section must contain information that appears in NO other section. NEVER restate a fact, figure, name, quote or sentence you already used. If a section would repeat something, REPLACE it with new detail, analysis, or implication. A reader must learn something NEW in every section. Vary sentence openings; do not start multiple sections the same way.
     // ── GROUNDING RULE: every fact, figure, name and event must come from the source text. For background/history/what's-next, use ONLY what the sources state or directly imply; if the sources give no history or next steps, SAY what is unknown or pending rather than inventing it. Never import outside knowledge that the sources don't mention.
-    // ── TITLES/OFFICE RULE: never use your own assumed knowledge of who currently holds an office, title, or role — that knowledge may predate this article. Use ONLY the exact title/status (e.g. "President", "former President", "CEO") the source text itself gives each person. If the source doesn't specify current vs. former, use the article's stated publish date (given below) as the reference point, not your own assumption of "today."
+    // ── TITLES/OFFICE RULE: see the GLOBAL RULE above — applies here too, and this is the section most likely to discuss background/history where the temptation to use your own "current officeholder" assumption is strongest.
     // Each section has a STRICT, NON-OVERLAPPING scope:
     //   1. "WHAT HAPPENED"     — ONLY the single core event in 2-3 sentences: who did what, the headline outcome. No numbers-dump, no background, no consequences. The spine, nothing else.
     //   2. "THE DETAILS"       — ONLY concrete specifics NOT in section 1: exact figures, dates, the sequence of events, names/titles, locations, the mechanism/how. Pure factual texture. No consequences, no framing. FACT-DENSITY RULE: this section must include EVERY distinct concrete fact from the sources — every number, amount, percentage, date, deadline, name, title, place and direct quote that fits. Prefer packing more facts over smoother prose; it may run up to ${depth === 'quick' ? '120' : '220'} words if the sources are fact-rich. NEVER drop a specific figure in favour of a vague phrase ("millions" when a source says "$4.2M").

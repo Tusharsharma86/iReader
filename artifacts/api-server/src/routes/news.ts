@@ -43,39 +43,18 @@ function groqBgGate(): Promise<void> {
 // real-time rate limiting, not quota exhaustion). 3s spacing keeps it under
 // ~20/min, still far more responsive than the 4.5s background gate since this
 // is what the user is actively waiting on.
-// Was ONE shared slot queue for every caller — background pre-warm and
-// real on-demand opens both waited in the exact same FIFO, so a pre-warm
-// sweep ahead in the queue could make a user's own tap wait behind it.
-// Two independent slot trackers, same pace each, so a large background
-// backlog can never delay an on-demand request's own turn. The 429 pause
-// below is ALSO split the same way now (was one shared 65s blackout for
-// every caller): a background sweep tripping the limit no longer blocks
-// on-demand's own, separately-paced attempts — on-demand has its own
-// concurrency cap (DEEPDIVE_ONDEMAND_MAX_CONCURRENT) keeping its real
-// volume low enough that it rarely re-trips the same window right after.
-let deepDiveOnDemandNextSlot = 0;
-let deepDiveBackgroundNextSlot = 0;
-let scoutPausedUntilBackground = 0;
-let scoutPausedUntilOnDemand = 0;
+let deepDiveNextSlot = 0;
+let scoutPausedUntil = 0;
 const DEEPDIVE_GATE_INTERVAL_MS = 3000;
-function deepDiveGate(background = false): Promise<void> {
+function deepDiveGate(): Promise<void> {
   const now = Date.now();
-  if (now < (background ? scoutPausedUntilBackground : scoutPausedUntilOnDemand)) return Promise.reject(new Error("rate-gate-paused"));
-  if (background) {
-    const at = Math.max(now, deepDiveBackgroundNextSlot);
-    deepDiveBackgroundNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
-    const wait = at - now;
-    return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
-  }
-  const at = Math.max(now, deepDiveOnDemandNextSlot);
-  deepDiveOnDemandNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
+  if (now < scoutPausedUntil) return Promise.reject(new Error("rate-gate-paused"));
+  const at = Math.max(now, deepDiveNextSlot);
+  deepDiveNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
-function pauseScoutModel(background: boolean) {
-  if (background) scoutPausedUntilBackground = Date.now() + 65_000;
-  else scoutPausedUntilOnDemand = Date.now() + 65_000;
-}
+function pauseScoutModel() { scoutPausedUntil = Date.now() + 65_000; }
 
 // Unified gate for ALL 8b calls (background + foreground). 8b has 30 RPM on
 // Groq free tier. 2.2s spacing = ~27 RPM, under the limit. On 429, pause ALL
@@ -109,28 +88,17 @@ function cerebrasBgGate(): Promise<void> {
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
-// Split by lane, same reasoning as the Scout pause above: was one shared
-// 30s blackout for every Cerebras caller — a background pre-warm sweep
-// tripping the limit used to also block on-demand's otherwise-ungated,
-// low-latency path for 30s. Now a background-caused 429 only pauses future
-// background attempts (which fall through to Groq immediately); on-demand
-// keeps trying Cerebras directly and only pauses its own lane if IT gets
-// 429'd.
-let cerebrasPausedUntilBackground = 0;
-let cerebrasPausedUntilOnDemand = 0;
-function pauseCerebras(background: boolean) {
-  if (background) cerebrasPausedUntilBackground = Date.now() + 30_000;
-  else cerebrasPausedUntilOnDemand = Date.now() + 30_000;
-}
+let cerebrasPausedUntil = 0;
+function pauseCerebras() { cerebrasPausedUntil = Date.now() + 30_000; }
 
 async function callCerebras(
   prompt: string,
   maxTokens: number,
-  opts: { temperature?: number; task?: string; jsonMode?: boolean; model?: string; signal?: AbortSignal; background?: boolean; onChunk?: (delta: string) => void } = {},
+  opts: { temperature?: number; task?: string; jsonMode?: boolean; model?: string; signal?: AbortSignal; background?: boolean } = {},
 ): Promise<string> {
   const key = process.env["CEREBRAS_API_KEY"];
   if (!key) throw new Error("CEREBRAS_API_KEY missing");
-  if (Date.now() < (opts.background ? cerebrasPausedUntilBackground : cerebrasPausedUntilOnDemand)) throw new Error("cerebras-paused");
+  if (Date.now() < cerebrasPausedUntil) throw new Error("cerebras-paused");
   if (opts.background) await cerebrasBgGate();
   const model = opts.model ?? CEREBRAS_MODEL;
   const task = opts.task ?? "other";
@@ -145,62 +113,6 @@ async function callCerebras(
     messages: [{ role: "user", content: prompt }],
   };
   if (opts.jsonMode) body["response_format"] = { type: "json_object" };
-
-  // Optional token-streaming path — purely additive, only engages when a
-  // caller explicitly passes onChunk (currently: on-demand Deep Dive opens
-  // requesting stream:true, so a user sees live progress instead of a
-  // static spinner for the ~10-30s a generation can take). Every existing
-  // caller is completely unaffected — same request/response shape as
-  // before when onChunk is omitted. No retry-on-502/503 here (a partial
-  // stream can't cleanly resume); a failure propagates to the caller,
-  // which falls back through the exact same Groq chain as any other
-  // Cerebras failure.
-  if (opts.onChunk) {
-    const streamBody = { ...body, stream: true };
-    const r = await fetch(CEREBRAS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify(streamBody),
-      signal: opts.signal,
-    });
-    if (!r.ok || !r.body) {
-      recordAiUsage(model, task, 0, false);
-      if (r.status === 429) pauseCerebras(!!opts.background);
-      throw new Error(`Cerebras ${r.status}`);
-    }
-    let full = "";
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const payload = trimmed.slice(5).trim();
-        if (payload === "[DONE]") continue;
-        try {
-          const j = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
-          const delta = j.choices?.[0]?.delta?.content ?? "";
-          if (delta) { full += delta; opts.onChunk(delta); }
-        } catch { /* ignore a malformed/partial SSE line */ }
-      }
-    }
-    if (!full.trim()) {
-      recordAiUsage(model, task, 0, false);
-      throw new Error("Cerebras empty content (stream)");
-    }
-    // Streaming deltas don't carry a usage field (only the non-streaming
-    // response does) — recorded as 0 tokens; a known, acceptable gap in
-    // the usage dashboard's accuracy for streamed calls specifically.
-    recordAiUsage(model, task, 0, true);
-    return full;
-  }
-
   for (let attempt = 0; ; attempt++) {
     const r = await fetch(CEREBRAS_URL, {
       method: "POST",
@@ -227,7 +139,7 @@ async function callCerebras(
       continue;
     }
     recordAiUsage(model, task, 0, false);
-    if (r.status === 429) pauseCerebras(!!opts.background);
+    if (r.status === 429) pauseCerebras();
     throw new Error(`Cerebras ${r.status}`);
   }
 }
@@ -242,7 +154,7 @@ async function callGroq(
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
   if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate();
-  else if (model === GROQ_MODEL && Date.now() < (opts.background ? scoutPausedUntilBackground : scoutPausedUntilOnDemand)) throw new Error("rate-gate-paused");
+  else if (model === GROQ_MODEL && Date.now() < scoutPausedUntil) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
@@ -280,7 +192,7 @@ async function callGroq(
     recordAiUsage(model, task, 0, false);
     if (r.status === 429) {
       if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) pause8bModel();
-      else if (model === GROQ_MODEL) pauseScoutModel(!!opts.background);
+      else if (model === GROQ_MODEL) pauseScoutModel();
     }
     throw new Error(`Groq ${r.status}`);
   }
@@ -2658,60 +2570,6 @@ function distinctPublisherCount(items: FeedItem[]): number {
   return hosts.size;
 }
 
-// ── Server-side Deep Dive pre-warm ───────────────────────────────────────
-// The real architectural fix for AI Feed latency: pre-warming used to be
-// entirely CLIENT-triggered, every session — every user who opened the app
-// independently re-fetched the breaking feed and re-fired ~30-45 Deep Dive
-// generation requests for the SAME top stories, all competing with each
-// other (and with real on-demand opens) for the same shared ~30 RPM
-// Cerebras budget. N concurrent users meant N redundant warm sweeps of the
-// same content.
-//
-// This hooks into the SAME "genuinely new cluster" detection that already
-// drives breaking-push notifications (refreshInBackground below, fed by
-// the external cron hitting /cron/poll) — the moment a story is freshly
-// promoted into "breaking" server-side, kick off its Deep Dive generation
-// ONCE, before any user has asked for it. By the time anyone opens AI
-// Feed, the top breaking stories are typically already warm in the shared
-// server cache (deepDiveCache/disk) — client-side pre-warm sweeps become
-// mostly cache-hit no-ops instead of triggering real generation, without
-// needing to touch the client at all.
-//
-// Internal loopback to /api/news/deepdive (background:true, so it's paced
-// by the existing background gates/concurrency pool) rather than inlining
-// the generation logic here — reuses the exact same, already-correct
-// pipeline (article fetch, prompt, model fallback chain, caching) instead
-// of a second, divergent copy of it.
-const PREWARM_MAX_PER_TICK = 6;
-async function prewarmNewBreakingClusters(cards: StoryCard[], previousFps: Set<string>): Promise<void> {
-  try {
-    const port = process.env["PORT"];
-    if (!port) return;
-    const fresh = cards
-      .filter((c) => (c.sourceCount ?? c.sources?.length ?? 0) >= 3)
-      .filter((c) => !previousFps.has(clusterFingerprint(c)))
-      .filter((c) => c.sources?.[0]?.url)
-      .slice(0, PREWARM_MAX_PER_TICK);
-    if (fresh.length === 0) return;
-    // eslint-disable-next-line no-console
-    console.log(`[prewarm] deepdive: warming ${fresh.length} newly-breaking cluster(s) server-side`);
-    const base = `http://127.0.0.1:${port}/api/news/deepdive`;
-    await Promise.allSettled(fresh.map((c) => fetch(base, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: c.sources[0].url,
-        headline: c.headline,
-        paragraphs: [`${c.headline}. ${c.summary || c.headline}`],
-        sourceUrls: c.sources.map((s) => s.url).filter(Boolean),
-        depth: "standard",
-        publishedAt: c.publishedAt,
-        background: true,
-      }),
-    }).catch(() => {})));
-  } catch { /* best-effort — client-side pre-warm remains as a backfill */ }
-}
-
 function refreshInBackground(
   topic: string,
   log: { warn: (...args: unknown[]) => void },
@@ -2742,11 +2600,7 @@ function refreshInBackground(
           `[prewarm] ${topic} refreshed in ${Date.now() - started}ms (${feed.length} items, ${freshPubs} publishers${isDegraded ? " — DEGRADED but accepted (no prior cache)" : ""})`,
         );
         if (existing) {
-          const freshCards = feedToRepCards(feed);
-          notifyOnNewClusters(freshCards, previousFps).catch(() => {});
-          if (topic === "breaking") {
-            prewarmNewBreakingClusters(freshCards, previousFps).catch(() => {});
-          }
+          notifyOnNewClusters(feedToRepCards(feed), previousFps).catch(() => {});
         }
       }
       return feed;
@@ -4289,10 +4143,10 @@ router.post("/ai-summary", async (req, res) => {
         } catch (cerebrasErr) {
           cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
           req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
-          raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+          raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
         }
       } else {
-        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
       }
     } finally {
       clearTimeout(abortTimer);
@@ -4420,15 +4274,6 @@ const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 // user's card view often request the same url+depth seconds apart — without
 // this, both paid a full 20-40s Groq generation.
 const deepDiveInflight = new Map<string, Promise<DeepDiveResult>>();
-// /deepdive's pipeline is heavier than /ai-summary's (multiple full-article
-// fetches + a much longer prompt + 6000-token generation) but had NO
-// concurrency cap at all — only reactive provider-429 pauses. Separate
-// pools for background (pre-warm) vs on-demand (a real user waiting) so a
-// warm sweep filling its own pool can never block a real user's slot.
-let deepDiveOnDemandActive = 0;
-let deepDiveBackgroundActive = 0;
-const DEEPDIVE_ONDEMAND_MAX_CONCURRENT = 4;
-const DEEPDIVE_BACKGROUND_MAX_CONCURRENT = 3;
 
 // Fetch + extract the full readable text of one article. Returns "" on failure
 // (paywall, JS-only page, timeout) so callers can fall back to summaries.
@@ -4438,16 +4283,6 @@ const PUBLISHER_JUNK_STOP_RE =
   /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b|\bCricbuzz\b|\bNewspaper\s+Subscription\b|\bFood\s+News\s+TV\b|\bTimes\s+Life\s+Times\b|\bLifestyle\s+Newspaper\b/;
 
 async function fetchArticleText(u: string): Promise<string> {
-  // Was always re-fetching + re-parsing HTML from scratch, even when the
-  // /article route already fetched and cached the SAME url minutes earlier
-  // (and even across a single story's own quick/standard/deep Deep Dive
-  // requests, since the deepdive cache key includes depth — 3 depths of
-  // the same story used to mean 3x the article fetches). Read-through the
-  // existing article cache first; only hit the network on a genuine miss.
-  const cached = articleCache.get(u);
-  if (cached && Date.now() - cached.at < ARTICLE_TTL_MS && cached.data.paragraphs?.length) {
-    return cached.data.paragraphs.join("\n\n").trim();
-  }
   try {
     const html = await fetchArticleHtml(u);
     const { bodyHtml } = extractArticleBody(html);
@@ -4508,7 +4343,7 @@ function ageScore(publishedAt?: string): number {
 }
 
 router.post("/deepdive", async (req, res) => {
-  const { url, headline, paragraphs, sourceUrls, depth: rawDepth, publishedAt, background, stream: wantsStream } = req.body as {
+  const { url, headline, paragraphs, sourceUrls, depth: rawDepth, publishedAt, background } = req.body as {
     url?: string;
     headline?: string;
     paragraphs?: string[];
@@ -4516,12 +4351,7 @@ router.post("/deepdive", async (req, res) => {
     depth?: 'quick' | 'standard' | 'deep';
     publishedAt?: string;
     background?: boolean;
-    stream?: boolean;
   };
-  // Progress streaming only makes sense for a real user actively watching a
-  // spinner — background pre-warm has no one watching, so it always stays
-  // on the plain, unmodified JSON path regardless of what's requested.
-  const streaming = !!wantsStream && !background;
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
     return;
@@ -4565,49 +4395,6 @@ router.post("/deepdive", async (req, res) => {
     catch { res.status(502).json({ error: "Deep Dive unavailable" }); }
     return;
   }
-
-  // Concurrency cap — separate pools so a pre-warm sweep can never starve a
-  // real user's on-demand open. Client already retries on 503 (15s/30s
-  // backoff), same as it does for a cold-starting provider.
-  if (background) {
-    if (deepDiveBackgroundActive >= DEEPDIVE_BACKGROUND_MAX_CONCURRENT) {
-      res.status(503).set("Retry-After", "5").json({ error: "Deep Dive pre-warm busy" });
-      return;
-    }
-  } else if (deepDiveOnDemandActive >= DEEPDIVE_ONDEMAND_MAX_CONCURRENT) {
-    res.status(503).set("Retry-After", "3").json({ error: "Deep Dive busy" });
-    return;
-  }
-
-  // Streaming: past every early-return above (cache hit / concurrency cap),
-  // so generation is definitely about to happen — open the SSE connection
-  // now. Only the PRIMARY (Cerebras) attempt streams progress; a fallback
-  // to Groq (rare — primary usually succeeds) just proceeds silently and
-  // the client still gets the complete result in the final event, same as
-  // it always has, just without live progress ticks for that portion.
-  if (streaming) {
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "X-Accel-Buffering": "no",
-    });
-    res.write(`data: ${JSON.stringify({ progress: 0 })}\n\n`);
-  }
-  let streamedChars = 0;
-  const onChunk = streaming ? (delta: string) => {
-    streamedChars += delta.length;
-    // Rough progress estimate — the real per-request token target isn't
-    // computed until inside gen() (depends on fetched article length), so
-    // this uses a fixed generous ceiling (~4500 words / most requests'
-    // realistic upper bound) rather than the exact figure. Precision
-    // doesn't matter here; it's a UX progress indicator, not a real
-    // constraint. Capped short of 100% until the final event actually
-    // arrives, so it never visually "finishes" before the real done event.
-    const ROUGH_CHAR_CEILING = 4500 * 6; // ~6 chars/word, generous
-    const pct = Math.min(92, Math.round((streamedChars / ROUGH_CHAR_CEILING) * 100));
-    try { res.write(`data: ${JSON.stringify({ progress: pct })}\n\n`); } catch { /* client disconnected */ }
-  } : undefined;
 
   const gen = (async (): Promise<DeepDiveResult> => {
     // RICHER INPUT: for a multi-source story, READ THE FULL TEXT OF EVERY SOURCE
@@ -4694,18 +4481,6 @@ router.post("/deepdive", async (req, res) => {
     const tldrCap = Math.min(depth === 'quick' ? 200 : 450, Math.max(120, Math.round(sourceWords * 0.6)));
     const tldrTotal = `~${Math.round(tldrCap * 0.85)}-${tldrCap} words (hard cap ${tldrCap})`;
     const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
-    // API max_tokens was a FLAT 6000 regardless of depth — "quick" mode's
-    // prompt asked for a 300-word story vs "deep"'s 1100 words, but both
-    // got sent to the model with the same token ceiling, so quick never
-    // actually got the latency benefit its shorter output should buy.
-    // Scale to what THIS request's own word targets actually need: TL;DR +
-    // story sections + ~200 words of fixed overhead (quotes/insight/
-    // questions/tags/entities), same ~1.6x words-to-tokens-plus-JSON-
-    // overhead ratio already used for article-summary's budget elsewhere
-    // in this file. Cerebras adds its own +2000 reasoning headroom on top
-    // of whatever we pass (see callCerebras) — this is the pure output
-    // budget, not that headroom.
-    const deepDiveMaxTokens = Math.max(1500, Math.round((tldrCap + storyMax + 200) * 1.6) + 300);
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 GLOBAL RULE — TITLES/OFFICE, applies to EVERY field below (tldrSections, tldr, storySections, everything, not just one section): never use your own assumed knowledge of who currently holds an office, title, or role — that knowledge may predate this article. The source's OWN framing is authoritative: if the headline or article calls it "the Trump administration's policy" or "President Biden announced," that framing tells you their status as of this story — do not relabel them "former President" (or vice versa) elsewhere in your response based on your own assumption. If the source doesn't specify, use the article's stated publish date (given below) as the reference point, not "today." Before finalizing, check your own output for this specific contradiction: does any bullet's title/status conflict with another bullet, or with how the headline itself frames the same person?
@@ -4765,25 +4540,21 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
       // actively waiting on one open shouldn't queue behind a warm burst.
       try {
         if (process.env["CEREBRAS_API_KEY"]) {
-          raw = await callCerebras(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background, onChunk });
+          raw = await callCerebras(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         } else {
-          await deepDiveGate(!!background);
-          raw = await callGroq(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
+          await deepDiveGate();
+          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
         }
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
         try {
-          await deepDiveGate(!!background);
-          raw = await callGroq(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
+          await deepDiveGate();
+          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
         } catch {
           // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
           // window — the full 20k-char prompt + 6000-token budget exceeded it
           // on every attempt ever made (16/16 errors). Trim the input to the
           // lead article and cap output so the request actually fits.
-          // Was completely ungated (no deepDiveGate, no model8bGate) despite
-          // sharing GROQ_MODEL_FAST with cluster enrichment/card-summaries/
-          // Q&A — added the same gate those already use for consistency.
-          await model8bGate();
           const trimmed = prompt.length > 9000
             ? prompt.slice(0, 7000) + "\n\n[additional sources truncated]\n\nRespond with JSON only as specified above."
             : prompt;
@@ -4917,30 +4688,13 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
   })();
 
   deepDiveInflight.set(cacheKey, gen);
-  if (background) deepDiveBackgroundActive++; else deepDiveOnDemandActive++;
   try {
-    const result = await gen;
-    if (streaming) {
-      res.write(`data: ${JSON.stringify({ done: true, ...result, cached: false })}\n\n`);
-      res.end();
-    } else {
-      res.json({ ...result, cached: false });
-    }
+    res.json({ ...(await gen), cached: false });
   } catch (err) {
     req.log.error({ err: err instanceof Error ? err.message : String(err) }, "deepdive failed");
-    // Headers are already committed for a streaming response — can't
-    // switch to a JSON error status this late. Send an SSE error event
-    // instead; the client falls back to the regular (non-streaming)
-    // /deepdive request on any stream error, same as it does for any
-    // other Deep Dive failure.
-    if (streaming) {
-      try { res.write(`data: ${JSON.stringify({ error: "Deep Dive unavailable" })}\n\n`); res.end(); } catch { /* connection already gone */ }
-    } else {
-      res.status(502).json({ error: "Deep Dive unavailable" });
-    }
+    res.status(502).json({ error: "Deep Dive unavailable" });
   } finally {
     deepDiveInflight.delete(cacheKey);
-    if (background) deepDiveBackgroundActive--; else deepDiveOnDemandActive--;
   }
 });
 

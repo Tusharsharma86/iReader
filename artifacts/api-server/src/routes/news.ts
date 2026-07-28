@@ -4289,10 +4289,10 @@ router.post("/ai-summary", async (req, res) => {
         } catch (cerebrasErr) {
           cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
           req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
-          raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
+          raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
         }
       } else {
-        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
+        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
       }
     } finally {
       clearTimeout(abortTimer);
@@ -4768,13 +4768,13 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
           raw = await callCerebras(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background, onChunk });
         } else {
           await deepDiveGate(!!background);
-          raw = await callGroq(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+          raw = await callGroq(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         }
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
         try {
           await deepDiveGate(!!background);
-          raw = await callGroq(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+          raw = await callGroq(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         } catch {
           // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
           // window — the full 20k-char prompt + 6000-token budget exceeded it

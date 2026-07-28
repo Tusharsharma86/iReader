@@ -2602,6 +2602,60 @@ function distinctPublisherCount(items: FeedItem[]): number {
   return hosts.size;
 }
 
+// ── Server-side Deep Dive pre-warm ───────────────────────────────────────
+// The real architectural fix for AI Feed latency: pre-warming used to be
+// entirely CLIENT-triggered, every session — every user who opened the app
+// independently re-fetched the breaking feed and re-fired ~30-45 Deep Dive
+// generation requests for the SAME top stories, all competing with each
+// other (and with real on-demand opens) for the same shared ~30 RPM
+// Cerebras budget. N concurrent users meant N redundant warm sweeps of the
+// same content.
+//
+// This hooks into the SAME "genuinely new cluster" detection that already
+// drives breaking-push notifications (refreshInBackground below, fed by
+// the external cron hitting /cron/poll) — the moment a story is freshly
+// promoted into "breaking" server-side, kick off its Deep Dive generation
+// ONCE, before any user has asked for it. By the time anyone opens AI
+// Feed, the top breaking stories are typically already warm in the shared
+// server cache (deepDiveCache/disk) — client-side pre-warm sweeps become
+// mostly cache-hit no-ops instead of triggering real generation, without
+// needing to touch the client at all.
+//
+// Internal loopback to /api/news/deepdive (background:true, so it's paced
+// by the existing background gates/concurrency pool) rather than inlining
+// the generation logic here — reuses the exact same, already-correct
+// pipeline (article fetch, prompt, model fallback chain, caching) instead
+// of a second, divergent copy of it.
+const PREWARM_MAX_PER_TICK = 6;
+async function prewarmNewBreakingClusters(cards: StoryCard[], previousFps: Set<string>): Promise<void> {
+  try {
+    const port = process.env["PORT"];
+    if (!port) return;
+    const fresh = cards
+      .filter((c) => (c.sourceCount ?? c.sources?.length ?? 0) >= 3)
+      .filter((c) => !previousFps.has(clusterFingerprint(c)))
+      .filter((c) => c.sources?.[0]?.url)
+      .slice(0, PREWARM_MAX_PER_TICK);
+    if (fresh.length === 0) return;
+    // eslint-disable-next-line no-console
+    console.log(`[prewarm] deepdive: warming ${fresh.length} newly-breaking cluster(s) server-side`);
+    const base = `http://127.0.0.1:${port}/api/news/deepdive`;
+    await Promise.allSettled(fresh.map((c) => fetch(base, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: c.sources[0].url,
+        headline: c.headline,
+        paragraphs: [`${c.headline}. ${c.summary || c.headline}`],
+        sourceUrls: c.sources.map((s) => s.url).filter(Boolean),
+        depth: "standard",
+        publishedAt: c.publishedAt,
+        background: true,
+      }),
+    }).catch(() => {})));
+  } catch { /* best-effort — client-side pre-warm remains as a backfill */ }
+}
+
 function refreshInBackground(
   topic: string,
   log: { warn: (...args: unknown[]) => void },
@@ -2632,7 +2686,11 @@ function refreshInBackground(
           `[prewarm] ${topic} refreshed in ${Date.now() - started}ms (${feed.length} items, ${freshPubs} publishers${isDegraded ? " — DEGRADED but accepted (no prior cache)" : ""})`,
         );
         if (existing) {
-          notifyOnNewClusters(feedToRepCards(feed), previousFps).catch(() => {});
+          const freshCards = feedToRepCards(feed);
+          notifyOnNewClusters(freshCards, previousFps).catch(() => {});
+          if (topic === "breaking") {
+            prewarmNewBreakingClusters(freshCards, previousFps).catch(() => {});
+          }
         }
       }
       return feed;

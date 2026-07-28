@@ -126,7 +126,7 @@ function pauseCerebras(background: boolean) {
 async function callCerebras(
   prompt: string,
   maxTokens: number,
-  opts: { temperature?: number; task?: string; jsonMode?: boolean; model?: string; signal?: AbortSignal; background?: boolean } = {},
+  opts: { temperature?: number; task?: string; jsonMode?: boolean; model?: string; signal?: AbortSignal; background?: boolean; onChunk?: (delta: string) => void } = {},
 ): Promise<string> {
   const key = process.env["CEREBRAS_API_KEY"];
   if (!key) throw new Error("CEREBRAS_API_KEY missing");
@@ -145,6 +145,62 @@ async function callCerebras(
     messages: [{ role: "user", content: prompt }],
   };
   if (opts.jsonMode) body["response_format"] = { type: "json_object" };
+
+  // Optional token-streaming path — purely additive, only engages when a
+  // caller explicitly passes onChunk (currently: on-demand Deep Dive opens
+  // requesting stream:true, so a user sees live progress instead of a
+  // static spinner for the ~10-30s a generation can take). Every existing
+  // caller is completely unaffected — same request/response shape as
+  // before when onChunk is omitted. No retry-on-502/503 here (a partial
+  // stream can't cleanly resume); a failure propagates to the caller,
+  // which falls back through the exact same Groq chain as any other
+  // Cerebras failure.
+  if (opts.onChunk) {
+    const streamBody = { ...body, stream: true };
+    const r = await fetch(CEREBRAS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify(streamBody),
+      signal: opts.signal,
+    });
+    if (!r.ok || !r.body) {
+      recordAiUsage(model, task, 0, false);
+      if (r.status === 429) pauseCerebras(!!opts.background);
+      throw new Error(`Cerebras ${r.status}`);
+    }
+    let full = "";
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        try {
+          const j = JSON.parse(payload) as { choices?: Array<{ delta?: { content?: string } }> };
+          const delta = j.choices?.[0]?.delta?.content ?? "";
+          if (delta) { full += delta; opts.onChunk(delta); }
+        } catch { /* ignore a malformed/partial SSE line */ }
+      }
+    }
+    if (!full.trim()) {
+      recordAiUsage(model, task, 0, false);
+      throw new Error("Cerebras empty content (stream)");
+    }
+    // Streaming deltas don't carry a usage field (only the non-streaming
+    // response does) — recorded as 0 tokens; a known, acceptable gap in
+    // the usage dashboard's accuracy for streamed calls specifically.
+    recordAiUsage(model, task, 0, true);
+    return full;
+  }
+
   for (let attempt = 0; ; attempt++) {
     const r = await fetch(CEREBRAS_URL, {
       method: "POST",
@@ -4452,7 +4508,7 @@ function ageScore(publishedAt?: string): number {
 }
 
 router.post("/deepdive", async (req, res) => {
-  const { url, headline, paragraphs, sourceUrls, depth: rawDepth, publishedAt, background } = req.body as {
+  const { url, headline, paragraphs, sourceUrls, depth: rawDepth, publishedAt, background, stream: wantsStream } = req.body as {
     url?: string;
     headline?: string;
     paragraphs?: string[];
@@ -4460,7 +4516,12 @@ router.post("/deepdive", async (req, res) => {
     depth?: 'quick' | 'standard' | 'deep';
     publishedAt?: string;
     background?: boolean;
+    stream?: boolean;
   };
+  // Progress streaming only makes sense for a real user actively watching a
+  // spinner — background pre-warm has no one watching, so it always stays
+  // on the plain, unmodified JSON path regardless of what's requested.
+  const streaming = !!wantsStream && !background;
   if (!url || !Array.isArray(paragraphs) || paragraphs.length === 0) {
     res.status(400).json({ error: "url and paragraphs required" });
     return;
@@ -4517,6 +4578,36 @@ router.post("/deepdive", async (req, res) => {
     res.status(503).set("Retry-After", "3").json({ error: "Deep Dive busy" });
     return;
   }
+
+  // Streaming: past every early-return above (cache hit / concurrency cap),
+  // so generation is definitely about to happen — open the SSE connection
+  // now. Only the PRIMARY (Cerebras) attempt streams progress; a fallback
+  // to Groq (rare — primary usually succeeds) just proceeds silently and
+  // the client still gets the complete result in the final event, same as
+  // it always has, just without live progress ticks for that portion.
+  if (streaming) {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.write(`data: ${JSON.stringify({ progress: 0 })}\n\n`);
+  }
+  let streamedChars = 0;
+  const onChunk = streaming ? (delta: string) => {
+    streamedChars += delta.length;
+    // Rough progress estimate — the real per-request token target isn't
+    // computed until inside gen() (depends on fetched article length), so
+    // this uses a fixed generous ceiling (~4500 words / most requests'
+    // realistic upper bound) rather than the exact figure. Precision
+    // doesn't matter here; it's a UX progress indicator, not a real
+    // constraint. Capped short of 100% until the final event actually
+    // arrives, so it never visually "finishes" before the real done event.
+    const ROUGH_CHAR_CEILING = 4500 * 6; // ~6 chars/word, generous
+    const pct = Math.min(92, Math.round((streamedChars / ROUGH_CHAR_CEILING) * 100));
+    try { res.write(`data: ${JSON.stringify({ progress: pct })}\n\n`); } catch { /* client disconnected */ }
+  } : undefined;
 
   const gen = (async (): Promise<DeepDiveResult> => {
     // RICHER INPUT: for a multi-source story, READ THE FULL TEXT OF EVERY SOURCE
@@ -4674,7 +4765,7 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
       // actively waiting on one open shouldn't queue behind a warm burst.
       try {
         if (process.env["CEREBRAS_API_KEY"]) {
-          raw = await callCerebras(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
+          raw = await callCerebras(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background, onChunk });
         } else {
           await deepDiveGate(!!background);
           raw = await callGroq(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
@@ -4828,10 +4919,25 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
   deepDiveInflight.set(cacheKey, gen);
   if (background) deepDiveBackgroundActive++; else deepDiveOnDemandActive++;
   try {
-    res.json({ ...(await gen), cached: false });
+    const result = await gen;
+    if (streaming) {
+      res.write(`data: ${JSON.stringify({ done: true, ...result, cached: false })}\n\n`);
+      res.end();
+    } else {
+      res.json({ ...result, cached: false });
+    }
   } catch (err) {
     req.log.error({ err: err instanceof Error ? err.message : String(err) }, "deepdive failed");
-    res.status(502).json({ error: "Deep Dive unavailable" });
+    // Headers are already committed for a streaming response — can't
+    // switch to a JSON error status this late. Send an SSE error event
+    // instead; the client falls back to the regular (non-streaming)
+    // /deepdive request on any stream error, same as it does for any
+    // other Deep Dive failure.
+    if (streaming) {
+      try { res.write(`data: ${JSON.stringify({ error: "Deep Dive unavailable" })}\n\n`); res.end(); } catch { /* connection already gone */ }
+    } else {
+      res.status(502).json({ error: "Deep Dive unavailable" });
+    }
   } finally {
     deepDiveInflight.delete(cacheKey);
     if (background) deepDiveBackgroundActive--; else deepDiveOnDemandActive--;

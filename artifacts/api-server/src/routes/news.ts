@@ -43,18 +43,39 @@ function groqBgGate(): Promise<void> {
 // real-time rate limiting, not quota exhaustion). 3s spacing keeps it under
 // ~20/min, still far more responsive than the 4.5s background gate since this
 // is what the user is actively waiting on.
-let deepDiveNextSlot = 0;
-let scoutPausedUntil = 0;
+// Was ONE shared slot queue for every caller — background pre-warm and
+// real on-demand opens both waited in the exact same FIFO, so a pre-warm
+// sweep ahead in the queue could make a user's own tap wait behind it.
+// Two independent slot trackers, same pace each, so a large background
+// backlog can never delay an on-demand request's own turn. The 429 pause
+// below is ALSO split the same way now (was one shared 65s blackout for
+// every caller): a background sweep tripping the limit no longer blocks
+// on-demand's own, separately-paced attempts — on-demand has its own
+// concurrency cap (DEEPDIVE_ONDEMAND_MAX_CONCURRENT) keeping its real
+// volume low enough that it rarely re-trips the same window right after.
+let deepDiveOnDemandNextSlot = 0;
+let deepDiveBackgroundNextSlot = 0;
+let scoutPausedUntilBackground = 0;
+let scoutPausedUntilOnDemand = 0;
 const DEEPDIVE_GATE_INTERVAL_MS = 3000;
-function deepDiveGate(): Promise<void> {
+function deepDiveGate(background = false): Promise<void> {
   const now = Date.now();
-  if (now < scoutPausedUntil) return Promise.reject(new Error("rate-gate-paused"));
-  const at = Math.max(now, deepDiveNextSlot);
-  deepDiveNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
+  if (now < (background ? scoutPausedUntilBackground : scoutPausedUntilOnDemand)) return Promise.reject(new Error("rate-gate-paused"));
+  if (background) {
+    const at = Math.max(now, deepDiveBackgroundNextSlot);
+    deepDiveBackgroundNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
+    const wait = at - now;
+    return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+  }
+  const at = Math.max(now, deepDiveOnDemandNextSlot);
+  deepDiveOnDemandNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
-function pauseScoutModel() { scoutPausedUntil = Date.now() + 65_000; }
+function pauseScoutModel(background: boolean) {
+  if (background) scoutPausedUntilBackground = Date.now() + 65_000;
+  else scoutPausedUntilOnDemand = Date.now() + 65_000;
+}
 
 // Unified gate for ALL 8b calls (background + foreground). 8b has 30 RPM on
 // Groq free tier. 2.2s spacing = ~27 RPM, under the limit. On 429, pause ALL
@@ -88,8 +109,19 @@ function cerebrasBgGate(): Promise<void> {
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
-let cerebrasPausedUntil = 0;
-function pauseCerebras() { cerebrasPausedUntil = Date.now() + 30_000; }
+// Split by lane, same reasoning as the Scout pause above: was one shared
+// 30s blackout for every Cerebras caller — a background pre-warm sweep
+// tripping the limit used to also block on-demand's otherwise-ungated,
+// low-latency path for 30s. Now a background-caused 429 only pauses future
+// background attempts (which fall through to Groq immediately); on-demand
+// keeps trying Cerebras directly and only pauses its own lane if IT gets
+// 429'd.
+let cerebrasPausedUntilBackground = 0;
+let cerebrasPausedUntilOnDemand = 0;
+function pauseCerebras(background: boolean) {
+  if (background) cerebrasPausedUntilBackground = Date.now() + 30_000;
+  else cerebrasPausedUntilOnDemand = Date.now() + 30_000;
+}
 
 async function callCerebras(
   prompt: string,
@@ -98,7 +130,7 @@ async function callCerebras(
 ): Promise<string> {
   const key = process.env["CEREBRAS_API_KEY"];
   if (!key) throw new Error("CEREBRAS_API_KEY missing");
-  if (Date.now() < cerebrasPausedUntil) throw new Error("cerebras-paused");
+  if (Date.now() < (opts.background ? cerebrasPausedUntilBackground : cerebrasPausedUntilOnDemand)) throw new Error("cerebras-paused");
   if (opts.background) await cerebrasBgGate();
   const model = opts.model ?? CEREBRAS_MODEL;
   const task = opts.task ?? "other";
@@ -139,7 +171,7 @@ async function callCerebras(
       continue;
     }
     recordAiUsage(model, task, 0, false);
-    if (r.status === 429) pauseCerebras();
+    if (r.status === 429) pauseCerebras(!!opts.background);
     throw new Error(`Cerebras ${r.status}`);
   }
 }
@@ -154,7 +186,7 @@ async function callGroq(
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
   if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate();
-  else if (model === GROQ_MODEL && Date.now() < scoutPausedUntil) throw new Error("rate-gate-paused");
+  else if (model === GROQ_MODEL && Date.now() < (opts.background ? scoutPausedUntilBackground : scoutPausedUntilOnDemand)) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
@@ -192,7 +224,7 @@ async function callGroq(
     recordAiUsage(model, task, 0, false);
     if (r.status === 429) {
       if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) pause8bModel();
-      else if (model === GROQ_MODEL) pauseScoutModel();
+      else if (model === GROQ_MODEL) pauseScoutModel(!!opts.background);
     }
     throw new Error(`Groq ${r.status}`);
   }
@@ -4274,6 +4306,15 @@ const DEEPDIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 // user's card view often request the same url+depth seconds apart — without
 // this, both paid a full 20-40s Groq generation.
 const deepDiveInflight = new Map<string, Promise<DeepDiveResult>>();
+// /deepdive's pipeline is heavier than /ai-summary's (multiple full-article
+// fetches + a much longer prompt + 6000-token generation) but had NO
+// concurrency cap at all — only reactive provider-429 pauses. Separate
+// pools for background (pre-warm) vs on-demand (a real user waiting) so a
+// warm sweep filling its own pool can never block a real user's slot.
+let deepDiveOnDemandActive = 0;
+let deepDiveBackgroundActive = 0;
+const DEEPDIVE_ONDEMAND_MAX_CONCURRENT = 4;
+const DEEPDIVE_BACKGROUND_MAX_CONCURRENT = 3;
 
 // Fetch + extract the full readable text of one article. Returns "" on failure
 // (paywall, JS-only page, timeout) so callers can fall back to summaries.
@@ -4283,6 +4324,16 @@ const PUBLISHER_JUNK_STOP_RE =
   /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b|\bCricbuzz\b|\bNewspaper\s+Subscription\b|\bFood\s+News\s+TV\b|\bTimes\s+Life\s+Times\b|\bLifestyle\s+Newspaper\b/;
 
 async function fetchArticleText(u: string): Promise<string> {
+  // Was always re-fetching + re-parsing HTML from scratch, even when the
+  // /article route already fetched and cached the SAME url minutes earlier
+  // (and even across a single story's own quick/standard/deep Deep Dive
+  // requests, since the deepdive cache key includes depth — 3 depths of
+  // the same story used to mean 3x the article fetches). Read-through the
+  // existing article cache first; only hit the network on a genuine miss.
+  const cached = articleCache.get(u);
+  if (cached && Date.now() - cached.at < ARTICLE_TTL_MS && cached.data.paragraphs?.length) {
+    return cached.data.paragraphs.join("\n\n").trim();
+  }
   try {
     const html = await fetchArticleHtml(u);
     const { bodyHtml } = extractArticleBody(html);
@@ -4396,6 +4447,19 @@ router.post("/deepdive", async (req, res) => {
     return;
   }
 
+  // Concurrency cap — separate pools so a pre-warm sweep can never starve a
+  // real user's on-demand open. Client already retries on 503 (15s/30s
+  // backoff), same as it does for a cold-starting provider.
+  if (background) {
+    if (deepDiveBackgroundActive >= DEEPDIVE_BACKGROUND_MAX_CONCURRENT) {
+      res.status(503).set("Retry-After", "5").json({ error: "Deep Dive pre-warm busy" });
+      return;
+    }
+  } else if (deepDiveOnDemandActive >= DEEPDIVE_ONDEMAND_MAX_CONCURRENT) {
+    res.status(503).set("Retry-After", "3").json({ error: "Deep Dive busy" });
+    return;
+  }
+
   const gen = (async (): Promise<DeepDiveResult> => {
     // RICHER INPUT: for a multi-source story, READ THE FULL TEXT OF EVERY SOURCE
     // (capped for latency/tokens), not just the short summaries the app already
@@ -4481,6 +4545,18 @@ router.post("/deepdive", async (req, res) => {
     const tldrCap = Math.min(depth === 'quick' ? 200 : 450, Math.max(120, Math.round(sourceWords * 0.6)));
     const tldrTotal = `~${Math.round(tldrCap * 0.85)}-${tldrCap} words (hard cap ${tldrCap})`;
     const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
+    // API max_tokens was a FLAT 6000 regardless of depth — "quick" mode's
+    // prompt asked for a 300-word story vs "deep"'s 1100 words, but both
+    // got sent to the model with the same token ceiling, so quick never
+    // actually got the latency benefit its shorter output should buy.
+    // Scale to what THIS request's own word targets actually need: TL;DR +
+    // story sections + ~200 words of fixed overhead (quotes/insight/
+    // questions/tags/entities), same ~1.6x words-to-tokens-plus-JSON-
+    // overhead ratio already used for article-summary's budget elsewhere
+    // in this file. Cerebras adds its own +2000 reasoning headroom on top
+    // of whatever we pass (see callCerebras) — this is the pure output
+    // budget, not that headroom.
+    const deepDiveMaxTokens = Math.max(1500, Math.round((tldrCap + storyMax + 200) * 1.6) + 300);
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
 
 GLOBAL RULE — TITLES/OFFICE, applies to EVERY field below (tldrSections, tldr, storySections, everything, not just one section): never use your own assumed knowledge of who currently holds an office, title, or role — that knowledge may predate this article. The source's OWN framing is authoritative: if the headline or article calls it "the Trump administration's policy" or "President Biden announced," that framing tells you their status as of this story — do not relabel them "former President" (or vice versa) elsewhere in your response based on your own assumption. If the source doesn't specify, use the article's stated publish date (given below) as the reference point, not "today." Before finalizing, check your own output for this specific contradiction: does any bullet's title/status conflict with another bullet, or with how the headline itself frames the same person?
@@ -4540,21 +4616,25 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
       // actively waiting on one open shouldn't queue behind a warm burst.
       try {
         if (process.env["CEREBRAS_API_KEY"]) {
-          raw = await callCerebras(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
+          raw = await callCerebras(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         } else {
-          await deepDiveGate();
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+          await deepDiveGate(!!background);
+          raw = await callGroq(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
         }
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
         try {
-          await deepDiveGate();
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+          await deepDiveGate(!!background);
+          raw = await callGroq(prompt, deepDiveMaxTokens, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
         } catch {
           // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
           // window — the full 20k-char prompt + 6000-token budget exceeded it
           // on every attempt ever made (16/16 errors). Trim the input to the
           // lead article and cap output so the request actually fits.
+          // Was completely ungated (no deepDiveGate, no model8bGate) despite
+          // sharing GROQ_MODEL_FAST with cluster enrichment/card-summaries/
+          // Q&A — added the same gate those already use for consistency.
+          await model8bGate();
           const trimmed = prompt.length > 9000
             ? prompt.slice(0, 7000) + "\n\n[additional sources truncated]\n\nRespond with JSON only as specified above."
             : prompt;
@@ -4688,6 +4768,7 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
   })();
 
   deepDiveInflight.set(cacheKey, gen);
+  if (background) deepDiveBackgroundActive++; else deepDiveOnDemandActive++;
   try {
     res.json({ ...(await gen), cached: false });
   } catch (err) {
@@ -4695,6 +4776,7 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     res.status(502).json({ error: "Deep Dive unavailable" });
   } finally {
     deepDiveInflight.delete(cacheKey);
+    if (background) deepDiveBackgroundActive--; else deepDiveOnDemandActive--;
   }
 });
 

@@ -60,6 +60,17 @@ const BOILERPLATE_PATTERNS: RegExp[] = [
   /^\((?:ap|afp|pti|ani|ians|reuters|bloomberg)\)\.?$/i,
 ];
 
+// TOI (and some other Indian publishers) append a trending-topic/live-blog
+// ticker line after the article body, e.g. "Get the latest India News and
+// Live updates." Everything from that line onward is publisher navigation
+// junk, not article content — truncate there.
+const JUNK_STOP_RE =
+  /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b|\bCricbuzz\b|\bNewspaper\s+Subscription\b|\bFood\s+News\s+TV\b|\bTimes\s+Life\s+Times\b|\bLifestyle\s+Newspaper\b|\bGet\s+the\s+latest\s+.{0,80}?\bLive\s+Updates?\b/i;
+
+function findJunkStopIndex(paragraphs: string[]): number {
+  return paragraphs.findIndex((p) => JUNK_STOP_RE.test(p));
+}
+
 function isBoilerplate(sentence: string): boolean {
   const s = sentence.trim();
   if (!s) return true;
@@ -367,11 +378,17 @@ export function cleanArticleParagraphs(
   captions?: string[],
   options: CleanOptions = {},
 ): CleanResult {
-  const originalParagraphs = [...rawParagraphs];
+  // -- Step 0: truncate at publisher navigation/live-blog footer junk ---
+  // A false hit on paragraph 0 would blank the whole article, so only trust
+  // the cut when it leaves genuine content before it.
+  const stopIdx = findJunkStopIndex(rawParagraphs);
+  const truncatedParagraphs = stopIdx > 0 ? rawParagraphs.slice(0, stopIdx) : rawParagraphs;
+
+  const originalParagraphs = [...truncatedParagraphs];
 
   // -- Step 1: boilerplate paragraph removal ---
   const captionSet = new Set((captions ?? []).map((c) => c.trim()));
-  const afterBoilerplate = rawParagraphs.filter((p) => {
+  const afterBoilerplate = truncatedParagraphs.filter((p) => {
     const trimmed = p.trim();
     if (!trimmed) return false;
     if (captionSet.has(trimmed)) return false;

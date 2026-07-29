@@ -4280,7 +4280,7 @@ const deepDiveInflight = new Map<string, Promise<DeepDiveResult>>();
 // TOI (and some other Indian publishers) append trending-topic tickers +
 // site-nav dumps after the article body. Truncate at the first occurrence.
 const PUBLISHER_JUNK_STOP_RE =
-  /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b|\bCricbuzz\b|\bNewspaper\s+Subscription\b|\bFood\s+News\s+TV\b|\bTimes\s+Life\s+Times\b|\bLifestyle\s+Newspaper\b/;
+  /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b|\bCricbuzz\b|\bNewspaper\s+Subscription\b|\bFood\s+News\s+TV\b|\bTimes\s+Life\s+Times\b|\bLifestyle\s+Newspaper\b|\bGet\s+the\s+latest\s+.{0,80}?\bLive\s+Updates?\b/i;
 
 async function fetchArticleText(u: string): Promise<string> {
   try {

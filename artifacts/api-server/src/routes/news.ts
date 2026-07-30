@@ -44,17 +44,25 @@ function groqBgGate(): Promise<void> {
 // ~20/min, still far more responsive than the 4.5s background gate since this
 // is what the user is actively waiting on.
 let deepDiveNextSlot = 0;
+// Scout pause is split by lane: a 429 from a background pre-warm burst must
+// not block a user actively waiting on an on-demand open (and vice versa),
+// or the two lanes end up intermittently starving each other for 65s at a
+// time — surfaces to users as random 502s on AI summary / Deep Dive.
 let scoutPausedUntil = 0;
+let scoutBgPausedUntil = 0;
 const DEEPDIVE_GATE_INTERVAL_MS = 3000;
-function deepDiveGate(): Promise<void> {
+function deepDiveGate(background?: boolean): Promise<void> {
   const now = Date.now();
-  if (now < scoutPausedUntil) return Promise.reject(new Error("rate-gate-paused"));
+  if (now < (background ? scoutBgPausedUntil : scoutPausedUntil)) return Promise.reject(new Error("rate-gate-paused"));
   const at = Math.max(now, deepDiveNextSlot);
   deepDiveNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
-function pauseScoutModel() { scoutPausedUntil = Date.now() + 65_000; }
+function pauseScoutModel(background?: boolean) {
+  if (background) scoutBgPausedUntil = Date.now() + 65_000;
+  else scoutPausedUntil = Date.now() + 65_000;
+}
 
 // Unified gate for ALL 8b calls (background + foreground). 8b has 30 RPM on
 // Groq free tier. 2.2s spacing = ~27 RPM, under the limit. On 429, pause ALL
@@ -154,7 +162,7 @@ async function callGroq(
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
   if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate();
-  else if (model === GROQ_MODEL && Date.now() < scoutPausedUntil) throw new Error("rate-gate-paused");
+  else if (model === GROQ_MODEL && Date.now() < (opts.background ? scoutBgPausedUntil : scoutPausedUntil)) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
@@ -192,7 +200,7 @@ async function callGroq(
     recordAiUsage(model, task, 0, false);
     if (r.status === 429) {
       if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) pause8bModel();
-      else if (model === GROQ_MODEL) pauseScoutModel();
+      else if (model === GROQ_MODEL) pauseScoutModel(!!opts.background);
     }
     throw new Error(`Groq ${r.status}`);
   }
@@ -4143,10 +4151,10 @@ router.post("/ai-summary", async (req, res) => {
         } catch (cerebrasErr) {
           cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
           req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
-          raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
+          raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
         }
       } else {
-        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal })) || "{}";
+        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
       }
     } finally {
       clearTimeout(abortTimer);
@@ -4542,14 +4550,14 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
         if (process.env["CEREBRAS_API_KEY"]) {
           raw = await callCerebras(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         } else {
-          await deepDiveGate();
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+          await deepDiveGate(!!background);
+          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         }
       } catch (firstErr) {
         req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
         try {
-          await deepDiveGate();
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive" });
+          await deepDiveGate(!!background);
+          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         } catch {
           // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
           // window — the full 20k-char prompt + 6000-token budget exceeded it

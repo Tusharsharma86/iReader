@@ -65,7 +65,7 @@ const BOILERPLATE_PATTERNS: RegExp[] = [
 // Live updates." Everything from that line onward is publisher navigation
 // junk, not article content — truncate there.
 const JUNK_STOP_RE =
-  /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b|\bCricbuzz\b|\bNewspaper\s+Subscription\b|\bFood\s+News\s+TV\b|\bTimes\s+Life\s+Times\b|\bLifestyle\s+Newspaper\b|\bGet\s+the\s+latest\s+.{0,80}?\bLive\s+Updates?\b/i;
+  /\bHeadlines\s+Sports\s+News\b|\bBusiness\s+News\s+India\s+News\b|\bTOI\s+Home\s+Decor\b|\bIs\s+Bank\s+Open\s+Today\b|\bGold\s+Rate\s+Today\b|\bPetrol\s+Price\s+Today\b|\bCricbuzz\b|\bNewspaper\s+Subscription\b|\bFood\s+News\s+TV\b|\bTimes\s+Life\s+Times\b|\bLifestyle\s+Newspaper\b|\bGet\s+the\s+latest\s+.{0,80}?\bLive\s+Updates?\b|\bFollow\s+the\s+latest\s+breaking\s+news\b.{0,150}?\bHindustan\s+Times\b/i;
 
 function findJunkStopIndex(paragraphs: string[]): number {
   return paragraphs.findIndex((p) => JUNK_STOP_RE.test(p));

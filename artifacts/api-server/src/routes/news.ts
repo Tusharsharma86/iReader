@@ -4144,6 +4144,19 @@ router.post("/ai-summary", async (req, res) => {
     // client gave up (Deep Dive always had one; summaries didn't).
     const ctrl = new AbortController();
     const abortTimer = setTimeout(() => ctrl.abort(), 30000);
+    // Groq Scout → 8b last resort. Scout shares a single rate/pause budget
+    // with Deep Dive and pre-warm bursts, so it can be paused/429 even when
+    // the 8b model (separate gate) is free — without this fallback, that
+    // meant a flat 502 to the reader whenever Scout was unavailable and
+    // Cerebras also failed. Mirrors the /deepdive last-resort tier.
+    const groqScoutThenFast = async (): Promise<string> => {
+      try {
+        return (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+      } catch (scoutErr) {
+        req.log.warn({ err: scoutErr instanceof Error ? scoutErr.message : String(scoutErr) }, "ai-summary: Groq Scout failed, falling back to 8b");
+        return (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+      }
+    };
     try {
       if (process.env["CEREBRAS_API_KEY"]) {
         try {
@@ -4151,10 +4164,10 @@ router.post("/ai-summary", async (req, res) => {
         } catch (cerebrasErr) {
           cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
           req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
-          raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+          raw = await groqScoutThenFast();
         }
       } else {
-        raw = (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+        raw = await groqScoutThenFast();
       }
     } finally {
       clearTimeout(abortTimer);

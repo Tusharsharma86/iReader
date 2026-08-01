@@ -3609,7 +3609,7 @@ async function fetchArticleHtml(url: string): Promise<string> {
 // the initial response. The JSON path is faster (smaller payload) and gives
 // us the complete article. If anything fails or the response looks empty we
 // fall back to the standard HTML extractor — so non-WP behaviour is unchanged.
-const WP_JSON_HOSTS = new Set(["techcrunch.com"]);
+const WP_JSON_HOSTS = new Set(["techcrunch.com", "9to5mac.com", "9to5google.com"]);
 
 // Strip a few decorative wrappers WordPress wraps around captions/figures so
 // the "first paragraph" the dedup model sees is real article prose, not a

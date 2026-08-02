@@ -939,26 +939,53 @@ function parseRssFeed(
   return [];
 }
 
-async function fetchOneRssFeed(source: RssSource, category = "technology"): Promise<NewsDataArticle[]> {
+// RSS UAs to try, in order. The custom UA is a courteous self-identification
+// for well-behaved feed readers; a couple of publishers (TechCrunch's WAF has
+// been observed intermittently, e.g. during morning-IST/overnight-US hours)
+// block it without blocking a standard browser or search-crawler UA. Article
+// HTML fetches already retry with Googlebot for the same reason — RSS fetches
+// previously had no retry at all, so one transient block silently dropped
+// that publisher from the whole feed build with no recovery until the next
+// poll happened to succeed.
+// 2 attempts, same shape as the article-HTML retry (FETCH_USER_AGENTS) — a
+// shorter per-attempt timeout keeps the worst case (both attempts fail)
+// bounded at ~16s instead of stacking the full 12s timeout twice.
+const RSS_FETCH_USER_AGENTS = [
+  "Mozilla/5.0 (compatible; ParticleNews/1.0; +https://example.com)",
+  "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+];
+
+async function fetchOneRssFeedAttempt(source: RssSource, ua: string): Promise<string> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12_000);
+  const timer = setTimeout(() => ctrl.abort(), 8_000);
   try {
     const res = await fetch(source.url, {
       signal: ctrl.signal,
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (compatible; ParticleNews/1.0; +https://example.com)",
+        "User-Agent": ua,
         Accept: "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8",
       },
     });
     if (!res.ok) {
       throw new Error(`${source.name} ${res.status}`);
     }
-    const xml = await res.text();
-    return parseRssFeed(xml, source, category);
+    return await res.text();
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchOneRssFeed(source: RssSource, category = "technology"): Promise<NewsDataArticle[]> {
+  let lastErr: unknown;
+  for (let i = 0; i < RSS_FETCH_USER_AGENTS.length; i++) {
+    try {
+      const xml = await fetchOneRssFeedAttempt(source, RSS_FETCH_USER_AGENTS[i]!);
+      return parseRssFeed(xml, source, category);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(`${source.name} feed fetch failed`);
 }
 
 async function fetchCategoryRss(

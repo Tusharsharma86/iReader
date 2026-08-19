@@ -4260,7 +4260,12 @@ router.post("/ai-summary", async (req, res) => {
     res.json({ ...result, cached: false });
   } catch (err) {
     req.log.error({ err }, "ai-summary failed");
-    res.status(502).json({ error: "AI summary unavailable" });
+    // Include the actual failure reason (e.g. "rate-gate-paused", "Groq 429",
+    // "AI returned no parseable content") — these are internal diagnostic
+    // strings, not secrets, and the client now surfaces them instead of a
+    // bare "HTTP 502" so failures are distinguishable without server logs.
+    const reason = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: `AI summary unavailable (${reason})` });
   } finally {
     aiSummaryActiveCount--;
     aiSummaryInflightMap.delete(cacheKey);

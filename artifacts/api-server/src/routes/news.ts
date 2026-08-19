@@ -67,12 +67,17 @@ function pauseScoutModel(background?: boolean) {
 // Unified gate for ALL 8b calls (background + foreground). 8b has 30 RPM on
 // Groq free tier. 2.2s spacing = ~27 RPM, under the limit. On 429, pause ALL
 // 8b calls for 65s so Groq's sliding window fully resets before we resume.
+// Pause is split by lane like the Scout gate above — background enrichment
+// (cluster-enrich, theme-assign, feed card summaries: ~25-60 calls per feed
+// build, historically 92% 429'd) must not pause /ai-summary's foreground
+// last-resort fallback or /qa, or vice versa.
 let model8bNextSlot = 0;
 let model8bPausedUntil = 0;
+let model8bBgPausedUntil = 0;
 const MODEL_8B_GATE_MS = 2200;
-function model8bGate(): Promise<void> {
+function model8bGate(background?: boolean): Promise<void> {
   const now = Date.now();
-  if (now < model8bPausedUntil) {
+  if (now < (background ? model8bBgPausedUntil : model8bPausedUntil)) {
     return Promise.reject(new Error("rate-gate-paused"));
   }
   const at = Math.max(now, model8bNextSlot);
@@ -80,7 +85,10 @@ function model8bGate(): Promise<void> {
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
-function pause8bModel() { model8bPausedUntil = Date.now() + 65_000; }
+function pause8bModel(background?: boolean) {
+  if (background) model8bBgPausedUntil = Date.now() + 65_000;
+  else model8bPausedUntil = Date.now() + 65_000;
+}
 
 // ── Cerebras inference (article summaries) ──────────────────────────────────
 // Free tier is ~30 RPM. Background calls (feed card summaries) are serialized
@@ -161,7 +169,7 @@ async function callGroq(
   if (!key) throw new Error("GROQ_API_KEY missing");
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
-  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate();
+  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate(opts.background);
   else if (model === GROQ_MODEL && Date.now() < (opts.background ? scoutBgPausedUntil : scoutPausedUntil)) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
   for (let attempt = 0; ; attempt++) {
@@ -199,7 +207,7 @@ async function callGroq(
     }
     recordAiUsage(model, task, 0, false);
     if (r.status === 429) {
-      if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) pause8bModel();
+      if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) pause8bModel(!!opts.background);
       else if (model === GROQ_MODEL) pauseScoutModel(!!opts.background);
     }
     throw new Error(`Groq ${r.status}`);
@@ -4606,7 +4614,7 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
           const trimmed = prompt.length > 9000
             ? prompt.slice(0, 7000) + "\n\n[additional sources truncated]\n\nRespond with JSON only as specified above."
             : prompt;
-          raw = await callGroq(trimmed, 2000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive" });
+          raw = await callGroq(trimmed, 2000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive", background: !!background });
         }
       }
     } finally {

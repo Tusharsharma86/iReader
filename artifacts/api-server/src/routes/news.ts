@@ -218,7 +218,9 @@ async function callGroq(
       if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) pause8bModel(!!opts.background);
       else if (model === GROQ_MODEL) pauseScoutModel(!!opts.background);
     }
-    throw new Error(`Groq ${r.status}`);
+    // Groq's error body names the exact limit hit (TPM/RPM/TPD) — surface it.
+    const errDetail = await r.text().then(t => t.replace(/\s+/g, ' ').slice(0, 220)).catch(() => "");
+    throw new Error(`Groq ${r.status}: ${errDetail}`);
   }
 }
 

@@ -172,6 +172,7 @@ async function callGroq(
   if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate(opts.background);
   else if (model === GROQ_MODEL && Date.now() < (opts.background ? scoutBgPausedUntil : scoutPausedUntil)) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
+  let useJsonMode = opts.jsonMode ?? false;
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
       model,
@@ -179,9 +180,11 @@ async function callGroq(
       temperature: opts.temperature ?? 0.3,
       messages: [{ role: "user", content: prompt }],
     };
-    // Groq supports OpenAI-compatible JSON mode — guarantees the model emits
-    // a syntactically valid JSON object (or it errors at the API level).
-    if (opts.jsonMode) body["response_format"] = { type: "json_object" };
+    // JSON mode guarantees syntactically valid output — but not every Groq
+    // model accepts response_format (gpt-oss-20b 400s; Scout has too). A 400
+    // retries once WITHOUT it: prompts already demand JSON and the callers'
+    // forgiving parsers handle stray prose, so plain mode beats hard failure.
+    if (useJsonMode) body["response_format"] = { type: "json_object" };
     const r = await fetch(GROQ_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
@@ -196,6 +199,11 @@ async function callGroq(
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
       const content = data.choices?.[0]?.message?.content ?? "";
       return content;
+    }
+    // Model rejected response_format → immediately retry without it.
+    if (r.status === 400 && useJsonMode) {
+      useJsonMode = false;
+      continue;
     }
     // Only retry on transient server errors (502/503), NOT on 429 — retrying
     // rate-limits multiplies the RPM pressure and makes the window worse.

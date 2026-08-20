@@ -169,6 +169,7 @@ async function callGroq(
   if (!key) throw new Error("GROQ_API_KEY missing");
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
+  if (opts.background && bgBudgetExhausted(model)) throw new Error("bg-budget-reserved");
   if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate(opts.background);
   else if (model === GROQ_MODEL && Date.now() < (opts.background ? scoutBgPausedUntil : scoutPausedUntil)) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
@@ -227,12 +228,25 @@ async function callGroq(
 // ── Per-model / per-task AI usage tracker (for the in-app dashboard) ─────────
 // Sums real tokens (prompt+completion) Groq reports, grouped by model and task,
 // per UTC day. In-memory (resets on container cold start) — best-effort gauge.
+// Real limits confirmed from Groq's own 429 body (2026-08-20):
+// gpt-oss-20b TPD is 200k, not the 500k previously assumed.
 const GROQ_TPD_LIMITS: Record<string, number> = {
   "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
-  "openai/gpt-oss-20b": 500000,
+  "openai/gpt-oss-20b": 200000,
   "llama-4-scout-17b-16e-instruct": 1000000,
   "llama3.1-8b": 1000000,
 };
+// Background jobs (clustering, enrich, card summaries) stop once a model has
+// burned this fraction of its daily budget — the remainder is reserved for
+// user-facing calls (article summaries, Deep Dive, Q&A). Without this, feed
+// enrichment exhausted the full 200k TPD by midday and users got 502s.
+const BG_BUDGET_FRACTION = 0.75;
+function bgBudgetExhausted(model: string): boolean {
+  const limit = GROQ_TPD_LIMITS[model];
+  if (!limit) return false;
+  const used = aiUsageByModel[model]?.tokens ?? 0;
+  return used > limit * BG_BUDGET_FRACTION;
+}
 interface TaskUsage { tokens: number; calls: number; errors: number; }
 interface ModelUsage { tokens: number; calls: number; errors: number; tasks: Record<string, TaskUsage>; }
 let aiUsageDay = new Date().toISOString().slice(0, 10);

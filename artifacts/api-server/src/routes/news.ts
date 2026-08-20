@@ -4209,7 +4209,13 @@ router.post("/ai-summary", async (req, res) => {
         } catch (cerebrasErr) {
           cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
           req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
-          raw = await groqScoutThenFast();
+          try {
+            raw = await groqScoutThenFast();
+          } catch (groqErr) {
+            // Both providers down — report BOTH reasons, not just Groq's.
+            const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
+            throw new Error(`cerebras: ${cerebrasNote} | groq: ${g}`);
+          }
         }
       } else {
         raw = await groqScoutThenFast();

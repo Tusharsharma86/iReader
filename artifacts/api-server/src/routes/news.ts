@@ -4310,8 +4310,7 @@ router.post("/ai-summary", async (req, res) => {
       aiSummaryCache.set(cacheKey, result);
       safeWriteJson(diskPath, result);
     }
-    // TEMP diagnostic: which provider served this (remove after SambaNova verified)
-    return { ...result, _prov: sambaNote ? `groq-fallback (samba: ${sambaNote})` : "sambanova" } as AiSummaryEntry;
+    return result;
   })();
 
   aiSummaryActiveCount++;

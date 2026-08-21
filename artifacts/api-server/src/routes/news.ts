@@ -137,10 +137,13 @@ async function callSambaNova(
   // budget generous headroom or small calls return empty content.
   const body: Record<string, unknown> = {
     model,
-    max_tokens: maxTokens + 2000,
+    // Thinking models burn budget on reasoning before the answer; Gemini
+    // needs more headroom or JSON gets truncated mid-output (0-word bug).
+    max_tokens: maxTokens + (gemKey ? 4000 : 2000),
     temperature: opts.temperature ?? 0.3,
     messages: [{ role: "user", content: prompt }],
   };
+  if (gemKey) body["reasoning_effort"] = "low";
   if (opts.jsonMode) body["response_format"] = { type: "json_object" };
   for (let attempt = 0; ; attempt++) {
     const r = await fetch(url, {

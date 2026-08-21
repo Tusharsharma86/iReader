@@ -10,17 +10,18 @@ import { getNotifHistoryForToken, getMutedThemesForToken, setMutedThemesForToken
 const router: IRouter = Router();
 
 // ── AI inference providers ──────────────────────────────────────────────────
-// Groq (LPU) primary for everything. Cerebras optional boost when available.
+// Groq (LPU) fallback. SambaNova (RDU) primary when key present.
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions";
+const SAMBANOVA_URL = "https://api.sambanova.ai/v1/chat/completions";
 // Llama-4 Scout was RETIRED by Groq (404 model_not_found, confirmed
 // 2026-08-20). gpt-oss-120b is Groq's only remaining large model — same
-// family as the Cerebras primary, with its own separate daily budget.
+// family as the SambaNova primary, with its own separate daily budget.
 const GROQ_MODEL = "openai/gpt-oss-120b"; // Deep Dive / summaries Groq fallback
 const GROQ_MODEL_FAST = "openai/gpt-oss-20b"; // background bulk + article summaries
 const GROQ_MODEL_QUALITY = "openai/gpt-oss-20b"; // Q&A
 const GROQ_MODEL_ENRICH = "openai/gpt-oss-20b"; // cluster headlines + themes
-const CEREBRAS_MODEL = "gpt-oss-120b"; // ~3000 tok/s, free tier
+const SAMBANOVA_MODEL = "gpt-oss-120b"; // user-facing (12k req/day dev tier)
+const SAMBANOVA_MODEL_BULK = "Meta-Llama-3.3-70B-Instruct"; // background bulk (48k req/day)
 // Global rate gate for BACKGROUND enrichment calls (clustering, cluster-enrich,
 // card summaries, theme discovery). A feed build fires ~25 of these at once,
 // which blows Groq's free-tier RPM/TPM and 429s most of them. Serialising them
@@ -93,33 +94,33 @@ function pause8bModel(background?: boolean) {
   else model8bPausedUntil = Date.now() + 65_000;
 }
 
-// ── Cerebras inference (article summaries) ──────────────────────────────────
+// ── SambaNova inference (fast primary: summaries, Deep Dive, Q&A) ───────────
 // Free tier is ~30 RPM. Background calls (feed card summaries) are serialized
 // at 2.5s spacing so a feed build's ~25-call burst can't starve user-facing
-// summaries/Deep Dives. A 429 pauses ALL Cerebras calls 30s so the window
+// summaries/Deep Dives. A 429 pauses ALL SambaNova calls 30s so the window
 // resets; callers fail fast to their Groq fallback instead of queueing.
-let cerebrasBgNextSlot = 0;
-const CEREBRAS_BG_INTERVAL_MS = 2500;
-function cerebrasBgGate(): Promise<void> {
+let sambaBgNextSlot = 0;
+const SAMBA_BG_INTERVAL_MS = 2500;
+function sambaBgGate(): Promise<void> {
   const now = Date.now();
-  const at = Math.max(now, cerebrasBgNextSlot);
-  cerebrasBgNextSlot = at + CEREBRAS_BG_INTERVAL_MS;
+  const at = Math.max(now, sambaBgNextSlot);
+  sambaBgNextSlot = at + SAMBA_BG_INTERVAL_MS;
   const wait = at - now;
   return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
 }
-let cerebrasPausedUntil = 0;
-function pauseCerebras() { cerebrasPausedUntil = Date.now() + 30_000; }
+let sambaPausedUntil = 0;
+function pauseSambaNova() { sambaPausedUntil = Date.now() + 30_000; }
 
-async function callCerebras(
+async function callSambaNova(
   prompt: string,
   maxTokens: number,
   opts: { temperature?: number; task?: string; jsonMode?: boolean; model?: string; signal?: AbortSignal; background?: boolean } = {},
 ): Promise<string> {
-  const key = process.env["CEREBRAS_API_KEY"];
-  if (!key) throw new Error("CEREBRAS_API_KEY missing");
-  if (Date.now() < cerebrasPausedUntil) throw new Error("cerebras-paused");
-  if (opts.background) await cerebrasBgGate();
-  const model = opts.model ?? CEREBRAS_MODEL;
+  const key = process.env["SAMBANOVA_API_KEY"];
+  if (!key) throw new Error("SAMBANOVA_API_KEY missing");
+  if (Date.now() < sambaPausedUntil) throw new Error("sambanova-paused");
+  if (opts.background) await sambaBgGate();
+  const model = opts.model ?? SAMBANOVA_MODEL;
   const task = opts.task ?? "other";
   // gpt-oss-120b is a reasoning model: its chain-of-thought consumes
   // max_tokens BEFORE the visible answer. Keep effort low and give the
@@ -128,12 +129,11 @@ async function callCerebras(
     model,
     max_tokens: maxTokens + 2000,
     temperature: opts.temperature ?? 0.3,
-    reasoning_effort: "low",
     messages: [{ role: "user", content: prompt }],
   };
   if (opts.jsonMode) body["response_format"] = { type: "json_object" };
   for (let attempt = 0; ; attempt++) {
-    const r = await fetch(CEREBRAS_URL, {
+    const r = await fetch(SAMBANOVA_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify(body),
@@ -147,7 +147,7 @@ async function callCerebras(
       const content = data.choices?.[0]?.message?.content ?? "";
       if (!content.trim()) {
         recordAiUsage(model, task, data.usage?.total_tokens ?? 0, false);
-        throw new Error(`Cerebras empty content: ${JSON.stringify(data.choices?.[0]).slice(0, 300)}`);
+        throw new Error(`SambaNova empty content: ${JSON.stringify(data.choices?.[0]).slice(0, 300)}`);
       }
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
       return content;
@@ -158,11 +158,11 @@ async function callCerebras(
       continue;
     }
     recordAiUsage(model, task, 0, false);
-    if (r.status === 429) pauseCerebras();
+    if (r.status === 429) pauseSambaNova();
     // 402 (billing wall) / 401 (bad key) won't clear in seconds — pause 10
     // min so we don't burn 1000+ doomed calls against a dead account.
-    else if (r.status === 402 || r.status === 401) { cerebrasPausedUntil = Date.now() + 10 * 60 * 1000; }
-    throw new Error(`Cerebras ${r.status}`);
+    else if (r.status === 402 || r.status === 401) { sambaPausedUntil = Date.now() + 10 * 60 * 1000; }
+    throw new Error(`SambaNova ${r.status}`);
   }
 }
 
@@ -181,7 +181,7 @@ async function callGroq(
   else if (opts.background) await groqBgGate();
   let useJsonMode = opts.jsonMode ?? false;
   // gpt-oss-120b is a reasoning model — its chain-of-thought consumes
-  // max_tokens before the visible answer (same fix as callCerebras). Keep
+  // max_tokens before the visible answer (same fix as callSambaNova). Keep
   // effort low + headroom. NOT applied to 20b: its small TPM window counts
   // requested max_tokens, and inflating it re-breaks those calls.
   const isReasoningLarge = model === "openai/gpt-oss-120b";
@@ -247,11 +247,12 @@ async function callGroq(
 // Real limits confirmed from Groq's own 429 body (2026-08-20):
 // gpt-oss-20b TPD is 200k, not the 500k previously assumed.
 const GROQ_TPD_LIMITS: Record<string, number> = {
-  "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
   "openai/gpt-oss-20b": 200000,
   "openai/gpt-oss-120b": 200000,
-  "llama-4-scout-17b-16e-instruct": 1000000,
-  "llama3.1-8b": 1000000,
+  // SambaNova (per-model TPD; free tier 200k — dev tier is far higher, so
+  // this gauge is conservative)
+  "gpt-oss-120b": 200000,
+  "Meta-Llama-3.3-70B-Instruct": 200000,
 };
 // Background jobs (clustering, enrich, card summaries) stop once a model has
 // burned this fraction of its daily budget — the remainder is reserved for
@@ -1728,9 +1729,9 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
       ? `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${card.headline ?? ""}\n${body}\n\nSummary:`
       : `Write ONE neutral, informative sentence of AT MOST 25 words describing what this article is most likely about, based on its headline. No preamble, no markdown, no speculation beyond the headline.\n\nHeadline: ${card.headline ?? ""}\n\nSummary:`;
     let rawText: string;
-    if (process.env["CEREBRAS_API_KEY"]) {
+    if (process.env["SAMBANOVA_API_KEY"]) {
       try {
-        rawText = await callCerebras(prompt, 80, { task: "article-summary-feed", background: true });
+        rawText = await callSambaNova(prompt, 80, { task: "article-summary-feed", background: true, model: SAMBANOVA_MODEL_BULK });
       } catch {
         rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
       }
@@ -3256,7 +3257,8 @@ router.get("/ai-usage", (_req, res) => {
   const MODEL_ROLE: Record<string, string> = {
     "openai/gpt-oss-120b": "Summaries + Deep Dive fallback (Groq)",
     "openai/gpt-oss-20b": "Q&A · clustering · last-resort",
-    "gpt-oss-120b": "Summaries + Deep Dive (Cerebras, ~3000 tok/s)",
+    "gpt-oss-120b": "Summaries + Deep Dive (SambaNova)",
+    "Meta-Llama-3.3-70B-Instruct": "Feed card summaries (SambaNova bulk)",
     "meta-llama/llama-4-scout-17b-16e-instruct": "RETIRED by Groq",
   };
   const KNOWN_MODELS = [
@@ -3269,7 +3271,7 @@ router.get("/ai-usage", (_req, res) => {
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "llama-4-scout-17b-16e-instruct": 5000, "llama3.1-8b": 5000 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     return {
       model,
@@ -3944,7 +3946,7 @@ const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
 const aiSummaryInflightMap = new Map<string, Promise<AiSummaryEntry>>();
 let aiSummaryActiveCount = 0;
 const AI_SUMMARY_MAX_CONCURRENT = 4;
-// Article summaries now use Cerebras (separate free budget, no gate needed).
+// Article summaries now use SambaNova (separate free budget, no gate needed).
 
 type AiSummaryType = "summary" | "fiveWs" | "eli5";
 
@@ -4188,7 +4190,7 @@ router.post("/ai-summary", async (req, res) => {
   // Load shedding — client pre-warm fires 40 of these per session, so without
   // guards a few concurrent sessions turn into a Groq 429 retry storm that
   // also starves Deep Dive / Q&A (shared RPM).
-  // Article summaries use Cerebras (separate provider, no Groq RPM contention).
+  // Article summaries use SambaNova (separate provider, no Groq RPM contention).
   // Coalesce: identical request already generating → share its result instead
   // of a duplicate Groq call (two users pre-warming the same story).
   const inflight = aiSummaryInflightMap.get(cacheKey);
@@ -4216,7 +4218,7 @@ router.post("/ai-summary", async (req, res) => {
     const effectiveKeyPoints = sourceWords < 150 ? Math.min(keyPoints ?? 3, 2) : keyPoints;
     const { prompt, maxTokens } = aiPrompt(type as AiSummaryType, text, { maxWords: effectiveMaxWords, keyPoints: effectiveKeyPoints, eli5Tone, publishedAt });
     let raw = "{}";
-    let cerebrasNote = "";
+    let sambaNote = "";
     // 30s abort — without it a hung provider held the request until the
     // client gave up (Deep Dive always had one; summaries didn't).
     const ctrl = new AbortController();
@@ -4225,7 +4227,7 @@ router.post("/ai-summary", async (req, res) => {
     // with Deep Dive and pre-warm bursts, so it can be paused/429 even when
     // the 8b model (separate gate) is free — without this fallback, that
     // meant a flat 502 to the reader whenever Scout was unavailable and
-    // Cerebras also failed. Mirrors the /deepdive last-resort tier.
+    // SambaNova also failed. Mirrors the /deepdive last-resort tier.
     const groqScoutThenFast = async (): Promise<string> => {
       try {
         return (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
@@ -4241,18 +4243,18 @@ router.post("/ai-summary", async (req, res) => {
       }
     };
     try {
-      if (process.env["CEREBRAS_API_KEY"]) {
+      if (process.env["SAMBANOVA_API_KEY"]) {
         try {
-          raw = (await callCerebras(prompt, maxTokens, { task: "article-summary", signal: ctrl.signal, background: !!background })) || "{}";
-        } catch (cerebrasErr) {
-          cerebrasNote = cerebrasErr instanceof Error ? cerebrasErr.message : String(cerebrasErr);
-          req.log.warn({ err: cerebrasNote }, "ai-summary: Cerebras failed, falling back to Groq");
+          raw = (await callSambaNova(prompt, maxTokens, { task: "article-summary", signal: ctrl.signal, background: !!background })) || "{}";
+        } catch (sambaErr) {
+          sambaNote = sambaErr instanceof Error ? sambaErr.message : String(sambaErr);
+          req.log.warn({ err: sambaNote }, "ai-summary: SambaNova failed, falling back to Groq");
           try {
             raw = await groqScoutThenFast();
           } catch (groqErr) {
             // Both providers down — report BOTH reasons, not just Groq's.
             const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
-            throw new Error(`cerebras: ${cerebrasNote} | groq: ${g}`);
+            throw new Error(`sambanova: ${sambaNote} | groq: ${g}`);
           }
         }
       } else {
@@ -4647,15 +4649,15 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     const t = setTimeout(() => ctrl.abort(), 90000);
     let raw = "";
     try {
-      // Cerebras gpt-oss-120b primary → Groq Scout → Groq gpt-oss-20b
-      // Cerebras free tier is ~30 RPM SHARED across every caller — pre-warm
+      // SambaNova gpt-oss-120b primary → Groq 120b → Groq gpt-oss-20b
+      // SambaNova free tier is rate-limited SHARED across every caller — pre-warm
       // fires many of these back-to-back, so background=true routes through
-      // cerebrasBgGate() (2.5s spacing, ~24 RPM, under the cap). On-demand
+      // sambaBgGate() (2.5s spacing, ~24 RPM, under the cap). On-demand
       // opens (background=false, the default) skip the gate — a user
       // actively waiting on one open shouldn't queue behind a warm burst.
       try {
-        if (process.env["CEREBRAS_API_KEY"]) {
-          raw = await callCerebras(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
+        if (process.env["SAMBANOVA_API_KEY"]) {
+          raw = await callSambaNova(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         } else {
           await deepDiveGate(!!background);
           raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
@@ -4882,9 +4884,9 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     const t = setTimeout(() => ctrl.abort(), 60000);
     let answer = "";
     try {
-      // Cerebras primary (fast, separate RPM pool) → Groq gpt-oss-20b fallback
-      if (process.env["CEREBRAS_API_KEY"]) {
-        try { answer = (await callCerebras(prompt, 600, { signal: ctrl.signal, temperature: 0.5, task: "qna" })).trim(); }
+      // SambaNova primary (fast, separate RPM pool) → Groq gpt-oss-20b fallback
+      if (process.env["SAMBANOVA_API_KEY"]) {
+        try { answer = (await callSambaNova(prompt, 600, { signal: ctrl.signal, temperature: 0.5, task: "qna" })).trim(); }
         catch { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
       } else {
         try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }

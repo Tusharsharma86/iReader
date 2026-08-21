@@ -111,16 +111,26 @@ function sambaBgGate(): Promise<void> {
 let sambaPausedUntil = 0;
 function pauseSambaNova() { sambaPausedUntil = Date.now() + 30_000; }
 
+// Fast primary provider: Gemini when GEMINI_API_KEY is set (free tier:
+// 1500 req/day, no card), else SambaNova (requires purchased credits).
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+const GEMINI_MODEL = "gemini-2.5-flash";
+function hasFastProvider(): boolean {
+  return Boolean(process.env["GEMINI_API_KEY"] || process.env["SAMBANOVA_API_KEY"]);
+}
+
 async function callSambaNova(
   prompt: string,
   maxTokens: number,
   opts: { temperature?: number; task?: string; jsonMode?: boolean; model?: string; signal?: AbortSignal; background?: boolean } = {},
 ): Promise<string> {
-  const key = process.env["SAMBANOVA_API_KEY"];
-  if (!key) throw new Error("SAMBANOVA_API_KEY missing");
-  if (Date.now() < sambaPausedUntil) throw new Error("sambanova-paused");
+  const gemKey = process.env["GEMINI_API_KEY"];
+  const key = gemKey || process.env["SAMBANOVA_API_KEY"];
+  if (!key) throw new Error("fast-provider key missing");
+  if (Date.now() < sambaPausedUntil) throw new Error("fast-provider-paused");
   if (opts.background) await sambaBgGate();
-  const model = opts.model ?? SAMBANOVA_MODEL;
+  const url = gemKey ? GEMINI_URL : SAMBANOVA_URL;
+  const model = gemKey ? GEMINI_MODEL : (opts.model ?? SAMBANOVA_MODEL);
   const task = opts.task ?? "other";
   // gpt-oss-120b is a reasoning model: its chain-of-thought consumes
   // max_tokens BEFORE the visible answer. Keep effort low and give the
@@ -133,7 +143,7 @@ async function callSambaNova(
   };
   if (opts.jsonMode) body["response_format"] = { type: "json_object" };
   for (let attempt = 0; ; attempt++) {
-    const r = await fetch(SAMBANOVA_URL, {
+    const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify(body),
@@ -147,7 +157,7 @@ async function callSambaNova(
       const content = data.choices?.[0]?.message?.content ?? "";
       if (!content.trim()) {
         recordAiUsage(model, task, data.usage?.total_tokens ?? 0, false);
-        throw new Error(`SambaNova empty content: ${JSON.stringify(data.choices?.[0]).slice(0, 300)}`);
+        throw new Error(`fast-provider empty content: ${JSON.stringify(data.choices?.[0]).slice(0, 300)}`);
       }
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
       return content;
@@ -162,7 +172,7 @@ async function callSambaNova(
     // 402 (billing wall) / 401 (bad key) won't clear in seconds — pause 10
     // min so we don't burn 1000+ doomed calls against a dead account.
     else if (r.status === 402 || r.status === 401) { sambaPausedUntil = Date.now() + 10 * 60 * 1000; }
-    throw new Error(`SambaNova ${r.status}`);
+    throw new Error(`${gemKey ? "Gemini" : "SambaNova"} ${r.status}`);
   }
 }
 
@@ -1729,9 +1739,9 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
       ? `Summarise this news article in ONE neutral, informative sentence of AT MOST 25 words. No preamble, no markdown.\n\nHeadline: ${card.headline ?? ""}\n${body}\n\nSummary:`
       : `Write ONE neutral, informative sentence of AT MOST 25 words describing what this article is most likely about, based on its headline. No preamble, no markdown, no speculation beyond the headline.\n\nHeadline: ${card.headline ?? ""}\n\nSummary:`;
     let rawText: string;
-    if (process.env["SAMBANOVA_API_KEY"]) {
+    if (hasFastProvider()) {
       try {
-        rawText = await callSambaNova(prompt, 80, { task: "article-summary-feed", background: true, model: SAMBANOVA_MODEL_BULK });
+        rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
       } catch {
         rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
       }
@@ -3257,6 +3267,7 @@ router.get("/ai-usage", (_req, res) => {
   const MODEL_ROLE: Record<string, string> = {
     "openai/gpt-oss-120b": "Summaries + Deep Dive fallback (Groq)",
     "openai/gpt-oss-20b": "Q&A · clustering · last-resort",
+    "gemini-2.5-flash": "Summaries + Deep Dive + Q&A (Gemini)",
     "gpt-oss-120b": "Summaries + Deep Dive (SambaNova)",
     "Meta-Llama-3.3-70B-Instruct": "Feed card summaries (SambaNova bulk)",
     "meta-llama/llama-4-scout-17b-16e-instruct": "RETIRED by Groq",
@@ -3271,7 +3282,7 @@ router.get("/ai-usage", (_req, res) => {
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-2.5-flash": 1500, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     return {
       model,
@@ -4243,7 +4254,7 @@ router.post("/ai-summary", async (req, res) => {
       }
     };
     try {
-      if (process.env["SAMBANOVA_API_KEY"]) {
+      if (hasFastProvider()) {
         try {
           raw = (await callSambaNova(prompt, maxTokens, { task: "article-summary", signal: ctrl.signal, background: !!background })) || "{}";
         } catch (sambaErr) {
@@ -4657,7 +4668,7 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
       // opens (background=false, the default) skip the gate — a user
       // actively waiting on one open shouldn't queue behind a warm burst.
       try {
-        if (process.env["SAMBANOVA_API_KEY"]) {
+        if (hasFastProvider()) {
           raw = await callSambaNova(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
         } else {
           await deepDiveGate(!!background);
@@ -4886,7 +4897,7 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     let answer = "";
     try {
       // SambaNova primary (fast, separate RPM pool) → Groq gpt-oss-20b fallback
-      if (process.env["SAMBANOVA_API_KEY"]) {
+      if (hasFastProvider()) {
         try { answer = (await callSambaNova(prompt, 600, { signal: ctrl.signal, temperature: 0.5, task: "qna" })).trim(); }
         catch { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
       } else {

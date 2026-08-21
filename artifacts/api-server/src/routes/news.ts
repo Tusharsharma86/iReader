@@ -101,12 +101,32 @@ function pause8bModel(background?: boolean) {
 // resets; callers fail fast to their Groq fallback instead of queueing.
 let sambaBgNextSlot = 0;
 const SAMBA_BG_INTERVAL_MS = process.env["GEMINI_API_KEY"] ? 6500 : 2500; // Gemini: 10 RPM cap
-function sambaBgGate(): Promise<void> {
+// PRIORITY GATE. The fast provider's per-minute cap is a shared resource, and
+// a feed pre-warm burst must never make a live tap wait behind it. Foreground
+// calls always take the next slot; background calls yield while any foreground
+// call is queued and bail out to Groq once the backlog is deep, so pre-warm
+// is genuinely free capacity rather than competition.
+let fgWaiting = 0;
+const BG_MAX_BACKLOG_MS = 20_000;
+function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
+function takeSlot(): Promise<void> {
   const now = Date.now();
   const at = Math.max(now, sambaBgNextSlot);
   sambaBgNextSlot = at + SAMBA_BG_INTERVAL_MS;
   const wait = at - now;
-  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+  return wait > 0 ? sleep(wait) : Promise.resolve();
+}
+async function sambaBgGate(background = true): Promise<void> {
+  if (!background) {
+    fgWaiting++;
+    try { await takeSlot(); } finally { fgWaiting--; }
+    return;
+  }
+  // Background: never queue behind a deep backlog, never in front of a reader.
+  if (sambaBgNextSlot - Date.now() > BG_MAX_BACKLOG_MS) throw new Error("fast-provider-busy");
+  for (let i = 0; i < 15 && fgWaiting > 0; i++) await sleep(1000);
+  if (fgWaiting > 0) throw new Error("fast-provider-busy");
+  await takeSlot();
 }
 let sambaPausedUntil = 0;
 function pauseSambaNova() { sambaPausedUntil = Date.now() + 30_000; }
@@ -128,13 +148,10 @@ async function callSambaNova(
   const key = gemKey || process.env["SAMBANOVA_API_KEY"];
   if (!key) throw new Error("fast-provider key missing");
   if (Date.now() < sambaPausedUntil) throw new Error("fast-provider-paused");
-  if (opts.background) await sambaBgGate();
+  await sambaBgGate(!!opts.background);
   const url = gemKey ? GEMINI_URL : SAMBANOVA_URL;
   const model = gemKey ? GEMINI_MODEL : (opts.model ?? SAMBANOVA_MODEL);
-  // Gemini free tier: 10 requests/MINUTE. Serialize EVERY call at ~6.5s
-  // (~9/min) — a queued 5-10s beats a tripped breaker and 502. Background
-  // calls were already gated above; this covers foreground too.
-  if (gemKey && !opts.background) await sambaBgGate();
+
   const task = opts.task ?? "other";
   // gpt-oss-120b is a reasoning model: its chain-of-thought consumes
   // max_tokens BEFORE the visible answer. Keep effort low and give the
@@ -4266,7 +4283,11 @@ router.post("/ai-summary", async (req, res) => {
           raw = (await callSambaNova(prompt, maxTokens, { task: "article-summary", signal: ctrl.signal, background: !!background })) || "{}";
         } catch (sambaErr) {
           sambaNote = sambaErr instanceof Error ? sambaErr.message : String(sambaErr);
-          req.log.warn({ err: sambaNote }, "ai-summary: SambaNova failed, falling back to Groq");
+          // Pre-warm is speculative: never spend Groq's small daily token
+          // budget on it — that budget is the reader's safety net. A skipped
+          // pre-warm just means the article generates on first tap.
+          if (background) throw new Error(`prewarm-skipped: ${sambaNote}`);
+          req.log.warn({ err: sambaNote }, "ai-summary: fast provider failed, falling back to Groq");
           try {
             raw = await groqScoutThenFast();
           } catch (groqErr) {

@@ -13,7 +13,10 @@ const router: IRouter = Router();
 // Groq (LPU) primary for everything. Cerebras optional boost when available.
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 const CEREBRAS_URL = "https://api.cerebras.ai/v1/chat/completions";
-const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"; // Deep Dive primary
+// Llama-4 Scout was RETIRED by Groq (404 model_not_found, confirmed
+// 2026-08-20). gpt-oss-120b is Groq's only remaining large model — same
+// family as the Cerebras primary, with its own separate daily budget.
+const GROQ_MODEL = "openai/gpt-oss-120b"; // Deep Dive / summaries Groq fallback
 const GROQ_MODEL_FAST = "openai/gpt-oss-20b"; // background bulk + article summaries
 const GROQ_MODEL_QUALITY = "openai/gpt-oss-20b"; // Q&A
 const GROQ_MODEL_ENRICH = "openai/gpt-oss-20b"; // cluster headlines + themes
@@ -177,13 +180,19 @@ async function callGroq(
   else if (model === GROQ_MODEL && Date.now() < (opts.background ? scoutBgPausedUntil : scoutPausedUntil)) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
   let useJsonMode = opts.jsonMode ?? false;
+  // gpt-oss-120b is a reasoning model — its chain-of-thought consumes
+  // max_tokens before the visible answer (same fix as callCerebras). Keep
+  // effort low + headroom. NOT applied to 20b: its small TPM window counts
+  // requested max_tokens, and inflating it re-breaks those calls.
+  const isReasoningLarge = model === "openai/gpt-oss-120b";
   for (let attempt = 0; ; attempt++) {
     const body: Record<string, unknown> = {
       model,
-      max_tokens: maxTokens,
+      max_tokens: isReasoningLarge ? maxTokens + 2000 : maxTokens,
       temperature: opts.temperature ?? 0.3,
       messages: [{ role: "user", content: prompt }],
     };
+    if (isReasoningLarge) body["reasoning_effort"] = "low";
     // JSON mode guarantees syntactically valid output — but not every Groq
     // model accepts response_format (gpt-oss-20b 400s; Scout has too). A 400
     // retries once WITHOUT it: prompts already demand JSON and the callers'
@@ -200,8 +209,12 @@ async function callGroq(
         choices?: Array<{ message?: { content?: string } }>;
         usage?: { total_tokens?: number };
       };
-      recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
       const content = data.choices?.[0]?.message?.content ?? "";
+      if (isReasoningLarge && !content.trim()) {
+        recordAiUsage(model, task, data.usage?.total_tokens ?? 0, false);
+        throw new Error("Groq 120b empty content");
+      }
+      recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
       return content;
     }
     // Model rejected response_format → immediately retry without it.
@@ -236,6 +249,7 @@ async function callGroq(
 const GROQ_TPD_LIMITS: Record<string, number> = {
   "meta-llama/llama-4-scout-17b-16e-instruct": 500000,
   "openai/gpt-oss-20b": 200000,
+  "openai/gpt-oss-120b": 200000,
   "llama-4-scout-17b-16e-instruct": 1000000,
   "llama3.1-8b": 1000000,
 };
@@ -3240,9 +3254,10 @@ router.get("/ai-usage", (_req, res) => {
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
-    "meta-llama/llama-4-scout-17b-16e-instruct": "Deep Dive fallback (Groq)",
-    "openai/gpt-oss-20b": "Q&A · clustering · Deep Dive last-resort",
+    "openai/gpt-oss-120b": "Summaries + Deep Dive fallback (Groq)",
+    "openai/gpt-oss-20b": "Q&A · clustering · last-resort",
     "gpt-oss-120b": "Summaries + Deep Dive (Cerebras, ~3000 tok/s)",
+    "meta-llama/llama-4-scout-17b-16e-instruct": "RETIRED by Groq",
   };
   const KNOWN_MODELS = [
     "llama-4-scout-17b-16e-instruct",
@@ -3254,7 +3269,7 @@ router.get("/ai-usage", (_req, res) => {
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "llama-4-scout-17b-16e-instruct": 5000, "llama3.1-8b": 5000 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "meta-llama/llama-4-scout-17b-16e-instruct": 1000, "llama-4-scout-17b-16e-instruct": 5000, "llama3.1-8b": 5000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     return {
       model,

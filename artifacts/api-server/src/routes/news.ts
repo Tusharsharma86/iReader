@@ -4905,7 +4905,10 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
       // SambaNova primary (fast, separate RPM pool) → Groq gpt-oss-20b fallback
       if (hasFastProvider()) {
         try { answer = (await callSambaNova(prompt, 600, { signal: ctrl.signal, temperature: 0.5, task: "qna" })).trim(); }
-        catch { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+        catch {
+          try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, task: "qna" })).trim(); }
+          catch { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+        }
       } else {
         try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
         catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }

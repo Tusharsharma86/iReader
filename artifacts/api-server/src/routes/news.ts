@@ -100,7 +100,7 @@ function pause8bModel(background?: boolean) {
 // summaries/Deep Dives. A 429 pauses ALL SambaNova calls 30s so the window
 // resets; callers fail fast to their Groq fallback instead of queueing.
 let sambaBgNextSlot = 0;
-const SAMBA_BG_INTERVAL_MS = 2500;
+const SAMBA_BG_INTERVAL_MS = process.env["GEMINI_API_KEY"] ? 6500 : 2500; // Gemini: 10 RPM cap
 function sambaBgGate(): Promise<void> {
   const now = Date.now();
   const at = Math.max(now, sambaBgNextSlot);
@@ -131,6 +131,10 @@ async function callSambaNova(
   if (opts.background) await sambaBgGate();
   const url = gemKey ? GEMINI_URL : SAMBANOVA_URL;
   const model = gemKey ? GEMINI_MODEL : (opts.model ?? SAMBANOVA_MODEL);
+  // Gemini free tier: 10 requests/MINUTE. Serialize EVERY call at ~6.5s
+  // (~9/min) — a queued 5-10s beats a tripped breaker and 502. Background
+  // calls were already gated above; this covers foreground too.
+  if (gemKey && !opts.background) await sambaBgGate();
   const task = opts.task ?? "other";
   // gpt-oss-120b is a reasoning model: its chain-of-thought consumes
   // max_tokens BEFORE the visible answer. Keep effort low and give the

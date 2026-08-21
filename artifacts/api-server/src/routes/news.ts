@@ -99,34 +99,48 @@ function pause8bModel(background?: boolean) {
 // at 2.5s spacing so a feed build's ~25-call burst can't starve user-facing
 // summaries/Deep Dives. A 429 pauses ALL SambaNova calls 30s so the window
 // resets; callers fail fast to their Groq fallback instead of queueing.
-let sambaBgNextSlot = 0;
-const SAMBA_BG_INTERVAL_MS = process.env["GEMINI_API_KEY"] ? 6500 : 2500; // Gemini: 10 RPM cap
-// PRIORITY GATE. The fast provider's per-minute cap is a shared resource, and
-// a feed pre-warm burst must never make a live tap wait behind it. Foreground
-// calls always take the next slot; background calls yield while any foreground
-// call is queued and bail out to Groq once the backlog is deep, so pre-warm
-// is genuinely free capacity rather than competition.
+// PRIORITY TOKEN BUCKET for the fast provider's per-minute cap.
+//
+// A fixed inter-request delay made every tap pay the spacing even when the
+// provider was idle. A bucket lets an idle reader through instantly and only
+// throttles sustained bursts — which is exactly the shape of real traffic
+// (occasional taps + a pre-warm sweep).
+//
+// Gemini free tier: flash-lite is 15 RPM (flash is 10). Refill one token per
+// 4.2s => ~14.3/min, a safe margin under the cap. SambaNova is ~30 RPM.
+const FAST_RPM_REFILL_MS = process.env["GEMINI_API_KEY"] ? 4200 : 2000;
+const FAST_BUCKET_MAX = 5;          // burst allowance for readers
+const BG_MIN_TOKENS = 3;            // pre-warm only spends surplus
+let fastTokens = FAST_BUCKET_MAX;
+let fastLastRefill = Date.now();
 let fgWaiting = 0;
-const BG_MAX_BACKLOG_MS = 20_000;
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
-function takeSlot(): Promise<void> {
+function refillFastTokens(): void {
   const now = Date.now();
-  const at = Math.max(now, sambaBgNextSlot);
-  sambaBgNextSlot = at + SAMBA_BG_INTERVAL_MS;
-  const wait = at - now;
-  return wait > 0 ? sleep(wait) : Promise.resolve();
+  const gained = Math.floor((now - fastLastRefill) / FAST_RPM_REFILL_MS);
+  if (gained > 0) {
+    fastTokens = Math.min(FAST_BUCKET_MAX, fastTokens + gained);
+    fastLastRefill += gained * FAST_RPM_REFILL_MS;
+  }
 }
 async function sambaBgGate(background = true): Promise<void> {
   if (!background) {
+    // Reader: take a token as soon as one exists. Idle provider => no wait.
     fgWaiting++;
-    try { await takeSlot(); } finally { fgWaiting--; }
-    return;
+    try {
+      for (;;) {
+        refillFastTokens();
+        if (fastTokens > 0) { fastTokens--; return; }
+        await sleep(Math.min(FAST_RPM_REFILL_MS, Math.max(200, fastLastRefill + FAST_RPM_REFILL_MS - Date.now())));
+      }
+    } finally { fgWaiting--; }
   }
-  // Background: never queue behind a deep backlog, never in front of a reader.
-  if (sambaBgNextSlot - Date.now() > BG_MAX_BACKLOG_MS) throw new Error("fast-provider-busy");
-  for (let i = 0; i < 15 && fgWaiting > 0; i++) await sleep(1000);
+  // Pre-warm: spend only surplus tokens, and never while a reader is waiting.
+  // Bail out (caller skips) rather than queueing — it is speculative work.
   if (fgWaiting > 0) throw new Error("fast-provider-busy");
-  await takeSlot();
+  refillFastTokens();
+  if (fastTokens <= BG_MIN_TOKENS) throw new Error("fast-provider-busy");
+  fastTokens--;
 }
 let sambaPausedUntil = 0;
 function pauseSambaNova() { sambaPausedUntil = Date.now() + 30_000; }
@@ -3306,7 +3320,7 @@ router.get("/ai-usage", (_req, res) => {
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3.5-flash-lite": 1500, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3.5-flash-lite": 1000, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     return {
       model,

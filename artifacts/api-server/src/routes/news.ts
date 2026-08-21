@@ -114,7 +114,7 @@ function pauseSambaNova() { sambaPausedUntil = Date.now() + 30_000; }
 // Fast primary provider: Gemini when GEMINI_API_KEY is set (free tier:
 // 1500 req/day, no card), else SambaNova (requires purchased credits).
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-3-flash";
 function hasFastProvider(): boolean {
   return Boolean(process.env["GEMINI_API_KEY"] || process.env["SAMBANOVA_API_KEY"]);
 }
@@ -3267,7 +3267,7 @@ router.get("/ai-usage", (_req, res) => {
   const MODEL_ROLE: Record<string, string> = {
     "openai/gpt-oss-120b": "Summaries + Deep Dive fallback (Groq)",
     "openai/gpt-oss-20b": "Q&A · clustering · last-resort",
-    "gemini-2.5-flash": "Summaries + Deep Dive + Q&A (Gemini)",
+    "gemini-3-flash": "Summaries + Deep Dive + Q&A (Gemini)",
     "gpt-oss-120b": "Summaries + Deep Dive (SambaNova)",
     "Meta-Llama-3.3-70B-Instruct": "Feed card summaries (SambaNova bulk)",
     "meta-llama/llama-4-scout-17b-16e-instruct": "RETIRED by Groq",
@@ -3282,7 +3282,7 @@ router.get("/ai-usage", (_req, res) => {
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-2.5-flash": 1500, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3-flash": 1500, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     return {
       model,

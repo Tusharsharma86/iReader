@@ -156,6 +156,9 @@ async function callCerebras(
     }
     recordAiUsage(model, task, 0, false);
     if (r.status === 429) pauseCerebras();
+    // 402 (billing wall) / 401 (bad key) won't clear in seconds — pause 10
+    // min so we don't burn 1000+ doomed calls against a dead account.
+    else if (r.status === 402 || r.status === 401) { cerebrasPausedUntil = Date.now() + 10 * 60 * 1000; }
     throw new Error(`Cerebras ${r.status}`);
   }
 }
@@ -4212,8 +4215,14 @@ router.post("/ai-summary", async (req, res) => {
       try {
         return (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
       } catch (scoutErr) {
-        req.log.warn({ err: scoutErr instanceof Error ? scoutErr.message : String(scoutErr) }, "ai-summary: Groq Scout failed, falling back to 8b");
-        return (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+        const s = scoutErr instanceof Error ? scoutErr.message : String(scoutErr);
+        req.log.warn({ err: s }, "ai-summary: Groq Scout failed, falling back to 8b");
+        try {
+          return (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+        } catch (fastErr) {
+          const f = fastErr instanceof Error ? fastErr.message : String(fastErr);
+          throw new Error(`scout: ${s} || 20b: ${f}`);
+        }
       }
     };
     try {

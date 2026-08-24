@@ -115,6 +115,16 @@ let fastTokens = FAST_BUCKET_MAX;
 let fastLastRefill = Date.now();
 let fgWaiting = 0;
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
+// Daily request budget. Gemini free tier is a REQUEST-per-day cap (flash-lite
+// 1000/day), so pre-warm must stop well before readers would be locked out.
+// Background gets the first 60%; the rest is reserved for live taps.
+const FAST_RPD = process.env["GEMINI_API_KEY"] ? 1000 : 12000;
+const FAST_BG_SHARE = 0.6;
+function fastDailyBudgetSpent(): boolean {
+  const model = process.env["GEMINI_API_KEY"] ? GEMINI_MODEL : SAMBANOVA_MODEL;
+  const used = aiUsageByModel[model]?.calls ?? 0;
+  return used >= FAST_RPD * FAST_BG_SHARE;
+}
 function refillFastTokens(): void {
   const now = Date.now();
   const gained = Math.floor((now - fastLastRefill) / FAST_RPM_REFILL_MS);
@@ -138,6 +148,7 @@ async function sambaBgGate(background = true): Promise<void> {
   // Pre-warm: spend only surplus tokens, and never while a reader is waiting.
   // Bail out (caller skips) rather than queueing — it is speculative work.
   if (fgWaiting > 0) throw new Error("fast-provider-busy");
+  if (fastDailyBudgetSpent()) throw new Error("fast-provider-bg-budget");
   refillFastTokens();
   if (fastTokens <= BG_MIN_TOKENS) throw new Error("fast-provider-busy");
   fastTokens--;

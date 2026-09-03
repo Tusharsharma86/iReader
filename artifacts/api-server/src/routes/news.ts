@@ -192,6 +192,7 @@ async function callSambaNova(
   if (gemKey) body["reasoning_effort"] = "low";
   if (opts.jsonMode) body["response_format"] = { type: "json_object" };
   for (let attempt = 0; ; attempt++) {
+    const startedAt = Date.now();
     const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
@@ -208,7 +209,7 @@ async function callSambaNova(
         recordAiUsage(model, task, data.usage?.total_tokens ?? 0, false);
         throw new Error(`fast-provider empty content: ${JSON.stringify(data.choices?.[0]).slice(0, 300)}`);
       }
-      recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
+      recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true, Date.now() - startedAt);
       return content;
     }
     const retryable = r.status === 502 || r.status === 503;
@@ -257,6 +258,7 @@ async function callGroq(
     // retries once WITHOUT it: prompts already demand JSON and the callers'
     // forgiving parsers handle stray prose, so plain mode beats hard failure.
     if (useJsonMode) body["response_format"] = { type: "json_object" };
+    const startedAt = Date.now();
     const r = await fetch(GROQ_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
@@ -273,7 +275,7 @@ async function callGroq(
         recordAiUsage(model, task, data.usage?.total_tokens ?? 0, false);
         throw new Error("Groq 120b empty content");
       }
-      recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true);
+      recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true, Date.now() - startedAt);
       return content;
     }
     // Model rejected response_format → immediately retry without it.
@@ -324,18 +326,27 @@ function bgBudgetExhausted(model: string): boolean {
   const used = aiUsageByModel[model]?.tokens ?? 0;
   return used > limit * BG_BUDGET_FRACTION;
 }
-interface TaskUsage { tokens: number; calls: number; errors: number; }
-interface ModelUsage { tokens: number; calls: number; errors: number; tasks: Record<string, TaskUsage>; }
+interface TaskUsage { tokens: number; calls: number; errors: number; ms: number; msCalls: number; }
+interface ModelUsage {
+  tokens: number; calls: number; errors: number;
+  ms: number; msCalls: number;           // latency accumulator (successful calls)
+  hourly: number[];                      // 24 buckets of call counts, UTC hour
+  tasks: Record<string, TaskUsage>;
+}
 let aiUsageDay = new Date().toISOString().slice(0, 10);
 const aiUsageByModel: Record<string, ModelUsage> = {};
-function recordAiUsage(model: string, task: string, tokens: number, ok: boolean): void {
-  const today = new Date().toISOString().slice(0, 10);
+function recordAiUsage(model: string, task: string, tokens: number, ok: boolean, ms?: number): void {
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
   if (today !== aiUsageDay) { aiUsageDay = today; for (const k of Object.keys(aiUsageByModel)) delete aiUsageByModel[k]; }
-  const m = (aiUsageByModel[model] ??= { tokens: 0, calls: 0, errors: 0, tasks: {} });
-  const t = (m.tasks[task] ??= { tokens: 0, calls: 0, errors: 0 });
+  const m = (aiUsageByModel[model] ??= { tokens: 0, calls: 0, errors: 0, ms: 0, msCalls: 0, hourly: Array(24).fill(0), tasks: {} });
+  const t = (m.tasks[task] ??= { tokens: 0, calls: 0, errors: 0, ms: 0, msCalls: 0 });
   m.calls++; t.calls++;
   m.tokens += tokens; t.tokens += tokens;
+  m.hourly[now.getUTCHours()] = (m.hourly[now.getUTCHours()] ?? 0) + 1;
   if (!ok) { m.errors++; t.errors++; }
+  // Latency only from successful calls — a fast failure is not "fast".
+  if (ok && typeof ms === "number" && ms > 0) { m.ms += ms; m.msCalls++; t.ms += ms; t.msCalls++; }
 }
 
 // Disk cache lives in /tmp so it survives in-process restarts within the same
@@ -3321,34 +3332,83 @@ router.get("/ai-usage", (_req, res) => {
     "Meta-Llama-3.3-70B-Instruct": "Feed card summaries (SambaNova bulk)",
     "meta-llama/llama-4-scout-17b-16e-instruct": "RETIRED by Groq",
   };
-  const KNOWN_MODELS = [
-    "llama-4-scout-17b-16e-instruct",
-    "llama3.1-8b",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "openai/gpt-oss-20b",
-  ];
+  const KNOWN_MODELS = [GEMINI_MODEL, GROQ_MODEL, GROQ_MODEL_FAST];
+  // Provider + $/1M tokens, so the dashboard can show spend and group by vendor.
+  const PROVIDER: Record<string, { name: string; inRate: number; outRate: number }> = {
+    "gemini-3.5-flash-lite": { name: "Gemini", inRate: 0, outRate: 0 },
+    "openai/gpt-oss-120b": { name: "Groq", inRate: 0, outRate: 0 },
+    "openai/gpt-oss-20b": { name: "Groq", inRate: 0, outRate: 0 },
+    "gpt-oss-120b": { name: "SambaNova", inRate: 0.35, outRate: 0.75 },
+    "Meta-Llama-3.3-70B-Instruct": { name: "SambaNova", inRate: 0.60, outRate: 1.20 },
+  };
+  const TIER: Record<string, string> = {
+    "gemini-3.5-flash-lite": "primary",
+    "openai/gpt-oss-120b": "fallback",
+    "openai/gpt-oss-20b": "background",
+  };
   const allModels = Array.from(new Set([...KNOWN_MODELS, ...Object.keys(aiUsageByModel)]));
   const models = allModels.map((model) => {
-    const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, tasks: {} };
+    const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, ms: 0, msCalls: 0, hourly: Array(24).fill(0) as number[], tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
     const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3.5-flash-lite": 1000, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
+    const prov = PROVIDER[model] ?? { name: "—", inRate: 0, outRate: 0 };
+    // Assume a 65/35 input/output split — matches observed summary traffic.
+    const cost = (m.tokens * 0.65 * prov.inRate + m.tokens * 0.35 * prov.outRate) / 1e6;
+    const ok = m.calls - m.errors;
     return {
       model,
+      provider: prov.name,
+      tier: TIER[model] ?? "—",
       role: MODEL_ROLE[model] ?? "—",
       tokensUsed: m.tokens,
       tokensLimit: limit,
       pct: limit ? Math.min(100, Math.round((m.tokens / limit) * 100)) : null,
       calls: m.calls,
       requestsLimit: REQ_LIMIT,
+      requestsPct: REQ_LIMIT ? Math.min(100, Math.round((m.calls / REQ_LIMIT) * 100)) : null,
       errors: m.errors,
+      successPct: m.calls ? Math.round((ok / m.calls) * 100) : null,
+      avgMs: m.msCalls ? Math.round(m.ms / m.msCalls) : null,
+      avgTokens: ok ? Math.round(m.tokens / ok) : null,
+      costUsd: Number(cost.toFixed(4)),
+      free: prov.inRate === 0 && prov.outRate === 0,
+      hourly: m.hourly,
       tasks: Object.entries(m.tasks)
-        .map(([task, t]) => ({ task, label: TASK_LABELS[task] ?? task, tokens: t.tokens, calls: t.calls, errors: t.errors }))
+        .map(([task, t]) => ({
+          task, label: TASK_LABELS[task] ?? task,
+          tokens: t.tokens, calls: t.calls, errors: t.errors,
+          avgMs: t.msCalls ? Math.round(t.ms / t.msCalls) : null,
+        }))
         .sort((a, b) => b.tokens - a.tokens),
     };
   }).sort((a, b) => b.tokensUsed - a.tokensUsed);
   const totalTokens = models.reduce((s, m) => s + m.tokensUsed, 0);
-  res.json({ day: aiUsageDay, totalTokens, models, note: "In-memory; resets on server restart. Limits are free-tier TPD (approx)." });
+  const totalCalls = models.reduce((s, m) => s + m.calls, 0);
+  const totalErrors = models.reduce((s, m) => s + m.errors, 0);
+  const totalCost = Number(models.reduce((s, m) => s + m.costUsd, 0).toFixed(4));
+  const timed = models.filter((m) => m.avgMs != null);
+  const weighted = timed.reduce((s, m) => s + (m.avgMs as number) * m.calls, 0);
+  const timedCalls = timed.reduce((s, m) => s + m.calls, 0);
+  // Roll per-task rows up across models so the UI can show "where AI time goes"
+  // independently of which provider happened to serve each call.
+  const byTask: Record<string, { task: string; label: string; tokens: number; calls: number; errors: number }> = {};
+  for (const m of models) {
+    for (const t of m.tasks) {
+      const b = (byTask[t.task] ??= { task: t.task, label: t.label, tokens: 0, calls: 0, errors: 0 });
+      b.tokens += t.tokens; b.calls += t.calls; b.errors += t.errors;
+    }
+  }
+  res.json({
+    day: aiUsageDay,
+    totalTokens, totalCalls, totalErrors, totalCost,
+    successPct: totalCalls ? Math.round(((totalCalls - totalErrors) / totalCalls) * 100) : null,
+    avgMs: timedCalls ? Math.round(weighted / timedCalls) : null,
+    activeModels: models.filter((m) => m.calls > 0).length,
+    tasks: Object.values(byTask).sort((a, b) => b.calls - a.calls),
+    models,
+    note: "In-memory; resets on server restart. Limits are free-tier approximations.",
+  });
 });
 
 const questionsCache = new Map<string, { questions: { text: string; accent: string }[]; ts: number }>();

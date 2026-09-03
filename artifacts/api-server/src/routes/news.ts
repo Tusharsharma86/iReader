@@ -4718,8 +4718,15 @@ router.post("/deepdive", async (req, res) => {
     const storyTotal = storyMin > 0
       ? `TOTAL ${storyMin}-${storyMax} words (hard cap ${storyMax})`
       : `TOTAL at most ${storyMax} words (hard cap) — the source is short, so shorter and accurate beats longer and padded; NEVER pad to fill`;
-    const tldrBullets = depth === 'quick' ? 'EXACTLY 2-3' : 'EXACTLY 3-4';
-    const tldrCap = Math.min(depth === 'quick' ? 200 : 450, Math.max(120, Math.round(sourceWords * 0.6)));
+    const tldrBullets = depth === 'quick' ? 'EXACTLY 3' : 'EXACTLY 3-4';
+    // Bullet length scales with the depth the reader chose, and is trimmed
+    // further when the source itself is thin so bullets are never padded.
+    const bulletWordSpec = sourceWords < 250
+      ? '~30-38 words'
+      : depth === 'quick' ? '~35-42 words'
+      : depth === 'deep' ? '~44-50 words'
+      : '~38-46 words';
+    const tldrCap = Math.min(depth === 'quick' ? 260 : 450, Math.max(120, Math.round(sourceWords * 0.6)));
     const tldrTotal = `~${Math.round(tldrCap * 0.85)}-${tldrCap} words (hard cap ${tldrCap})`;
     const qCount = depth === 'quick' ? 'EXACTLY 3' : '3-4';
     const prompt = `You are transforming news coverage into a structured, AI-native "story understanding" experience. Length mode for this request: "${depth.toUpperCase()}" — every word target below is calibrated for this mode; obey them strictly. The input may include the FULL lead article followed by short summaries from other sources (each tagged like "[Source Name]:"). READ ALL of it and respond with ONLY valid JSON (no markdown, no prose) matching this exact shape:
@@ -4727,7 +4734,7 @@ router.post("/deepdive", async (req, res) => {
 GLOBAL RULE — TITLES/OFFICE, applies to EVERY field below (tldrSections, tldr, storySections, everything, not just one section): never use your own assumed knowledge of who currently holds an office, title, or role — that knowledge may predate this article. The source's OWN framing is authoritative: if the headline or article calls it "the Trump administration's policy" or "President Biden announced," that framing tells you their status as of this story — do not relabel them "former President" (or vice versa) elsewhere in your response based on your own assumption. If the source doesn't specify, use the article's stated publish date (given below) as the reference point, not "today." Before finalizing, check your own output for this specific contradiction: does any bullet's title/status conflict with another bullet, or with how the headline itself frames the same person?
 
 {
-  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (~30-45 words) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal"). ZERO REPETITION — every bullet, in every section, must state a fact that appears in NO other bullet. Never restate the same number/comparison/fact in different words to fill the bullet count — go back to the source for another genuinely distinct fact, angle, or implication instead.
+  "tldrSections": [                                    // 2-3 grouped sections. Each section: SHORT all-caps thematic heading (4-8 words) + ${tldrBullets} bullets. Each bullet is 1-2 COMPLETE sentences (${bulletWordSpec}) — a self-contained, well-summarised thought that ALWAYS ends with proper punctuation; NEVER a sentence fragment and NEVER cut off mid-sentence. TOTAL words across ALL sections+bullets should be ${tldrTotal} — be thorough but don't pad. First section = the core event. Second = context / reactions / why it matters. Optional third = stakes / what's next. Bold key entities + figures inline with ** (e.g. "**Pakistan** signed a **$1.2M** deal"). ZERO REPETITION — every bullet, in every section, must state a fact that appears in NO other bullet. Never restate the same number/comparison/fact in different words to fill the bullet count — go back to the source for another genuinely distinct fact, angle, or implication instead.
     { "heading": "CORE EVENT", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] },
     { "heading": "CONTEXT & WHY IT MATTERS", "bullets": ["complete 1-2 sentence summary.", "complete 1-2 sentence summary.", "complete 1-2 sentence summary."] }
   ],

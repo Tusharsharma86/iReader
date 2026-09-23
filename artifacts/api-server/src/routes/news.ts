@@ -294,7 +294,7 @@ async function callSambaNova(
     // The body was thrown away here, so a 429 never told us WHICH quota was
     // hit (per-minute vs per-day) — the one thing needed to size the gate.
     const errBody = await r.text().catch(() => "");
-    fastLastErrorBody = `HTTP ${r.status}: ${errBody.slice(0, 1200)}`;
+    fastLastErrorBody = `HTTP ${r.status}: ${errBody.slice(0, 2500)}`;
     noteFastFailure(`HTTP ${r.status}`);
     if (r.status === 429) pauseSambaNova();
     // 402 (billing wall) / 401 (bad key) won't clear in seconds — pause 10
@@ -3485,12 +3485,14 @@ router.get("/ai-diag", async (req, res) => {
     },
   ];
   const results: Record<string, unknown> = {};
-  for (const v of full ? variants : variants.slice(0, 1)) {
+  // Default: NO generate calls. Polling this route while waiting for a deploy
+  // was itself burning the free-tier request quota and causing the 429s.
+  for (const v of full ? variants : []) {
     const tv = Date.now();
     try {
       const r = await withTimeout(20_000, v.run);
       const txt = await r.text();
-      results[v.name] = { status: r.status, ms: Date.now() - tv, body: txt.slice(0, 1200) };
+      results[v.name] = { status: r.status, ms: Date.now() - tv, body: txt.slice(0, 2500) };
     } catch (e) {
       results[v.name] = { ms: Date.now() - tv, error: e instanceof Error ? e.message : String(e) };
     }

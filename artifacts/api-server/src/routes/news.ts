@@ -3358,6 +3358,58 @@ router.get("/cron/status", (_req, res) => {
 });
 
 // AI usage dashboard — per-model + per-task token totals for today (UTC).
+// Why is the fast provider not answering? /ai-usage showed Gemini at 0 calls
+// AND 0 errors — i.e. the fetch never completed at all, so nothing was ever
+// recorded. This probe separates the possible causes: can we reach the API,
+// does the key work, does the configured model exist, and how long does a
+// minimal completion actually take.
+router.get("/ai-diag", async (_req, res) => {
+  const key = process.env["GEMINI_API_KEY"];
+  if (!key) { res.json({ ok: false, reason: "GEMINI_API_KEY not set" }); return; }
+  const out: Record<string, unknown> = { model: GEMINI_MODEL, keyLen: key.length };
+
+  // 1. Can we list models, and is GEMINI_MODEL among them?
+  const t0 = Date.now();
+  try {
+    const r = await withTimeout(15_000, (signal) =>
+      fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}&pageSize=200`, { signal }));
+    const body = (await r.json()) as { models?: Array<{ name?: string }>; error?: { message?: string } };
+    const names = (body.models ?? []).map((m) => (m.name ?? "").replace(/^models\//, ""));
+    out["listModels"] = {
+      status: r.status, ms: Date.now() - t0,
+      error: body.error?.message ?? null,
+      configuredModelExists: names.includes(GEMINI_MODEL),
+      flashLite: names.filter((n) => n.includes("flash") || n.includes("lite")).slice(0, 40),
+    };
+  } catch (e) {
+    out["listModels"] = { ms: Date.now() - t0, error: e instanceof Error ? e.message : String(e) };
+  }
+
+  // 2. Time a minimal completion through the exact OpenAI-compat path we use.
+  const t1 = Date.now();
+  try {
+    const r = await withTimeout(30_000, (signal) =>
+      fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model: GEMINI_MODEL, max_tokens: 64, temperature: 0.3,
+          reasoning_effort: "low",
+          messages: [{ role: "user", content: "Reply with the single word: ok" }],
+        }),
+        signal,
+      }));
+    const txt = await r.text();
+    out["completion"] = { status: r.status, ms: Date.now() - t1, body: txt.slice(0, 600) };
+  } catch (e) {
+    out["completion"] = { ms: Date.now() - t1, error: e instanceof Error ? e.message : String(e) };
+  }
+
+  out["pausedForMs"] = Math.max(0, sambaPausedUntil - Date.now());
+  out["fastTokens"] = fastTokens;
+  res.json(out);
+});
+
 router.get("/ai-usage", (_req, res) => {
   const TASK_LABELS: Record<string, string> = {
     deepdive: "Deep Dive",

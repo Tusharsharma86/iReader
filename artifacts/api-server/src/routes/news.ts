@@ -3481,6 +3481,32 @@ router.get("/ai-diag", async (_req, res) => {
   }
   out["completion"] = results;
 
+  // 3. Which Gemini model actually returns? Rejections come back in
+  // 13-309ms, so the hang is specific to generating with
+  // gemini-3.5-flash-lite (it hangs on the native endpoint too). Sweep the
+  // account's other flash/lite models with a tiny prompt and short budget.
+  const candidates = [
+    "gemini-flash-lite-latest", "gemini-3.1-flash-lite", "gemini-3.5-flash",
+    "gemini-flash-latest", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-3.6-flash",
+  ];
+  const sweep: Record<string, unknown> = {};
+  for (const m of candidates) {
+    const tm = Date.now();
+    try {
+      const r = await withTimeout(9000, (signal) => fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ model: m, max_tokens: 32, temperature: 0.3, messages: [{ role: "user", content: "Reply with the single word: ok" }] }),
+        signal,
+      }));
+      const j = (await r.json()) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
+      sweep[m] = { status: r.status, ms: Date.now() - tm, content: j.choices?.[0]?.message?.content ?? null, error: j.error?.message?.slice(0, 160) ?? null };
+    } catch (e) {
+      sweep[m] = { ms: Date.now() - tm, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  out["modelSweep"] = sweep;
+
   out["pausedForMs"] = Math.max(0, sambaPausedUntil - Date.now());
   out["fastTokens"] = fastTokens;
   out["consecutiveFails"] = fastConsecutiveFails;

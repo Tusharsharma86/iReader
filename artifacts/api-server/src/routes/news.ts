@@ -129,7 +129,9 @@ function pause8bModel(background?: boolean) {
 //
 // Gemini free tier: flash-lite is 15 RPM (flash is 10). Refill one token per
 // 4.2s => ~14.3/min, a safe margin under the cap. SambaNova is ~30 RPM.
-const FAST_RPM_REFILL_MS = process.env["GEMINI_API_KEY"] ? 4200 : 2000;
+// 6.2s/token => ~9.7 RPM. flash-lite allowed 15 RPM, but we are on a full
+// flash model now and its free-tier ceiling is lower, so stay under 10.
+const FAST_RPM_REFILL_MS = process.env["GEMINI_API_KEY"] ? 6200 : 2000;
 const FAST_BUCKET_MAX = 5;          // burst allowance for readers
 const BG_MIN_TOKENS = 3;            // pre-warm only spends surplus
 let fastTokens = FAST_BUCKET_MAX;
@@ -139,7 +141,9 @@ function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout
 // Daily request budget. Gemini free tier is a REQUEST-per-day cap (flash-lite
 // 1000/day), so pre-warm must stop well before readers would be locked out.
 // Background gets the first 60%; the rest is reserved for live taps.
-const FAST_RPD = process.env["GEMINI_API_KEY"] ? 1000 : 12000;
+// Conservative: flash-lite documented 1000/day, a full flash model is less.
+// Pre-warm spends only FAST_BG_SHARE of this, so readers keep the remainder.
+const FAST_RPD = process.env["GEMINI_API_KEY"] ? 500 : 12000;
 const FAST_BG_SHARE = 0.6;
 function fastDailyBudgetSpent(): boolean {
   const model = process.env["GEMINI_API_KEY"] ? GEMINI_MODEL : SAMBANOVA_MODEL;
@@ -209,7 +213,13 @@ function noteFastFailure(reason: string): void {
 // Fast primary provider: Gemini when GEMINI_API_KEY is set (free tier:
 // 1500 req/day, no card), else SambaNova (requires purchased credits).
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-const GEMINI_MODEL = "gemini-3.5-flash-lite"; // separate 1500/day pool from flash; higher capacity
+// gemini-3.5-flash-lite NEVER returns for this key: a 32-token "say ok" hangs
+// past 30s on both the OpenAI-compat and native generateContent endpoints,
+// while rejected requests come back in 13-309ms. Swept the account's models
+// (2026-09-23): 3.1-flash-lite / 3.5-flash / flash-latest all 503, 2.5-flash
+// 404s, flash-lite-latest hangs too — only gemini-3.6-flash (200 in 1.5s) and
+// gemini-3-flash-preview (200 in 1.3s) answer. Take the non-preview one.
+const GEMINI_MODEL = "gemini-3.6-flash";
 function hasFastProvider(): boolean {
   return Boolean(process.env["GEMINI_API_KEY"] || process.env["SAMBANOVA_API_KEY"]);
 }
@@ -3394,7 +3404,8 @@ router.get("/cron/status", (_req, res) => {
 // recorded. This probe separates the possible causes: can we reach the API,
 // does the key work, does the configured model exist, and how long does a
 // minimal completion actually take.
-router.get("/ai-diag", async (_req, res) => {
+router.get("/ai-diag", async (req, res) => {
+  const full = req.query["full"] === "1";
   const key = process.env["GEMINI_API_KEY"];
   if (!key) { res.json({ ok: false, reason: "GEMINI_API_KEY not set" }); return; }
   const out: Record<string, unknown> = { model: GEMINI_MODEL, keyLen: key.length };
@@ -3469,7 +3480,7 @@ router.get("/ai-diag", async (_req, res) => {
     },
   ];
   const results: Record<string, unknown> = {};
-  for (const v of variants) {
+  for (const v of full ? variants : variants.slice(0, 1)) {
     const tv = Date.now();
     try {
       const r = await withTimeout(20_000, v.run);
@@ -3490,7 +3501,7 @@ router.get("/ai-diag", async (_req, res) => {
     "gemini-flash-latest", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-3.6-flash",
   ];
   const sweep: Record<string, unknown> = {};
-  for (const m of candidates) {
+  for (const m of full ? candidates : []) {
     const tm = Date.now();
     try {
       const r = await withTimeout(9000, (signal) => fetch(GEMINI_URL, {

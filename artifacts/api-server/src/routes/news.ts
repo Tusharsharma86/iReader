@@ -3385,25 +3385,70 @@ router.get("/ai-diag", async (_req, res) => {
     out["listModels"] = { ms: Date.now() - t0, error: e instanceof Error ? e.message : String(e) };
   }
 
-  // 2. Time a minimal completion through the exact OpenAI-compat path we use.
-  const t1 = Date.now();
-  try {
-    const r = await withTimeout(30_000, (signal) =>
-      fetch(GEMINI_URL, {
+  // 2. The OpenAI-compat POST hangs (30s, aborted) even for a 64-token
+  // "say ok", while the GET above answers in 150ms. Try the variants that
+  // could each explain that: the reasoning_effort field, the auth style,
+  // the compat layer itself vs. the native generateContent endpoint, and a
+  // different model generation.
+  const variants: Array<{ name: string; run: (signal: AbortSignal) => Promise<Response> }> = [
+    {
+      name: "compat+reasoning_effort",
+      run: (signal) => fetch(GEMINI_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({
-          model: GEMINI_MODEL, max_tokens: 64, temperature: 0.3,
-          reasoning_effort: "low",
-          messages: [{ role: "user", content: "Reply with the single word: ok" }],
-        }),
+        body: JSON.stringify({ model: GEMINI_MODEL, max_tokens: 64, temperature: 0.3, reasoning_effort: "low", messages: [{ role: "user", content: "Reply with the single word: ok" }] }),
         signal,
-      }));
-    const txt = await r.text();
-    out["completion"] = { status: r.status, ms: Date.now() - t1, body: txt.slice(0, 600) };
-  } catch (e) {
-    out["completion"] = { ms: Date.now() - t1, error: e instanceof Error ? e.message : String(e) };
+      }),
+    },
+    {
+      name: "compat-no-reasoning",
+      run: (signal) => fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ model: GEMINI_MODEL, max_tokens: 64, temperature: 0.3, messages: [{ role: "user", content: "Reply with the single word: ok" }] }),
+        signal,
+      }),
+    },
+    {
+      name: "compat-apikey-header",
+      run: (signal) => fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({ model: GEMINI_MODEL, max_tokens: 64, temperature: 0.3, messages: [{ role: "user", content: "Reply with the single word: ok" }] }),
+        signal,
+      }),
+    },
+    {
+      name: "compat-2.5-flash-lite",
+      run: (signal) => fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ model: "gemini-2.5-flash-lite", max_tokens: 64, temperature: 0.3, messages: [{ role: "user", content: "Reply with the single word: ok" }] }),
+        signal,
+      }),
+    },
+    {
+      name: "native-generateContent",
+      run: (signal) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+        body: JSON.stringify({ contents: [{ parts: [{ text: "Reply with the single word: ok" }] }], generationConfig: { maxOutputTokens: 64, temperature: 0.3 } }),
+        signal,
+      }),
+    },
+  ];
+  const results: Record<string, unknown> = {};
+  for (const v of variants) {
+    const tv = Date.now();
+    try {
+      const r = await withTimeout(20_000, v.run);
+      const txt = await r.text();
+      results[v.name] = { status: r.status, ms: Date.now() - tv, body: txt.slice(0, 300) };
+    } catch (e) {
+      results[v.name] = { ms: Date.now() - tv, error: e instanceof Error ? e.message : String(e) };
+    }
   }
+  out["completion"] = results;
 
   out["pausedForMs"] = Math.max(0, sambaPausedUntil - Date.now());
   out["fastTokens"] = fastTokens;

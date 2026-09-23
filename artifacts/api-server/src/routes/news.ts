@@ -186,6 +186,25 @@ async function sambaBgGate(background = true, signal?: AbortSignal): Promise<voi
 }
 let sambaPausedUntil = 0;
 function pauseSambaNova() { sambaPausedUntil = Date.now() + 30_000; }
+// Circuit breaker. Gemini's OpenAI-compat POST can stop responding entirely
+// while GET /v1beta/models still answers in 150ms — observed 2026-09-23: a
+// 64-token "say ok" hung past 30s, so /ai-usage showed 0 calls AND 0 errors
+// (nothing is recorded when the fetch never returns). Every reader then paid
+// the full fast-provider budget before falling through to Groq, which
+// answers the same prompt in ~2.8s. After FAST_FAIL_LIMIT consecutive
+// failures, stop asking for FAST_DEAD_PAUSE_MS so summaries land in seconds
+// instead. One success re-opens the circuit.
+const FAST_FAIL_LIMIT = 3;
+const FAST_DEAD_PAUSE_MS = 10 * 60 * 1000;
+let fastConsecutiveFails = 0;
+let fastLastFailReason = "";
+function noteFastFailure(reason: string): void {
+  fastLastFailReason = reason;
+  if (++fastConsecutiveFails >= FAST_FAIL_LIMIT) {
+    sambaPausedUntil = Date.now() + FAST_DEAD_PAUSE_MS;
+    fastConsecutiveFails = 0;
+  }
+}
 
 // Fast primary provider: Gemini when GEMINI_API_KEY is set (free tier:
 // 1500 req/day, no card), else SambaNova (requires purchased credits).
@@ -224,12 +243,22 @@ async function callSambaNova(
   if (opts.jsonMode) body["response_format"] = { type: "json_object" };
   for (let attempt = 0; ; attempt++) {
     const startedAt = Date.now();
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify(body),
-      signal: opts.signal,
-    });
+    let r: Response;
+    try {
+      r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      });
+    } catch (netErr) {
+      // Abort or socket error: the old code recorded NOTHING here, so a
+      // provider that simply stopped answering looked idle on the dashboard.
+      const msg = netErr instanceof Error ? netErr.message : String(netErr);
+      recordAiUsage(model, task, 0, false);
+      noteFastFailure(msg);
+      throw new Error(`${gemKey ? "Gemini" : "SambaNova"} transport: ${msg}`);
+    }
     if (r.ok) {
       const data = (await r.json()) as {
         choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
@@ -241,6 +270,7 @@ async function callSambaNova(
         throw new Error(`fast-provider empty content: ${JSON.stringify(data.choices?.[0]).slice(0, 300)}`);
       }
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true, Date.now() - startedAt);
+      fastConsecutiveFails = 0;
       return content;
     }
     const retryable = r.status === 502 || r.status === 503;
@@ -250,6 +280,7 @@ async function callSambaNova(
       continue;
     }
     recordAiUsage(model, task, 0, false);
+    noteFastFailure(`HTTP ${r.status}`);
     if (r.status === 429) pauseSambaNova();
     // 402 (billing wall) / 401 (bad key) won't clear in seconds — pause 10
     // min so we don't burn 1000+ doomed calls against a dead account.
@@ -3452,6 +3483,8 @@ router.get("/ai-diag", async (_req, res) => {
 
   out["pausedForMs"] = Math.max(0, sambaPausedUntil - Date.now());
   out["fastTokens"] = fastTokens;
+  out["consecutiveFails"] = fastConsecutiveFails;
+  out["lastFailReason"] = fastLastFailReason;
   res.json(out);
 });
 
@@ -4487,7 +4520,7 @@ router.post("/ai-summary", async (req, res) => {
     // Budgets are per provider (see withTimeout). Gemini has been answering
     // in ~40s under load; rather than wait that out, cut it short and let
     // Groq — historically 2-4s for a summary — actually get a turn.
-    const T_FAST = 18_000, T_GROQ = 18_000, T_GROQ_LAST = 12_000;
+    const T_FAST = 12_000, T_GROQ = 18_000, T_GROQ_LAST = 12_000;
     // Groq Scout → 8b last resort. Scout shares a single rate/pause budget
     // with Deep Dive and pre-warm bursts, so it can be paused/429 even when
     // the 8b model (separate gate) is free — without this fallback, that

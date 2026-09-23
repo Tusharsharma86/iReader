@@ -202,6 +202,7 @@ const FAST_FAIL_LIMIT = 3;
 const FAST_DEAD_PAUSE_MS = 10 * 60 * 1000;
 let fastConsecutiveFails = 0;
 let fastLastFailReason = "";
+let fastLastErrorBody = "";
 function noteFastFailure(reason: string): void {
   fastLastFailReason = reason;
   if (++fastConsecutiveFails >= FAST_FAIL_LIMIT) {
@@ -290,12 +291,16 @@ async function callSambaNova(
       continue;
     }
     recordAiUsage(model, task, 0, false);
+    // The body was thrown away here, so a 429 never told us WHICH quota was
+    // hit (per-minute vs per-day) — the one thing needed to size the gate.
+    const errBody = await r.text().catch(() => "");
+    fastLastErrorBody = `HTTP ${r.status}: ${errBody.slice(0, 1200)}`;
     noteFastFailure(`HTTP ${r.status}`);
     if (r.status === 429) pauseSambaNova();
     // 402 (billing wall) / 401 (bad key) won't clear in seconds — pause 10
     // min so we don't burn 1000+ doomed calls against a dead account.
     else if (r.status === 402 || r.status === 401) { sambaPausedUntil = Date.now() + 10 * 60 * 1000; }
-    throw new Error(`${gemKey ? "Gemini" : "SambaNova"} ${r.status}`);
+    throw new Error(`${gemKey ? "Gemini" : "SambaNova"} ${r.status}: ${errBody.slice(0, 200)}`);
   }
 }
 
@@ -3522,6 +3527,7 @@ router.get("/ai-diag", async (req, res) => {
   out["fastTokens"] = fastTokens;
   out["consecutiveFails"] = fastConsecutiveFails;
   out["lastFailReason"] = fastLastFailReason;
+  out["lastErrorBody"] = fastLastErrorBody;
   res.json(out);
 });
 

@@ -55,13 +55,33 @@ let deepDiveNextSlot = 0;
 let scoutPausedUntil = 0;
 let scoutBgPausedUntil = 0;
 const DEEPDIVE_GATE_INTERVAL_MS = 3000;
-function deepDiveGate(background?: boolean): Promise<void> {
+// Slot gates reserve a future send slot, so a burst pushes the next slot
+// minutes out — and the wait used to be unbounded AND signal-blind, which
+// swallowed every per-provider timeout (the request sat in the queue until
+// the client gave up). Cap the wait instead: past the cap the caller is
+// rejected WITHOUT consuming a slot, so it falls through to the next tier.
+const GATE_MAX_WAIT_FG_MS = 7000;
+const GATE_MAX_WAIT_BG_MS = 30_000;
+function gateWait(wait: number, signal?: AbortSignal): Promise<void> {
+  if (wait <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(new Error("rate-gate-aborted"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, wait);
+    function onAbort() { clearTimeout(timer); reject(new Error("rate-gate-aborted")); }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function gateCap(background?: boolean): number {
+  return background ? GATE_MAX_WAIT_BG_MS : GATE_MAX_WAIT_FG_MS;
+}
+function deepDiveGate(background?: boolean, signal?: AbortSignal): Promise<void> {
   const now = Date.now();
   if (now < (background ? scoutBgPausedUntil : scoutPausedUntil)) return Promise.reject(new Error("rate-gate-paused"));
   const at = Math.max(now, deepDiveNextSlot);
-  deepDiveNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
   const wait = at - now;
-  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+  if (wait > gateCap(background)) return Promise.reject(new Error("rate-gate-busy"));
+  deepDiveNextSlot = at + DEEPDIVE_GATE_INTERVAL_MS;
+  return gateWait(wait, signal);
 }
 function pauseScoutModel(background?: boolean) {
   if (background) scoutBgPausedUntil = Date.now() + 65_000;
@@ -79,15 +99,16 @@ let model8bNextSlot = 0;
 let model8bPausedUntil = 0;
 let model8bBgPausedUntil = 0;
 const MODEL_8B_GATE_MS = 2200;
-function model8bGate(background?: boolean): Promise<void> {
+function model8bGate(background?: boolean, signal?: AbortSignal): Promise<void> {
   const now = Date.now();
   if (now < (background ? model8bBgPausedUntil : model8bPausedUntil)) {
     return Promise.reject(new Error("rate-gate-paused"));
   }
   const at = Math.max(now, model8bNextSlot);
-  model8bNextSlot = at + MODEL_8B_GATE_MS;
   const wait = at - now;
-  return wait > 0 ? new Promise((r) => setTimeout(r, wait)) : Promise.resolve();
+  if (wait > gateCap(background)) return Promise.reject(new Error("rate-gate-busy"));
+  model8bNextSlot = at + MODEL_8B_GATE_MS;
+  return gateWait(wait, signal);
 }
 function pause8bModel(background?: boolean) {
   if (background) model8bBgPausedUntil = Date.now() + 65_000;
@@ -133,15 +154,25 @@ function refillFastTokens(): void {
     fastLastRefill += gained * FAST_RPM_REFILL_MS;
   }
 }
-async function sambaBgGate(background = true): Promise<void> {
+// A reader waits at most this long for a token. Groq answers a summary in
+// 2-4s, so queueing behind the fast provider's refill (4.2s/token) is worse
+// than just falling through to the fallback. The old loop waited forever AND
+// ignored the abort signal, so every per-provider timeout was swallowed here
+// instead of releasing the chain.
+const FAST_FG_MAX_WAIT_MS = 5000;
+async function sambaBgGate(background = true, signal?: AbortSignal): Promise<void> {
   if (!background) {
     // Reader: take a token as soon as one exists. Idle provider => no wait.
+    const deadline = Date.now() + FAST_FG_MAX_WAIT_MS;
     fgWaiting++;
     try {
       for (;;) {
         refillFastTokens();
         if (fastTokens > 0) { fastTokens--; return; }
-        await sleep(Math.min(FAST_RPM_REFILL_MS, Math.max(200, fastLastRefill + FAST_RPM_REFILL_MS - Date.now())));
+        if (signal?.aborted) throw new Error("fast-provider-aborted");
+        const left = deadline - Date.now();
+        if (left <= 0) throw new Error("fast-provider-busy");
+        await sleep(Math.min(left, FAST_RPM_REFILL_MS, Math.max(200, fastLastRefill + FAST_RPM_REFILL_MS - Date.now())));
       }
     } finally { fgWaiting--; }
   }
@@ -173,7 +204,7 @@ async function callSambaNova(
   const key = gemKey || process.env["SAMBANOVA_API_KEY"];
   if (!key) throw new Error("fast-provider key missing");
   if (Date.now() < sambaPausedUntil) throw new Error("fast-provider-paused");
-  await sambaBgGate(!!opts.background);
+  await sambaBgGate(!!opts.background, opts.signal);
   const url = gemKey ? GEMINI_URL : SAMBANOVA_URL;
   const model = gemKey ? GEMINI_MODEL : (opts.model ?? SAMBANOVA_MODEL);
 
@@ -213,8 +244,9 @@ async function callSambaNova(
       return content;
     }
     const retryable = r.status === 502 || r.status === 503;
-    if (retryable && attempt < 1) {
+    if (retryable && attempt < 1 && !opts.signal?.aborted) {
       await new Promise((res) => setTimeout(res, 2000));
+      if (opts.signal?.aborted) throw new Error("fast-provider-aborted");
       continue;
     }
     recordAiUsage(model, task, 0, false);
@@ -236,7 +268,7 @@ async function callGroq(
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
   if (opts.background && bgBudgetExhausted(model)) throw new Error("bg-budget-reserved");
-  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate(opts.background);
+  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate(opts.background, opts.signal);
   else if (model === GROQ_MODEL && Date.now() < (opts.background ? scoutBgPausedUntil : scoutPausedUntil)) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
   let useJsonMode = opts.jsonMode ?? false;
@@ -4806,16 +4838,18 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
         raw = await withTimeout(D_FAST, (signal) =>
           callSambaNova(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background }));
       } else {
-        await deepDiveGate(!!background);
-        raw = await withTimeout(D_GROQ, (signal) =>
-          callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background }));
+        raw = await withTimeout(D_GROQ, async (signal) => {
+          await deepDiveGate(!!background, signal);
+          return callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background });
+        });
       }
     } catch (firstErr) {
       req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
       try {
-        await deepDiveGate(!!background);
-        raw = await withTimeout(D_GROQ, (signal) =>
-          callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background }));
+        raw = await withTimeout(D_GROQ, async (signal) => {
+          await deepDiveGate(!!background, signal);
+          return callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background });
+        });
       } catch {
         // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
         // window — the full 20k-char prompt + 6000-token budget exceeded it

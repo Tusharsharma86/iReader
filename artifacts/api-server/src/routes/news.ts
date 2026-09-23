@@ -3485,7 +3485,7 @@ router.get("/ai-diag", async (req, res) => {
     try {
       const r = await withTimeout(20_000, v.run);
       const txt = await r.text();
-      results[v.name] = { status: r.status, ms: Date.now() - tv, body: txt.slice(0, 300) };
+      results[v.name] = { status: r.status, ms: Date.now() - tv, body: txt.slice(0, 1200) };
     } catch (e) {
       results[v.name] = { ms: Date.now() - tv, error: e instanceof Error ? e.message : String(e) };
     }

@@ -353,6 +353,20 @@ function recordAiUsage(model: string, task: string, tokens: number, ok: boolean,
 // container (dev workflow restarts, autoscale instance reuse). Replit Autoscale
 // instances get a fresh /tmp on cold-start, so this is best-effort persistence
 // — the next user request will trigger a fresh refresh if cache is empty.
+// Per-attempt timeout. A single AbortController shared across a provider
+// chain is a trap: when the primary is slow the timer fires, and every
+// fallback is aborted before it can start — the chain can never rescue the
+// request, which is exactly what it exists for. Each attempt gets its own.
+async function withTimeout<T>(ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await run(ctrl.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Keep-alive self-ping ─────────────────────────────────────────────────────
 // Render free tier spins the container down after ~15 min without inbound
 // traffic; the next visitor then eats a 30-60s cold start. Pinging our own
@@ -4341,8 +4355,10 @@ router.post("/ai-summary", async (req, res) => {
     let sambaNote = "";
     // 30s abort — without it a hung provider held the request until the
     // client gave up (Deep Dive always had one; summaries didn't).
-    const ctrl = new AbortController();
-    const abortTimer = setTimeout(() => ctrl.abort(), 30000);
+    // Budgets are per provider (see withTimeout). Gemini has been answering
+    // in ~40s under load; rather than wait that out, cut it short and let
+    // Groq — historically 2-4s for a summary — actually get a turn.
+    const T_FAST = 18_000, T_GROQ = 18_000, T_GROQ_LAST = 12_000;
     // Groq Scout → 8b last resort. Scout shares a single rate/pause budget
     // with Deep Dive and pre-warm bursts, so it can be paused/429 even when
     // the 8b model (separate gate) is free — without this fallback, that
@@ -4350,42 +4366,41 @@ router.post("/ai-summary", async (req, res) => {
     // SambaNova also failed. Mirrors the /deepdive last-resort tier.
     const groqScoutThenFast = async (): Promise<string> => {
       try {
-        return (await callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+        return (await withTimeout(T_GROQ, (signal) =>
+          callGroq(prompt, maxTokens, { model: GROQ_MODEL, task: "article-summary", jsonMode: true, signal, background: !!background }))) || "{}";
       } catch (scoutErr) {
         const s = scoutErr instanceof Error ? scoutErr.message : String(scoutErr);
         req.log.warn({ err: s }, "ai-summary: Groq Scout failed, falling back to 8b");
         try {
-          return (await callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST, task: "article-summary", jsonMode: true, signal: ctrl.signal, background: !!background })) || "{}";
+          return (await withTimeout(T_GROQ_LAST, (signal) =>
+            callGroq(prompt, maxTokens, { model: GROQ_MODEL_FAST, task: "article-summary", jsonMode: true, signal, background: !!background }))) || "{}";
         } catch (fastErr) {
           const f = fastErr instanceof Error ? fastErr.message : String(fastErr);
           throw new Error(`scout: ${s} || 20b: ${f}`);
         }
       }
     };
-    try {
-      if (hasFastProvider()) {
+    if (hasFastProvider()) {
+      try {
+        raw = (await withTimeout(T_FAST, (signal) =>
+          callSambaNova(prompt, maxTokens, { task: "article-summary", signal, background: !!background }))) || "{}";
+      } catch (sambaErr) {
+        sambaNote = sambaErr instanceof Error ? sambaErr.message : String(sambaErr);
+        // Pre-warm is speculative: never spend Groq's small daily token
+        // budget on it — that budget is the reader's safety net. A skipped
+        // pre-warm just means the article generates on first tap.
+        if (background) throw new Error(`prewarm-skipped: ${sambaNote}`);
+        req.log.warn({ err: sambaNote }, "ai-summary: fast provider failed, falling back to Groq");
         try {
-          raw = (await callSambaNova(prompt, maxTokens, { task: "article-summary", signal: ctrl.signal, background: !!background })) || "{}";
-        } catch (sambaErr) {
-          sambaNote = sambaErr instanceof Error ? sambaErr.message : String(sambaErr);
-          // Pre-warm is speculative: never spend Groq's small daily token
-          // budget on it — that budget is the reader's safety net. A skipped
-          // pre-warm just means the article generates on first tap.
-          if (background) throw new Error(`prewarm-skipped: ${sambaNote}`);
-          req.log.warn({ err: sambaNote }, "ai-summary: fast provider failed, falling back to Groq");
-          try {
-            raw = await groqScoutThenFast();
-          } catch (groqErr) {
-            // Both providers down — report BOTH reasons, not just Groq's.
-            const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
-            throw new Error(`sambanova: ${sambaNote} | groq: ${g}`);
-          }
+          raw = await groqScoutThenFast();
+        } catch (groqErr) {
+          // Both providers down — report BOTH reasons, not just Groq's.
+          const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
+          throw new Error(`sambanova: ${sambaNote} | groq: ${g}`);
         }
-      } else {
-        raw = await groqScoutThenFast();
       }
-    } finally {
-      clearTimeout(abortTimer);
+    } else {
+      raw = await groqScoutThenFast();
     }
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
@@ -4776,41 +4791,42 @@ ${text}
 Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — each storySection body must be ${storyWords}; count your words.`;
 
     // Retry once on transient network failure.
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 90000);
     let raw = "";
+    // SambaNova gpt-oss-120b primary → Groq 120b → Groq gpt-oss-20b
+    // SambaNova free tier is rate-limited SHARED across every caller — pre-warm
+    // fires many of these back-to-back, so background=true routes through
+    // sambaBgGate() (2.5s spacing, ~24 RPM, under the cap). On-demand
+    // opens (background=false, the default) skip the gate — a user
+    // actively waiting on one open shouldn't queue behind a warm burst.
+    // Deep Dive generates far more text, so its budgets are larger — but
+    // still per provider, so a slow primary leaves the fallbacks intact.
+    const D_FAST = 55_000, D_GROQ = 30_000;
     try {
-      // SambaNova gpt-oss-120b primary → Groq 120b → Groq gpt-oss-20b
-      // SambaNova free tier is rate-limited SHARED across every caller — pre-warm
-      // fires many of these back-to-back, so background=true routes through
-      // sambaBgGate() (2.5s spacing, ~24 RPM, under the cap). On-demand
-      // opens (background=false, the default) skip the gate — a user
-      // actively waiting on one open shouldn't queue behind a warm burst.
-      try {
-        if (hasFastProvider()) {
-          raw = await callSambaNova(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
-        } else {
-          await deepDiveGate(!!background);
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
-        }
-      } catch (firstErr) {
-        req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
-        try {
-          await deepDiveGate(!!background);
-          raw = await callGroq(prompt, 6000, { signal: ctrl.signal, temperature: 0.45, task: "deepdive", background: !!background });
-        } catch {
-          // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
-          // window — the full 20k-char prompt + 6000-token budget exceeded it
-          // on every attempt ever made (16/16 errors). Trim the input to the
-          // lead article and cap output so the request actually fits.
-          const trimmed = prompt.length > 9000
-            ? prompt.slice(0, 7000) + "\n\n[additional sources truncated]\n\nRespond with JSON only as specified above."
-            : prompt;
-          raw = await callGroq(trimmed, 2000, { signal: ctrl.signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive", background: !!background });
-        }
+      if (hasFastProvider()) {
+        raw = await withTimeout(D_FAST, (signal) =>
+          callSambaNova(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background }));
+      } else {
+        await deepDiveGate(!!background);
+        raw = await withTimeout(D_GROQ, (signal) =>
+          callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background }));
       }
-    } finally {
-      clearTimeout(t);
+    } catch (firstErr) {
+      req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
+      try {
+        await deepDiveGate(!!background);
+        raw = await withTimeout(D_GROQ, (signal) =>
+          callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background }));
+      } catch {
+        // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
+        // window — the full 20k-char prompt + 6000-token budget exceeded it
+        // on every attempt ever made (16/16 errors). Trim the input to the
+        // lead article and cap output so the request actually fits.
+        const trimmed = prompt.length > 9000
+          ? prompt.slice(0, 7000) + "\n\n[additional sources truncated]\n\nRespond with JSON only as specified above."
+          : prompt;
+        raw = await withTimeout(20_000, (signal) =>
+          callGroq(trimmed, 2000, { signal, temperature: 0.45, model: GROQ_MODEL_FAST, task: "deepdive", background: !!background }));
+      }
     }
     if (!raw) raw = "{}";
 
@@ -5011,22 +5027,33 @@ QUESTION: ${question}
 Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational but precise.`;
 
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 60000);
     let answer = "";
-    try {
-      // SambaNova primary (fast, separate RPM pool) → Groq gpt-oss-20b fallback
-      if (hasFastProvider()) {
-        try { answer = (await callSambaNova(prompt, 600, { signal: ctrl.signal, temperature: 0.5, task: "qna" })).trim(); }
-        catch {
-          try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, task: "qna" })).trim(); }
-          catch { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
+    // One budget per provider — a slow primary must not consume the
+    // fallbacks' time as well.
+    const Q_FAST = 20_000, Q_GROQ = 18_000;
+    if (hasFastProvider()) {
+      try {
+        answer = (await withTimeout(Q_FAST, (signal) =>
+          callSambaNova(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
+      } catch {
+        try {
+          answer = (await withTimeout(Q_GROQ, (signal) =>
+            callGroq(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
+        } catch {
+          answer = (await withTimeout(Q_GROQ, (signal) =>
+            callGroq(prompt, 600, { signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" }))).trim();
         }
-      } else {
-        try { answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
-        catch { await new Promise(r => setTimeout(r, 600)); answer = (await callGroq(prompt, 600, { signal: ctrl.signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" })).trim(); }
       }
-    } finally { clearTimeout(t); }
+    } else {
+      try {
+        answer = (await withTimeout(Q_GROQ, (signal) =>
+          callGroq(prompt, 600, { signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" }))).trim();
+      } catch {
+        await new Promise(r => setTimeout(r, 600));
+        answer = (await withTimeout(Q_GROQ, (signal) =>
+          callGroq(prompt, 600, { signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" }))).trim();
+      }
+    }
     if (!answer) throw new Error("Empty answer");
 
     const entry: AskCacheEntry = { at: Date.now(), answer };

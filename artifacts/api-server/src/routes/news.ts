@@ -141,10 +141,13 @@ function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout
 // Daily request budget. Gemini free tier is a REQUEST-per-day cap (flash-lite
 // 1000/day), so pre-warm must stop well before readers would be locked out.
 // Background gets the first 60%; the rest is reserved for live taps.
-// Conservative: flash-lite documented 1000/day, a full flash model is less.
-// Pre-warm spends only FAST_BG_SHARE of this, so readers keep the remainder.
-const FAST_RPD = process.env["GEMINI_API_KEY"] ? 500 : 12000;
-const FAST_BG_SHARE = 0.6;
+// MEASURED, not assumed. Gemini's 429 names its own quota:
+//   quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier, value: 20
+// Twenty requests PER DAY for gemini-3.6-flash. That cannot be a primary
+// provider, so Groq leads and Gemini is a rescue tier for when Groq is
+// rate-limited. Pre-warm gets none of it — 20/day belongs to live readers.
+const FAST_RPD = process.env["GEMINI_API_KEY"] ? 20 : 12000;
+const FAST_BG_SHARE = process.env["GEMINI_API_KEY"] ? 0 : 0.6;
 function fastDailyBudgetSpent(): boolean {
   const model = process.env["GEMINI_API_KEY"] ? GEMINI_MODEL : SAMBANOVA_MODEL;
   const used = aiUsageByModel[model]?.calls ?? 0;
@@ -223,6 +226,15 @@ const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat
 const GEMINI_MODEL = "gemini-3.6-flash";
 function hasFastProvider(): boolean {
   return Boolean(process.env["GEMINI_API_KEY"] || process.env["SAMBANOVA_API_KEY"]);
+}
+// Is the rescue tier worth a call right now? With only 20 requests a day
+// there is no point spending one while the circuit is open, and none at all
+// on speculative pre-warm.
+function fastRescueAvailable(): boolean {
+  if (!hasFastProvider()) return false;
+  if (Date.now() < sambaPausedUntil) return false;
+  const model = process.env["GEMINI_API_KEY"] ? GEMINI_MODEL : SAMBANOVA_MODEL;
+  return (aiUsageByModel[model]?.calls ?? 0) < FAST_RPD;
 }
 
 async function callSambaNova(
@@ -3546,9 +3558,9 @@ router.get("/ai-usage", (_req, res) => {
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
-    "openai/gpt-oss-120b": "Summaries + Deep Dive fallback (Groq)",
-    "openai/gpt-oss-20b": "Q&A · clustering · last-resort",
-    "gemini-3.5-flash-lite": "Summaries + Deep Dive + Q&A (Gemini)",
+    "openai/gpt-oss-120b": "Summaries + Deep Dive + Q&A (Groq, primary)",
+    "openai/gpt-oss-20b": "Clustering · last-resort",
+    "gemini-3.6-flash": "Rescue only — 20 requests/day (Gemini)",
     "gpt-oss-120b": "Summaries + Deep Dive (SambaNova)",
     "Meta-Llama-3.3-70B-Instruct": "Feed card summaries (SambaNova bulk)",
     "meta-llama/llama-4-scout-17b-16e-instruct": "RETIRED by Groq",
@@ -3556,22 +3568,24 @@ router.get("/ai-usage", (_req, res) => {
   const KNOWN_MODELS = [GEMINI_MODEL, GROQ_MODEL, GROQ_MODEL_FAST];
   // Provider + $/1M tokens, so the dashboard can show spend and group by vendor.
   const PROVIDER: Record<string, { name: string; inRate: number; outRate: number }> = {
-    "gemini-3.5-flash-lite": { name: "Gemini", inRate: 0, outRate: 0 },
+    "gemini-3.6-flash": { name: "Gemini", inRate: 0, outRate: 0 },
     "openai/gpt-oss-120b": { name: "Groq", inRate: 0, outRate: 0 },
     "openai/gpt-oss-20b": { name: "Groq", inRate: 0, outRate: 0 },
     "gpt-oss-120b": { name: "SambaNova", inRate: 0.35, outRate: 0.75 },
     "Meta-Llama-3.3-70B-Instruct": { name: "SambaNova", inRate: 0.60, outRate: 1.20 },
   };
   const TIER: Record<string, string> = {
-    "gemini-3.5-flash-lite": "primary",
-    "openai/gpt-oss-120b": "fallback",
+    "openai/gpt-oss-120b": "primary",
     "openai/gpt-oss-20b": "background",
+    "gemini-3.6-flash": "rescue",
   };
   const allModels = Array.from(new Set([...KNOWN_MODELS, ...Object.keys(aiUsageByModel)]));
   const models = allModels.map((model) => {
     const m = aiUsageByModel[model] ?? { tokens: 0, calls: 0, errors: 0, ms: 0, msCalls: 0, hourly: Array(24).fill(0) as number[], tasks: {} };
     const limit = GROQ_TPD_LIMITS[model] ?? null;
-    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3.5-flash-lite": 1000, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
+    // Gemini's 20/day is not a guess — its own 429 reports
+    // GenerateRequestsPerDayPerProjectPerModel-FreeTier = 20.
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3.6-flash": 20, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     const prov = PROVIDER[model] ?? { name: "—", inRate: 0, outRate: 0 };
     // Assume a 65/35 input/output split — matches observed summary traffic.
@@ -4587,27 +4601,26 @@ router.post("/ai-summary", async (req, res) => {
         }
       }
     };
-    if (hasFastProvider()) {
+    // Groq leads: 2.8s on 120b, 780ms on 20b, 200k tokens/day. Gemini used to
+    // go first as the "fast primary", but its free tier is 20 requests a day,
+    // so every reader paid a doomed call before the real provider got a turn.
+    try {
+      raw = await groqScoutThenFast();
+    } catch (groqErr) {
+      const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
+      // Pre-warm is speculative: never spend the rescue budget on it. A
+      // skipped pre-warm just means the article generates on first tap.
+      if (background) throw new Error(`prewarm-skipped: ${g}`);
+      if (!fastRescueAvailable()) throw new Error(`groq: ${g}`);
+      req.log.warn({ err: g }, "ai-summary: Groq failed, trying the rescue tier");
       try {
         raw = (await withTimeout(T_FAST, (signal) =>
-          callSambaNova(prompt, maxTokens, { task: "article-summary", signal, background: !!background }))) || "{}";
-      } catch (sambaErr) {
-        sambaNote = sambaErr instanceof Error ? sambaErr.message : String(sambaErr);
-        // Pre-warm is speculative: never spend Groq's small daily token
-        // budget on it — that budget is the reader's safety net. A skipped
-        // pre-warm just means the article generates on first tap.
-        if (background) throw new Error(`prewarm-skipped: ${sambaNote}`);
-        req.log.warn({ err: sambaNote }, "ai-summary: fast provider failed, falling back to Groq");
-        try {
-          raw = await groqScoutThenFast();
-        } catch (groqErr) {
-          // Both providers down — report BOTH reasons, not just Groq's.
-          const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
-          throw new Error(`sambanova: ${sambaNote} | groq: ${g}`);
-        }
+          callSambaNova(prompt, maxTokens, { task: "article-summary", signal }))) || "{}";
+      } catch (rescueErr) {
+        // Both providers down — report BOTH reasons, not just Groq's.
+        sambaNote = rescueErr instanceof Error ? rescueErr.message : String(rescueErr);
+        throw new Error(`groq: ${g} | rescue: ${sambaNote}`);
       }
-    } else {
-      raw = await groqScoutThenFast();
     }
 
     let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
@@ -5009,22 +5022,16 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     // still per provider, so a slow primary leaves the fallbacks intact.
     const D_FAST = 55_000, D_GROQ = 30_000;
     try {
-      if (hasFastProvider()) {
-        raw = await withTimeout(D_FAST, (signal) =>
-          callSambaNova(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background }));
-      } else {
-        raw = await withTimeout(D_GROQ, async (signal) => {
-          await deepDiveGate(!!background, signal);
-          return callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background });
-        });
-      }
+      raw = await withTimeout(D_GROQ, async (signal) => {
+        await deepDiveGate(!!background, signal);
+        return callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background });
+      });
     } catch (firstErr) {
-      req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: primary failed, falling back to Groq");
+      req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: Groq failed, trying the rescue tier then 20b");
       try {
-        raw = await withTimeout(D_GROQ, async (signal) => {
-          await deepDiveGate(!!background, signal);
-          return callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background });
-        });
+        if (!fastRescueAvailable()) throw firstErr;
+        raw = await withTimeout(D_FAST, (signal) =>
+          callSambaNova(prompt, 6000, { signal, temperature: 0.45, task: "deepdive" }));
       } catch {
         // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
         // window — the full 20k-char prompt + 6000-token budget exceeded it
@@ -5240,27 +5247,19 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
     // One budget per provider — a slow primary must not consume the
     // fallbacks' time as well.
     const Q_FAST = 20_000, Q_GROQ = 18_000;
-    if (hasFastProvider()) {
+    // Groq first (see ai-summary): the rescue tier has 20 requests a day.
+    try {
+      answer = (await withTimeout(Q_GROQ, (signal) =>
+        callGroq(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
+    } catch {
       try {
+        answer = (await withTimeout(Q_GROQ, (signal) =>
+          callGroq(prompt, 600, { signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" }))).trim();
+      } catch (groqErr) {
+        const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
+        if (!fastRescueAvailable()) throw new Error(`groq: ${g}`);
         answer = (await withTimeout(Q_FAST, (signal) =>
           callSambaNova(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
-      } catch {
-        try {
-          answer = (await withTimeout(Q_GROQ, (signal) =>
-            callGroq(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
-        } catch {
-          answer = (await withTimeout(Q_GROQ, (signal) =>
-            callGroq(prompt, 600, { signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" }))).trim();
-        }
-      }
-    } else {
-      try {
-        answer = (await withTimeout(Q_GROQ, (signal) =>
-          callGroq(prompt, 600, { signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" }))).trim();
-      } catch {
-        await new Promise(r => setTimeout(r, 600));
-        answer = (await withTimeout(Q_GROQ, (signal) =>
-          callGroq(prompt, 600, { signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" }))).trim();
       }
     }
     if (!answer) throw new Error("Empty answer");

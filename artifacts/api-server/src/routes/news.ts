@@ -3669,13 +3669,53 @@ router.get("/ai-diag", async (req, res) => {
     lastError: mistralLastErrorBody || null,
   };
   if (full && hasBulkProvider()) {
+    const bulkOut = out["bulk"] as Record<string, unknown>;
+    const mKey = process.env["MISTRAL_API_KEY"] ?? "";
+    bulkOut["keyLen"] = mKey.length;
+
+    // Does the KEY work, independently of inference quota? GET /v1/models does
+    // not consume quota, so a 200 here next to a 429 on chat/completions means
+    // auth is fine and the plan simply has no allowance — the same split that
+    // showed Gemini's model was dead rather than our transport.
+    const tm = Date.now();
+    try {
+      const r = await withTimeout(15_000, (signal) =>
+        fetch("https://api.mistral.ai/v1/models", {
+          headers: { Authorization: `Bearer ${mKey}` }, signal,
+        }));
+      const body = (await r.json()) as { data?: Array<{ id?: string }>; message?: string };
+      const ids = (body.data ?? []).map((m) => m.id ?? "");
+      bulkOut["listModels"] = {
+        status: r.status, ms: Date.now() - tm,
+        count: ids.length,
+        configuredModelExists: ids.includes(MISTRAL_MODEL),
+        sample: ids.filter((i) => i.includes("small") || i.includes("medium") || i.includes("large") || i.includes("ministral")).slice(0, 12),
+        error: r.ok ? null : String(body.message ?? "").slice(0, 200),
+      };
+    } catch (e) {
+      bulkOut["listModels"] = { ms: Date.now() - tm, error: e instanceof Error ? e.message : String(e) };
+    }
+
+    // Raw completion attempt, keeping the rate-limit headers — they carry the
+    // account's actual ceilings, which the public docs disagree about.
     const tb = Date.now();
     try {
-      const txt = await withTimeout(20_000, (signal) =>
-        callMistral("Reply with the single word: ok", 16, { signal, task: "diag" }));
-      (out["bulk"] as Record<string, unknown>)["probe"] = { ms: Date.now() - tb, content: txt.slice(0, 80) };
+      const r = await withTimeout(20_000, (signal) =>
+        fetch(MISTRAL_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${mKey}` },
+          body: JSON.stringify({
+            model: MISTRAL_MODEL, max_tokens: 16, temperature: 0.3,
+            messages: [{ role: "user", content: "Reply with the single word: ok" }],
+          }),
+          signal,
+        }));
+      const txt = await r.text();
+      const headers: Record<string, string> = {};
+      r.headers.forEach((v, k) => { if (/ratelimit|retry-after/i.test(k)) headers[k] = v; });
+      bulkOut["probe"] = { status: r.status, ms: Date.now() - tb, body: txt.slice(0, 400), rateHeaders: headers };
     } catch (e) {
-      (out["bulk"] as Record<string, unknown>)["probe"] = { ms: Date.now() - tb, error: e instanceof Error ? e.message : String(e) };
+      bulkOut["probe"] = { ms: Date.now() - tb, error: e instanceof Error ? e.message : String(e) };
     }
   }
   out["lastErrorBody"] = fastLastErrorBody;

@@ -12,6 +12,36 @@ const router: IRouter = Router();
 // ── AI inference providers ──────────────────────────────────────────────────
 // Groq (LPU) fallback. SambaNova (RDU) primary when key present.
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+// ── Mistral: the bulk tier ──────────────────────────────────────────────────
+// Groq's free tier is 200k tokens a DAY shared across summaries, clustering,
+// enrichment and Deep Dive, and one Briefing build alone costs ~44k of it.
+// Mistral's free Experiment tier is ~1B tokens a MONTH (~33M/day) at 1 request
+// per second — three orders of magnitude more budget, but a hard concurrency
+// of one. So: Mistral pays for everything high-volume, and Groq's small, fast
+// budget is kept for whatever a reader is actually waiting on.
+// NOTE: the Experiment tier trains on your data and is documented for
+// evaluation rather than production. Set MISTRAL_API_KEY only if that is fine.
+const MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions";
+const MISTRAL_MODEL = process.env["MISTRAL_MODEL"] || "mistral-small-latest";
+// 1 req/sec on the free tier. 1100ms spacing leaves headroom for clock skew.
+const MISTRAL_GATE_MS = 1100;
+let mistralNextSlot = 0;
+let mistralPausedUntil = 0;
+let mistralLastErrorBody = "";
+function hasBulkProvider(): boolean { return Boolean(process.env["MISTRAL_API_KEY"]); }
+function mistralGate(background?: boolean, signal?: AbortSignal): Promise<void> {
+  const now = Date.now();
+  if (now < mistralPausedUntil) return Promise.reject(new Error("mistral-paused"));
+  const at = Math.max(now, mistralNextSlot);
+  const wait = at - now;
+  // Same bounded-wait contract as the Groq gates: past the cap the caller is
+  // rejected WITHOUT taking a slot, so it falls through to Groq rather than
+  // queueing behind a long bulk run.
+  if (wait > gateCap(background)) return Promise.reject(new Error("mistral-busy"));
+  mistralNextSlot = at + MISTRAL_GATE_MS;
+  return gateWait(wait, signal);
+}
+
 const SAMBANOVA_URL = "https://api.sambanova.ai/v1/chat/completions";
 // Llama-4 Scout was RETIRED by Groq (404 model_not_found, confirmed
 // 2026-08-20). gpt-oss-120b is Groq's only remaining large model — same
@@ -316,6 +346,88 @@ async function callSambaNova(
   }
 }
 
+async function callMistral(
+  prompt: string,
+  maxTokens: number,
+  opts: { temperature?: number; signal?: AbortSignal; model?: string; task?: string; background?: boolean; jsonMode?: boolean } = {},
+): Promise<string> {
+  const key = process.env["MISTRAL_API_KEY"];
+  if (!key) throw new Error("MISTRAL_API_KEY missing");
+  const model = opts.model ?? MISTRAL_MODEL;
+  const task = opts.task ?? "other";
+  await mistralGate(opts.background, opts.signal);
+  let useJsonMode = opts.jsonMode ?? false;
+  for (let attempt = 0; ; attempt++) {
+    const body: Record<string, unknown> = {
+      model,
+      max_tokens: maxTokens,
+      temperature: opts.temperature ?? 0.3,
+      messages: [{ role: "user", content: prompt }],
+    };
+    if (useJsonMode) body["response_format"] = { type: "json_object" };
+    const startedAt = Date.now();
+    let r: Response;
+    try {
+      r = await fetch(MISTRAL_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      });
+    } catch (netErr) {
+      const msg = netErr instanceof Error ? netErr.message : String(netErr);
+      recordAiUsage(model, task, 0, false);
+      throw new Error(`Mistral transport: ${msg}`);
+    }
+    if (r.ok) {
+      const data = (await r.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+        usage?: { total_tokens?: number };
+      };
+      const content = data.choices?.[0]?.message?.content ?? "";
+      if (!content.trim()) {
+        recordAiUsage(model, task, data.usage?.total_tokens ?? 0, false);
+        throw new Error("Mistral empty content");
+      }
+      recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true, Date.now() - startedAt);
+      return content;
+    }
+    // Not every model accepts response_format — same forgiving retry as Groq.
+    if (r.status === 400 && useJsonMode) { useJsonMode = false; continue; }
+    const retryable = r.status === 502 || r.status === 503;
+    if (retryable && attempt < 1 && !opts.signal?.aborted) {
+      await new Promise((res) => setTimeout(res, 2000));
+      continue;
+    }
+    recordAiUsage(model, task, 0, false);
+    const errBody = await r.text().catch(() => "");
+    mistralLastErrorBody = `HTTP ${r.status}: ${errBody.replace(/\s+/g, " ").slice(0, 800)}`;
+    // 429 = per-second ceiling; short pause. 401/402 = key or billing, which
+    // will not clear in seconds, so back off long rather than burn the chain.
+    if (r.status === 429) mistralPausedUntil = Date.now() + 20_000;
+    else if (r.status === 401 || r.status === 402) mistralPausedUntil = Date.now() + 10 * 60 * 1000;
+    throw new Error(`Mistral ${r.status}: ${errBody.replace(/\s+/g, " ").slice(0, 200)}`);
+  }
+}
+
+// Bulk work: spend Mistral's large monthly budget first, fall back to Groq.
+// Used by every background/high-volume job so Groq's 200k/day stays available
+// for whatever a reader is waiting on.
+async function callBulk(
+  prompt: string,
+  maxTokens: number,
+  opts: { temperature?: number; signal?: AbortSignal; model?: string; task?: string; background?: boolean; jsonMode?: boolean } = {},
+): Promise<string> {
+  if (hasBulkProvider()) {
+    try {
+      // `model` names a Groq model at these call sites — let Mistral pick its own.
+      const { model: _groqModel, ...rest } = opts;
+      return await callMistral(prompt, maxTokens, rest);
+    } catch { /* fall through to Groq */ }
+  }
+  return callGroq(prompt, maxTokens, opts);
+}
+
 async function callGroq(
   prompt: string,
   maxTokens: number,
@@ -398,6 +510,9 @@ async function callGroq(
 // Real limits confirmed from Groq's own 429 body (2026-08-20):
 // gpt-oss-20b TPD is 200k, not the 500k previously assumed.
 const GROQ_TPD_LIMITS: Record<string, number> = {
+  // Mistral's free tier is ~1B tokens a MONTH; this is the daily share, so the
+  // dashboard bar reads like the others. 1 req/sec caps requests at 86400/day.
+  [MISTRAL_MODEL]: 33_000_000,
   "openai/gpt-oss-20b": 200000,
   "openai/gpt-oss-120b": 200000,
   // SambaNova (per-model TPD; free tier 200k — dev tier is far higher, so
@@ -1737,7 +1852,7 @@ Rules:
 - CRITICAL: The same type of event happening in DIFFERENT countries = DIFFERENT stories. E.g. "Australia bans social media for kids" and "Canada proposes social media ban for kids" are TWO separate stories — do NOT group them together just because the topic is similar.
 - Return JSON ONLY, no prose:
 {"groups":[{"indices":[0,3]},{"indices":[1]},{"indices":[2,5,7]}]}`;
-    const text = await callGroq(prompt, 700, { model: GROQ_MODEL_FAST, task: "clustering" });
+    const text = await callBulk(prompt, 700, { model: GROQ_MODEL_FAST, task: "clustering" });
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { groups?: { indices?: number[] }[] };
     if (!Array.isArray(parsed?.groups) || parsed.groups.length === 0) throw new Error("empty AI groups");
     const idToCluster = new Map<string, number>();
@@ -1824,7 +1939,7 @@ ${lines}`;
     // never burst. Feed builds use foreground=true: clusterEnrichmentAwait's
     // 3-slot concurrency is the burst control there, and waiting 4.5s × N
     // clusters inside a build defeats the point of awaiting.
-    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_ENRICH, task: "cluster-enrich", background: !foreground })).replace(/```json|```/g, "").trim();
+    const raw = (await callBulk(prompt, 160, { model: GROQ_MODEL_ENRICH, task: "cluster-enrich", background: !foreground })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
     const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 110) : "";
@@ -1905,12 +2020,12 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
     let rawText: string;
     if (hasFastProvider()) {
       try {
-        rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+        rawText = await callBulk(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
       } catch {
-        rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+        rawText = await callBulk(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
       }
     } else {
-      rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+      rawText = await callBulk(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
     }
     const text = rawText.trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
@@ -2066,7 +2181,7 @@ async function generateThemeAssignments(topic: string, untagged: NewsDataArticle
 ${lines}
 
 Return JSON ONLY: {"a":[{"i":0,"t":"Apple"},{"i":1,"t":"Quantum Computing"},{"i":2,"t":"none"}]}`;
-    const text = await callGroq(prompt, 800, { model: GROQ_MODEL_FAST, task: "theme-assign", background: true });
+    const text = await callBulk(prompt, 800, { model: GROQ_MODEL_FAST, task: "theme-assign", background: true });
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { a?: { i?: number; t?: string }[] };
     const idToTheme = new Map<string, string>();
     for (const e of parsed.a ?? []) {
@@ -2147,7 +2262,7 @@ async function generateThemeSummary(key: string, theme: string, arts: NewsDataAr
   try {
     const lines = arts.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 100))}`).join("\n");
     const prompt = `These articles all relate to the topic "${theme}" but are DIFFERENT stories. Summarise the current state of "${theme}" coverage in ONE neutral sentence of AT MOST 20 words. Capture WHAT'S HAPPENING ACROSS the stories (multiple angles, recurring entities, key developments) — NOT one story. Use ONLY facts stated below — do not add outside knowledge, and for anyone's title/role use only what's stated here, not your own assumption of who currently holds it. Return JSON ONLY: {"summary":"..."}\n\n${lines}`;
-    const raw = (await callGroq(prompt, 120, { model: GROQ_MODEL_ENRICH, task: "theme-summary", background: true })).replace(/```json|```/g, "").trim();
+    const raw = (await callBulk(prompt, 120, { model: GROQ_MODEL_ENRICH, task: "theme-summary", background: true })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { summary?: string }) : {};
     const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : "")).split(/\s+/).slice(0, 20).join(" ");
@@ -2716,7 +2831,7 @@ Return JSON only:
     aiCallsToday++;
     console.log(`AI call #${aiCallsToday} today for ${topic}`);
 
-    const text = await callGroq(prompt, 900, { model: GROQ_MODEL_FAST, task: "clustering" });
+    const text = await callBulk(prompt, 900, { model: GROQ_MODEL_FAST, task: "clustering" });
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -3424,7 +3539,13 @@ router.get("/cron/status", (_req, res) => {
 router.get("/ai-diag", async (req, res) => {
   const full = req.query["full"] === "1";
   const key = process.env["GEMINI_API_KEY"];
-  if (!key) { res.json({ ok: false, reason: "GEMINI_API_KEY not set" }); return; }
+  if (!key) {
+    res.json({
+      ok: false, reason: "GEMINI_API_KEY not set",
+      bulk: { configured: hasBulkProvider(), model: MISTRAL_MODEL, lastError: mistralLastErrorBody || null },
+    });
+    return;
+  }
   const out: Record<string, unknown> = { model: GEMINI_MODEL, keyLen: key.length };
 
   // 1. Can we list models, and is GEMINI_MODEL among them?
@@ -3541,6 +3662,22 @@ router.get("/ai-diag", async (req, res) => {
   out["fastTokens"] = fastTokens;
   out["consecutiveFails"] = fastConsecutiveFails;
   out["lastFailReason"] = fastLastFailReason;
+  out["bulk"] = {
+    configured: hasBulkProvider(),
+    model: MISTRAL_MODEL,
+    pausedForMs: Math.max(0, mistralPausedUntil - Date.now()),
+    lastError: mistralLastErrorBody || null,
+  };
+  if (full && hasBulkProvider()) {
+    const tb = Date.now();
+    try {
+      const txt = await withTimeout(20_000, (signal) =>
+        callMistral("Reply with the single word: ok", 16, { signal, task: "diag" }));
+      (out["bulk"] as Record<string, unknown>)["probe"] = { ms: Date.now() - tb, content: txt.slice(0, 80) };
+    } catch (e) {
+      (out["bulk"] as Record<string, unknown>)["probe"] = { ms: Date.now() - tb, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
   out["lastErrorBody"] = fastLastErrorBody;
   res.json(out);
 });
@@ -3558,23 +3695,28 @@ router.get("/ai-usage", (_req, res) => {
     clustering: "AI clustering", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
-    "openai/gpt-oss-120b": "Summaries + Deep Dive + Q&A (Groq, primary)",
+    "openai/gpt-oss-120b": "Summaries + Deep Dive + Q&A (Groq)",
     "openai/gpt-oss-20b": "Clustering · last-resort",
     "gemini-3.6-flash": "Rescue only — 20 requests/day (Gemini)",
+    [MISTRAL_MODEL]: "Bulk tier — summaries, clustering, enrichment (Mistral)",
     "gpt-oss-120b": "Summaries + Deep Dive (SambaNova)",
     "Meta-Llama-3.3-70B-Instruct": "Feed card summaries (SambaNova bulk)",
     "meta-llama/llama-4-scout-17b-16e-instruct": "RETIRED by Groq",
   };
-  const KNOWN_MODELS = [GEMINI_MODEL, GROQ_MODEL, GROQ_MODEL_FAST];
+  const KNOWN_MODELS = hasBulkProvider()
+    ? [MISTRAL_MODEL, GROQ_MODEL, GROQ_MODEL_FAST, GEMINI_MODEL]
+    : [GEMINI_MODEL, GROQ_MODEL, GROQ_MODEL_FAST];
   // Provider + $/1M tokens, so the dashboard can show spend and group by vendor.
   const PROVIDER: Record<string, { name: string; inRate: number; outRate: number }> = {
     "gemini-3.6-flash": { name: "Gemini", inRate: 0, outRate: 0 },
+    [MISTRAL_MODEL]: { name: "Mistral", inRate: 0, outRate: 0 },
     "openai/gpt-oss-120b": { name: "Groq", inRate: 0, outRate: 0 },
     "openai/gpt-oss-20b": { name: "Groq", inRate: 0, outRate: 0 },
     "gpt-oss-120b": { name: "SambaNova", inRate: 0.35, outRate: 0.75 },
     "Meta-Llama-3.3-70B-Instruct": { name: "SambaNova", inRate: 0.60, outRate: 1.20 },
   };
   const TIER: Record<string, string> = {
+    [MISTRAL_MODEL]: "bulk",
     "openai/gpt-oss-120b": "primary",
     "openai/gpt-oss-20b": "background",
     "gemini-3.6-flash": "rescue",
@@ -3585,7 +3727,7 @@ router.get("/ai-usage", (_req, res) => {
     const limit = GROQ_TPD_LIMITS[model] ?? null;
     // Gemini's 20/day is not a guess — its own 429 reports
     // GenerateRequestsPerDayPerProjectPerModel-FreeTier = 20.
-    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3.6-flash": 20, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3.6-flash": 20, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000, [MISTRAL_MODEL]: 86400 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     const prov = PROVIDER[model] ?? { name: "—", inRate: 0, outRate: 0 };
     // Assume a 65/35 input/output split — matches observed summary traffic.
@@ -4579,7 +4721,7 @@ router.post("/ai-summary", async (req, res) => {
     // Budgets are per provider (see withTimeout). Gemini has been answering
     // in ~40s under load; rather than wait that out, cut it short and let
     // Groq — historically 2-4s for a summary — actually get a turn.
-    const T_FAST = 12_000, T_GROQ = 18_000, T_GROQ_LAST = 12_000;
+    const T_BULK = 20_000, T_FAST = 12_000, T_GROQ = 18_000, T_GROQ_LAST = 12_000;
     // Groq Scout → 8b last resort. Scout shares a single rate/pause budget
     // with Deep Dive and pre-warm bursts, so it can be paused/429 even when
     // the 8b model (separate gate) is free — without this fallback, that
@@ -4601,11 +4743,21 @@ router.post("/ai-summary", async (req, res) => {
         }
       }
     };
-    // Groq leads: 2.8s on 120b, 780ms on 20b, 200k tokens/day. Gemini used to
-    // go first as the "fast primary", but its free tier is 20 requests a day,
-    // so every reader paid a doomed call before the real provider got a turn.
+    // Order is by how much budget each tier actually has. Mistral: ~1B tokens a
+    // month. Groq: 200k a day, and one Briefing build costs ~44k of it. Gemini:
+    // 20 requests a day, so it is a last resort, not a primary.
     try {
-      raw = await groqScoutThenFast();
+      if (hasBulkProvider()) {
+        try {
+          raw = (await withTimeout(T_BULK, (signal) =>
+            callMistral(prompt, maxTokens, { task: "article-summary", jsonMode: true, signal, background: !!background }))) || "{}";
+        } catch (bulkErr) {
+          req.log.warn({ err: bulkErr instanceof Error ? bulkErr.message : String(bulkErr) }, "ai-summary: bulk tier failed, falling back to Groq");
+          raw = await groqScoutThenFast();
+        }
+      } else {
+        raw = await groqScoutThenFast();
+      }
     } catch (groqErr) {
       const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
       // Pre-warm is speculative: never spend the rescue budget on it. A
@@ -5027,11 +5179,16 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
         return callGroq(prompt, 6000, { signal, temperature: 0.45, task: "deepdive", background: !!background });
       });
     } catch (firstErr) {
-      req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: Groq failed, trying the rescue tier then 20b");
+      req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: Groq failed, trying bulk then rescue then 20b");
       try {
-        if (!fastRescueAvailable()) throw firstErr;
-        raw = await withTimeout(D_FAST, (signal) =>
-          callSambaNova(prompt, 6000, { signal, temperature: 0.45, task: "deepdive" }));
+        if (hasBulkProvider()) {
+          raw = await withTimeout(D_GROQ, (signal) =>
+            callMistral(prompt, 6000, { signal, temperature: 0.45, task: "deepdive" }));
+        } else {
+          if (!fastRescueAvailable()) throw firstErr;
+          raw = await withTimeout(D_FAST, (signal) =>
+            callSambaNova(prompt, 6000, { signal, temperature: 0.45, task: "deepdive" }));
+        }
       } catch {
         // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
         // window — the full 20k-char prompt + 6000-token budget exceeded it
@@ -5257,9 +5414,14 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
           callGroq(prompt, 600, { signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" }))).trim();
       } catch (groqErr) {
         const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
-        if (!fastRescueAvailable()) throw new Error(`groq: ${g}`);
-        answer = (await withTimeout(Q_FAST, (signal) =>
-          callSambaNova(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
+        if (hasBulkProvider()) {
+          answer = (await withTimeout(Q_GROQ, (signal) =>
+            callMistral(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
+        } else {
+          if (!fastRescueAvailable()) throw new Error(`groq: ${g}`);
+          answer = (await withTimeout(Q_FAST, (signal) =>
+            callSambaNova(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
+        }
       }
     }
     if (!answer) throw new Error("Empty answer");

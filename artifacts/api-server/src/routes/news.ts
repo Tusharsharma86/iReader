@@ -4578,6 +4578,13 @@ function aiPrompt(
     ? `Published: ${new Date(opts.publishedAt).toDateString()}\n`
     : `Published: unknown — do not assume a date\n`;
   const titlesRule = ' Use ONLY the exact title/status (e.g. "President", "former President", "CEO") the article itself gives each person — never your own assumed knowledge of who currently holds a role, which may predate this article.';
+  // The "be specific, give exact figures" rule below was actively CAUSING
+  // fabrication: handed an article with no numbers in it, models invented them
+  // to comply. Measured 2026-10-06 on an ECB story whose only figure was "two
+  // percent" — ministral-8b produced rates of 5.1/5.3/6.1, and gpt-oss-120b
+  // invented a EUR/USD rate of 1.07 in five of six runs. Specificity must never
+  // outrank grounding, so this rule is stated last and marked as overriding.
+  const groundingRule = ' NEVER introduce a number, date, percentage, price, or statistic that does not appear in the article. If the article gives no figure, write the claim without one — "energy prices fell" is correct; "energy prices fell 12%" when the article states no percentage is a fabrication. This rule OVERRIDES the instruction to be specific.';
   // Token budget = ~1.6x word target, plus 200 for bullets + JSON overhead.
   const summaryTokens = Math.round(maxWords * 1.6) + 250;
   switch (type) {
@@ -4595,6 +4602,7 @@ Rules:
 - Be specific: named parties, exact figures, dates, places. No filler.
 - Neutral tone. No bullets, no markdown inside the strings.
 -${titlesRule}
+-${groundingRule}
 
 ${dateLine}Article: ${text}`,
       };
@@ -4608,7 +4616,7 @@ ${dateLine}Article: ${text}`,
         maxTokens: 300,
         prompt: `${toneInstruction} Return ONLY valid JSON:
 {"eli5":"<explanation in 80-100 words, simple language, no jargon>"}
-(${titlesRule.trim()})
+(${titlesRule.trim()} ${groundingRule.trim()})
 ${dateLine}Article: ${text}`,
       };
     }
@@ -4631,6 +4639,7 @@ Editorial rules:
 - Avoid generic AI phrasing ("in a significant development", "this comes as", "it remains to be seen") — write like a human editor, not a template.
 - "bullets" are NOT a compressed rehash of the summary — each one should surface a distinct concrete detail (a figure, a quote, a name, a next step) that a skimming reader would want even if they only read the bullets.
 -${titlesRule}
+-${groundingRule}
 
 Hard rules:
 - "summary" MUST be ${wordRange} words across ${paraCount} paragraphs separated by \\n\\n.
@@ -4767,7 +4776,7 @@ router.post("/ai-summary", async (req, res) => {
   // v6 — added publish-date anchor + titles/office grounding rule (same fix
   // as Deep Dive v19) — this prompt had ZERO date context, worse than Deep
   // Dive which at least got a headline. Bump invalidates stale caches.
-  const cacheKey = `${url}:${type}:v6:${maxWords ?? 'd'}:${keyPoints ?? 'd'}:${eli5Tone ?? 'd'}`;
+  const cacheKey = `${url}:${type}:v7:${maxWords ?? 'd'}:${keyPoints ?? 'd'}:${eli5Tone ?? 'd'}`;
   const hashKey = createHash("md5").update(cacheKey).digest("hex");
   const diskPath = `/tmp/ai-summary-${hashKey}.json`;
 

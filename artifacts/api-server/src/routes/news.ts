@@ -22,9 +22,15 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 // NOTE: the Experiment tier trains on your data and is documented for
 // evaluation rather than production. Set MISTRAL_API_KEY only if that is fine.
 const MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions";
-const MISTRAL_MODEL = process.env["MISTRAL_MODEL"] || "mistral-small-latest";
-// 1 req/sec on the free tier. 1100ms spacing leaves headroom for clock skew.
-const MISTRAL_GATE_MS = 1100;
+// Free mode allocates limits per organization AND per model, and the headline
+// models get nothing. Measured from x-ratelimit-limit-req-minute (2026-10-06):
+//   mistral-small-latest    0/min     mistral-medium-latest  0/min
+//   ministral-8b-latest   188/min     ministral-3b-latest  750/min
+// So the usable free model is ministral-8b: smaller than gpt-oss-120b, but it
+// is the one with throughput, which is the whole point of the bulk tier.
+const MISTRAL_MODEL = process.env["MISTRAL_MODEL"] || "ministral-8b-latest";
+// 188 req/min measured => 400ms spacing is ~150/min, a safe margin under it.
+const MISTRAL_GATE_MS = 400;
 let mistralNextSlot = 0;
 let mistralPausedUntil = 0;
 let mistralLastErrorBody = "";
@@ -510,9 +516,6 @@ async function callGroq(
 // Real limits confirmed from Groq's own 429 body (2026-08-20):
 // gpt-oss-20b TPD is 200k, not the 500k previously assumed.
 const GROQ_TPD_LIMITS: Record<string, number> = {
-  // Mistral's free tier is ~1B tokens a MONTH; this is the daily share, so the
-  // dashboard bar reads like the others. 1 req/sec caps requests at 86400/day.
-  [MISTRAL_MODEL]: 33_000_000,
   "openai/gpt-oss-20b": 200000,
   "openai/gpt-oss-120b": 200000,
   // SambaNova (per-model TPD; free tier 200k — dev tier is far higher, so
@@ -3790,7 +3793,7 @@ router.get("/ai-usage", (_req, res) => {
     const limit = GROQ_TPD_LIMITS[model] ?? null;
     // Gemini's 20/day is not a guess — its own 429 reports
     // GenerateRequestsPerDayPerProjectPerModel-FreeTier = 20.
-    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3.6-flash": 20, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000, [MISTRAL_MODEL]: 86400 };
+    const REQ_LIMITS: Record<string, number> = { "openai/gpt-oss-20b": 14400, "openai/gpt-oss-120b": 1000, "gemini-3.6-flash": 20, "gpt-oss-120b": 12000, "Meta-Llama-3.3-70B-Instruct": 48000, [MISTRAL_MODEL]: 188 * 60 * 24 };
     const REQ_LIMIT = REQ_LIMITS[model] ?? 1000;
     const prov = PROVIDER[model] ?? { name: "—", inRate: 0, outRate: 0 };
     // Assume a 65/35 input/output split — matches observed summary traffic.

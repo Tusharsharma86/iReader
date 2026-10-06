@@ -3696,6 +3696,29 @@ router.get("/ai-diag", async (req, res) => {
       bulkOut["listModels"] = { ms: Date.now() - tm, error: e instanceof Error ? e.message : String(e) };
     }
 
+    // Free mode reported x-ratelimit-limit-req-minute: 0 for mistral-small.
+    // Limits are per organization AND per model, so sweep a few cheaper ones:
+    // if any returns non-zero we have a usable free bulk tier after all.
+    const mCandidates = ["ministral-3b-latest", "ministral-8b-latest", "open-mistral-nemo", "mistral-medium-latest"];
+    const mSweep: Record<string, unknown> = {};
+    for (const m of mCandidates) {
+      const tc = Date.now();
+      try {
+        const r = await withTimeout(12_000, (signal) => fetch(MISTRAL_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${mKey}` },
+          body: JSON.stringify({ model: m, max_tokens: 16, temperature: 0.3, messages: [{ role: "user", content: "Reply with the single word: ok" }] }),
+          signal,
+        }));
+        const txt = await r.text();
+        const lim = r.headers.get("x-ratelimit-limit-req-minute");
+        mSweep[m] = { status: r.status, ms: Date.now() - tc, limitReqMinute: lim, body: txt.slice(0, 160) };
+      } catch (e) {
+        mSweep[m] = { ms: Date.now() - tc, error: e instanceof Error ? e.message : String(e) };
+      }
+    }
+    bulkOut["modelSweep"] = mSweep;
+
     // Raw completion attempt, keeping the rate-limit headers — they carry the
     // account's actual ceilings, which the public docs disagree about.
     const tb = Date.now();

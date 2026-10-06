@@ -34,6 +34,7 @@ const MISTRAL_GATE_MS = 400;
 let mistralNextSlot = 0;
 let mistralPausedUntil = 0;
 let mistralLastErrorBody = "";
+let mistralLastRawSample = "";
 function hasBulkProvider(): boolean { return Boolean(process.env["MISTRAL_API_KEY"]); }
 function mistralGate(background?: boolean, signal?: AbortSignal): Promise<void> {
   const now = Date.now();
@@ -396,6 +397,7 @@ async function callMistral(
         throw new Error("Mistral empty content");
       }
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true, Date.now() - startedAt);
+      if (task === "article-summary") mistralLastRawSample = content.slice(0, 500);
       return content;
     }
     // Not every model accepts response_format — same forgiving retry as Groq.
@@ -3670,6 +3672,7 @@ router.get("/ai-diag", async (req, res) => {
     model: MISTRAL_MODEL,
     pausedForMs: Math.max(0, mistralPausedUntil - Date.now()),
     lastError: mistralLastErrorBody || null,
+    lastRawSample: mistralLastRawSample || null,
   };
   if (full && hasBulkProvider()) {
     const bulkOut = out["bulk"] as Record<string, unknown>;
@@ -4501,6 +4504,23 @@ router.get("/article/prefetch", (req, res) => {
 // Accepts paragraphs + optional type ("summary" | "fiveWs" | "eli5").
 // Cached 24 h per url+type so repeat taps are instant.
 type AiSummaryEntry = { at: number; bullets: string[]; summary: string; fiveWs: string[]; eli5: string };
+// Forgiving parse shared by the usability guard and the response builder, so
+// "is this answer good enough to serve?" is decided by exactly the same code
+// that builds what gets served. Strips code fences, pulls out the first {...}
+// block, and escapes raw newlines that slipped inside string values.
+function parseSummaryJson(raw: string): { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } {
+  const cleaned = (raw ?? "").replace(/```json|```/g, "").trim();
+  try { return JSON.parse(cleaned); } catch { /* try harder below */ }
+  try {
+    const m = cleaned.match(/\{[\s\S]*\}/);
+    if (m) {
+      const safe = m[0].replace(/("(?:[^"\\]|\\.)*")|(\r?\n)/g, (_full, str) => (str ? str : "\\n"));
+      return JSON.parse(safe);
+    }
+  } catch { /* give up */ }
+  return {};
+}
+
 const aiSummaryCache = new Map<string, AiSummaryEntry>();
 const AI_SUMMARY_TTL_MS = 24 * 60 * 60 * 1000;
 // Guards for the client pre-warm herd: coalesce identical in-flight requests,
@@ -4809,21 +4829,36 @@ router.post("/ai-summary", async (req, res) => {
         }
       }
     };
-    // Order is by how much budget each tier actually has. Mistral: ~1B tokens a
-    // month. Groq: 200k a day, and one Briefing build costs ~44k of it. Gemini:
-    // 20 requests a day, so it is a last resort, not a primary.
+    // A 200 with an unparseable body is still a failure. The bulk model is far
+    // smaller than gpt-oss-120b and does not always honour the JSON schema, and
+    // the old code happily returned the empty parse to the client as success —
+    // which on the Briefing meant 30 blank cards and no error anywhere.
+    // Validate the bulk answer before accepting it; otherwise fall to Groq.
+    const usable = (r: string): boolean => {
+      const p = parseSummaryJson(r);
+      return (type === "summary" && (p.summary ?? "").length > 100)
+        || (type === "fiveWs" && (p.fiveWs?.length ?? 0) >= 3)
+        || (type === "eli5" && (p.eli5 ?? "").length > 30);
+    };
+    // Order is by how much budget each tier actually has. Mistral free mode
+    // funds ministral-8b at 188 req/min; Groq is 200k tokens a day, and one
+    // Briefing build costs ~44k of it; Gemini is 20 requests a day.
     try {
+      let fromBulk = "";
       if (hasBulkProvider()) {
         try {
-          raw = (await withTimeout(T_BULK, (signal) =>
-            callMistral(prompt, maxTokens, { task: "article-summary", jsonMode: true, signal, background: !!background }))) || "{}";
+          fromBulk = (await withTimeout(T_BULK, (signal) =>
+            callMistral(prompt, maxTokens, { task: "article-summary", jsonMode: true, signal, background: !!background }))) || "";
+          if (fromBulk && !usable(fromBulk)) {
+            req.log.warn({ sample: fromBulk.slice(0, 200) }, "ai-summary: bulk tier returned unusable content, falling back to Groq");
+            fromBulk = "";
+          }
         } catch (bulkErr) {
           req.log.warn({ err: bulkErr instanceof Error ? bulkErr.message : String(bulkErr) }, "ai-summary: bulk tier failed, falling back to Groq");
-          raw = await groqScoutThenFast();
+          fromBulk = "";
         }
-      } else {
-        raw = await groqScoutThenFast();
       }
+      raw = fromBulk || await groqScoutThenFast();
     } catch (groqErr) {
       const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
       // Pre-warm is speculative: never spend the rescue budget on it. A
@@ -4841,18 +4876,7 @@ router.post("/ai-summary", async (req, res) => {
       }
     }
 
-    let parsed: { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } = {};
-    const cleaned = raw.replace(/```json|```/g, "").trim();
-    try { parsed = JSON.parse(cleaned); }
-    catch {
-      try {
-        const m = cleaned.match(/\{[\s\S]*\}/);
-        if (m) {
-          const safe = m[0].replace(/("(?:[^"\\]|\\.)*")|(\r?\n)/g, (full, str) => str ? str : "\\n");
-          parsed = JSON.parse(safe);
-        }
-      } catch { /* give up */ }
-    }
+    const parsed = parseSummaryJson(raw);
 
     const result: AiSummaryEntry = {
       at: Date.now(),

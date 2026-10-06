@@ -37,6 +37,8 @@ let mistralLastErrorBody = "";
 let mistralLastRawSample = "";
 let bulkRejections = 0;
 let bulkAccepted = 0;
+let ungroundedServed = 0;
+let groundedServed = 0;
 function hasBulkProvider(): boolean { return Boolean(process.env["MISTRAL_API_KEY"]); }
 function mistralGate(background?: boolean, signal?: AbortSignal): Promise<void> {
   const now = Date.now();
@@ -1946,7 +1948,7 @@ ${lines}`;
     // never burst. Feed builds use foreground=true: clusterEnrichmentAwait's
     // 3-slot concurrency is the burst control there, and waiting 4.5s × N
     // clusters inside a build defeats the point of awaiting.
-    const raw = (await callBulk(prompt, 160, { model: GROQ_MODEL_ENRICH, task: "cluster-enrich", background: !foreground })).replace(/```json|```/g, "").trim();
+    const raw = (await callGroq(prompt, 160, { model: GROQ_MODEL_ENRICH, task: "cluster-enrich", background: !foreground })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { label?: string; summary?: string }) : {};
     const label = typeof parsed.label === "string" ? parsed.label.trim().slice(0, 110) : "";
@@ -2027,12 +2029,12 @@ async function generateCardSummary(sig: string, card: StoryCard): Promise<void> 
     let rawText: string;
     if (hasFastProvider()) {
       try {
-        rawText = await callBulk(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+        rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
       } catch {
-        rawText = await callBulk(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+        rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
       }
     } else {
-      rawText = await callBulk(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
+      rawText = await callGroq(prompt, 80, { model: GROQ_MODEL_FAST, task: "article-summary-feed", background: true });
     }
     const text = rawText.trim().replace(/^summary:\s*/i, "");
     const summary = clampWords25(stripHtml(text));
@@ -2269,7 +2271,7 @@ async function generateThemeSummary(key: string, theme: string, arts: NewsDataAr
   try {
     const lines = arts.slice(0, 6).map((a) => `- ${a.title ?? ""}: ${stripHtml((a.description ?? "").slice(0, 100))}`).join("\n");
     const prompt = `These articles all relate to the topic "${theme}" but are DIFFERENT stories. Summarise the current state of "${theme}" coverage in ONE neutral sentence of AT MOST 20 words. Capture WHAT'S HAPPENING ACROSS the stories (multiple angles, recurring entities, key developments) — NOT one story. Use ONLY facts stated below — do not add outside knowledge, and for anyone's title/role use only what's stated here, not your own assumption of who currently holds it. Return JSON ONLY: {"summary":"..."}\n\n${lines}`;
-    const raw = (await callBulk(prompt, 120, { model: GROQ_MODEL_ENRICH, task: "theme-summary", background: true })).replace(/```json|```/g, "").trim();
+    const raw = (await callGroq(prompt, 120, { model: GROQ_MODEL_ENRICH, task: "theme-summary", background: true })).replace(/```json|```/g, "").trim();
     const m = raw.match(/\{[\s\S]*\}/);
     const parsed = m ? (JSON.parse(m[0]) as { summary?: string }) : {};
     const summary = clampWords25(stripHtml(typeof parsed.summary === "string" ? parsed.summary : "")).split(/\s+/).slice(0, 20).join(" ");
@@ -3677,7 +3679,9 @@ router.get("/ai-diag", async (req, res) => {
     lastRawSample: mistralLastRawSample || null,
     accepted: bulkAccepted,
     rejected: bulkRejections,
+    role: "classification only (clustering, theme-assign) — not reader-facing prose",
   };
+  out["grounding"] = { served: groundedServed, ungrounded: ungroundedServed };
   if (full && hasBulkProvider()) {
     const bulkOut = out["bulk"] as Record<string, unknown>;
     const mKey = process.env["MISTRAL_API_KEY"] ?? "";
@@ -3771,7 +3775,7 @@ router.get("/ai-usage", (_req, res) => {
     "openai/gpt-oss-120b": "Summaries + Deep Dive + Q&A (Groq)",
     "openai/gpt-oss-20b": "Clustering · last-resort",
     "gemini-3.6-flash": "Rescue only — 20 requests/day (Gemini)",
-    [MISTRAL_MODEL]: "Bulk tier — summaries, clustering, enrichment (Mistral)",
+    [MISTRAL_MODEL]: "Clustering + theme labels only (Mistral)",
     "gpt-oss-120b": "Summaries + Deep Dive (SambaNova)",
     "Meta-Llama-3.3-70B-Instruct": "Feed card summaries (SambaNova bulk)",
     "meta-llama/llama-4-scout-17b-16e-instruct": "RETIRED by Groq",
@@ -3789,7 +3793,7 @@ router.get("/ai-usage", (_req, res) => {
     "Meta-Llama-3.3-70B-Instruct": { name: "SambaNova", inRate: 0.60, outRate: 1.20 },
   };
   const TIER: Record<string, string> = {
-    [MISTRAL_MODEL]: "bulk",
+    [MISTRAL_MODEL]: "labels",
     "openai/gpt-oss-120b": "primary",
     "openai/gpt-oss-20b": "background",
     "gemini-3.6-flash": "rescue",
@@ -4841,7 +4845,7 @@ router.post("/ai-summary", async (req, res) => {
     // Budgets are per provider (see withTimeout). Gemini has been answering
     // in ~40s under load; rather than wait that out, cut it short and let
     // Groq — historically 2-4s for a summary — actually get a turn.
-    const T_BULK = 20_000, T_FAST = 12_000, T_GROQ = 18_000, T_GROQ_LAST = 12_000;
+    const T_FAST = 12_000, T_GROQ = 18_000, T_GROQ_LAST = 12_000;
     // Groq Scout → 8b last resort. Scout shares a single rate/pause budget
     // with Deep Dive and pre-warm bursts, so it can be paused/429 even when
     // the 8b model (separate gate) is free — without this fallback, that
@@ -4863,44 +4867,19 @@ router.post("/ai-summary", async (req, res) => {
         }
       }
     };
-    // A 200 with an unparseable body is still a failure. The bulk model is far
-    // smaller than gpt-oss-120b and does not always honour the JSON schema, and
-    // the old code happily returned the empty parse to the client as success —
-    // which on the Briefing meant 30 blank cards and no error anywhere.
-    // Validate the bulk answer before accepting it; otherwise fall to Groq.
-    // Grounding reference: the article itself plus the publish date we give the
-    // model, so a correctly-cited year is not mistaken for a fabrication.
+    // Deliberately NOT the bulk tier. ministral-8b is the only model Mistral
+    // free mode funds, and it fabricates figures — measured 1 accepted vs 13
+    // rejected by the grounding check, so it fell through to Groq anyway while
+    // costing a wasted call and ~1-2s. Mistral now only does the label and
+    // classification jobs, where it emits categories rather than prose.
+    //
+    // The grounding check stays on as a MONITOR over whatever is served: it
+    // found gpt-oss-120b inventing a EUR/USD rate of 1.07 in five of six runs,
+    // so this is not a small-model-only problem. Warn and count, never reject —
+    // failing the trusted tier here would turn embellishment into a 502.
     const groundingSource = `${text} ${publishedAt ?? ""}`;
-    const usable = (r: string): boolean => {
-      const p = parseSummaryJson(r);
-      const shapeOk = (type === "summary" && (p.summary ?? "").length > 100)
-        || (type === "fiveWs" && (p.fiveWs?.length ?? 0) >= 3)
-        || (type === "eli5" && (p.eli5 ?? "").length > 30);
-      if (!shapeOk) return false;
-      const body = [p.summary ?? "", ...(p.bullets ?? []), ...(p.fiveWs ?? []), p.eli5 ?? ""].join(" ");
-      return numbersGrounded(body, groundingSource);
-    };
-    // Order is by how much budget each tier actually has. Mistral free mode
-    // funds ministral-8b at 188 req/min; Groq is 200k tokens a day, and one
-    // Briefing build costs ~44k of it; Gemini is 20 requests a day.
     try {
-      let fromBulk = "";
-      if (hasBulkProvider()) {
-        try {
-          fromBulk = (await withTimeout(T_BULK, (signal) =>
-            callMistral(prompt, maxTokens, { task: "article-summary", jsonMode: true, signal, background: !!background }))) || "";
-          if (fromBulk && !usable(fromBulk)) {
-            req.log.warn({ sample: fromBulk.slice(0, 200) }, "ai-summary: bulk tier output rejected (bad shape or ungrounded figures), falling back to Groq");
-            bulkRejections++;
-            fromBulk = "";
-          }
-        } catch (bulkErr) {
-          req.log.warn({ err: bulkErr instanceof Error ? bulkErr.message : String(bulkErr) }, "ai-summary: bulk tier failed, falling back to Groq");
-          fromBulk = "";
-        }
-      }
-      if (fromBulk) bulkAccepted++;
-      raw = fromBulk || await groqScoutThenFast();
+      raw = await groqScoutThenFast();
     } catch (groqErr) {
       const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
       // Pre-warm is speculative: never spend the rescue budget on it. A
@@ -4927,6 +4906,16 @@ router.post("/ai-summary", async (req, res) => {
       fiveWs: Array.isArray(parsed.fiveWs) ? parsed.fiveWs.slice(0, 5) : [],
       eli5: typeof parsed.eli5 === "string" ? parsed.eli5 : "",
     };
+
+    // Fabrication monitor (see groundingSource above): never blocks a response,
+    // but makes ungrounded figures countable instead of invisible.
+    const servedBody = [result.summary, ...result.bullets, ...result.fiveWs, result.eli5].join(" ");
+    if (servedBody.trim() && !numbersGrounded(servedBody, groundingSource)) {
+      ungroundedServed++;
+      req.log.warn({ url, type }, "ai-summary: served output contains figures absent from the article");
+    } else if (servedBody.trim()) {
+      groundedServed++;
+    }
 
     // Only cache if the result is genuinely useful. For "summary" we now
     // REQUIRE the narrative `summary` field to be meaningful — bullets-only
@@ -5544,15 +5533,11 @@ Answer in 3-5 sentences, ~120 words max. Plain text, no markdown. Conversational
         answer = (await withTimeout(Q_GROQ, (signal) =>
           callGroq(prompt, 600, { signal, temperature: 0.5, model: GROQ_MODEL_QUALITY, task: "qna" }))).trim();
       } catch (groqErr) {
+        // No bulk tier here either: a Q&A answer is prose a reader takes as fact.
         const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
-        if (hasBulkProvider()) {
-          answer = (await withTimeout(Q_GROQ, (signal) =>
-            callMistral(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
-        } else {
-          if (!fastRescueAvailable()) throw new Error(`groq: ${g}`);
-          answer = (await withTimeout(Q_FAST, (signal) =>
-            callSambaNova(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
-        }
+        if (!fastRescueAvailable()) throw new Error(`groq: ${g}`);
+        answer = (await withTimeout(Q_FAST, (signal) =>
+          callSambaNova(prompt, 600, { signal, temperature: 0.5, task: "qna" }))).trim();
       }
     }
     if (!answer) throw new Error("Empty answer");

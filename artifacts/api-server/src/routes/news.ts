@@ -35,6 +35,8 @@ let mistralNextSlot = 0;
 let mistralPausedUntil = 0;
 let mistralLastErrorBody = "";
 let mistralLastRawSample = "";
+let bulkRejections = 0;
+let bulkAccepted = 0;
 function hasBulkProvider(): boolean { return Boolean(process.env["MISTRAL_API_KEY"]); }
 function mistralGate(background?: boolean, signal?: AbortSignal): Promise<void> {
   const now = Date.now();
@@ -3673,6 +3675,8 @@ router.get("/ai-diag", async (req, res) => {
     pausedForMs: Math.max(0, mistralPausedUntil - Date.now()),
     lastError: mistralLastErrorBody || null,
     lastRawSample: mistralLastRawSample || null,
+    accepted: bulkAccepted,
+    rejected: bulkRejections,
   };
   if (full && hasBulkProvider()) {
     const bulkOut = out["bulk"] as Record<string, unknown>;
@@ -4508,6 +4512,27 @@ type AiSummaryEntry = { at: number; bullets: string[]; summary: string; fiveWs: 
 // "is this answer good enough to serve?" is decided by exactly the same code
 // that builds what gets served. Strips code fences, pulls out the first {...}
 // block, and escapes raw newlines that slipped inside string values.
+// ministral-8b confabulates statistics. Measured on a source containing no
+// figures beyond "two percent" (2026-10-06), four of four runs invented
+// specifics: interest rates 5.1/5.3/6.1/4.2, percentages 11 and 15, and dates
+// 2023-2025. That is disqualifying for a news summary — but it is detectable,
+// because a fabricated number is one that does not appear in the article.
+// Any digit in the output must be traceable to the source (or to the publish
+// date we hand the model). Applied to the BULK tier only: Groq is the trusted
+// tier, and rejecting its output would turn embellishment into a 502.
+function numbersGrounded(generated: string, source: string): boolean {
+  const srcNums = new Set((source.match(/\d+(?:\.\d+)?/g) ?? []));
+  const WORD_NUM: Record<string, string> = {
+    one: "1", two: "2", three: "3", four: "4", five: "5",
+    six: "6", seven: "7", eight: "8", nine: "9", ten: "10",
+  };
+  for (const [w, d] of Object.entries(WORD_NUM)) {
+    if (new RegExp(`\\b${w}\\b`, "i").test(source)) srcNums.add(d);
+  }
+  const generatedNums = generated.match(/\d+(?:\.\d+)?/g) ?? [];
+  return generatedNums.every((n) => srcNums.has(n));
+}
+
 function parseSummaryJson(raw: string): { bullets?: string[]; summary?: string; fiveWs?: string[]; eli5?: string } {
   const cleaned = (raw ?? "").replace(/```json|```/g, "").trim();
   try { return JSON.parse(cleaned); } catch { /* try harder below */ }
@@ -4834,11 +4859,17 @@ router.post("/ai-summary", async (req, res) => {
     // the old code happily returned the empty parse to the client as success —
     // which on the Briefing meant 30 blank cards and no error anywhere.
     // Validate the bulk answer before accepting it; otherwise fall to Groq.
+    // Grounding reference: the article itself plus the publish date we give the
+    // model, so a correctly-cited year is not mistaken for a fabrication.
+    const groundingSource = `${text} ${publishedAt ?? ""}`;
     const usable = (r: string): boolean => {
       const p = parseSummaryJson(r);
-      return (type === "summary" && (p.summary ?? "").length > 100)
+      const shapeOk = (type === "summary" && (p.summary ?? "").length > 100)
         || (type === "fiveWs" && (p.fiveWs?.length ?? 0) >= 3)
         || (type === "eli5" && (p.eli5 ?? "").length > 30);
+      if (!shapeOk) return false;
+      const body = [p.summary ?? "", ...(p.bullets ?? []), ...(p.fiveWs ?? []), p.eli5 ?? ""].join(" ");
+      return numbersGrounded(body, groundingSource);
     };
     // Order is by how much budget each tier actually has. Mistral free mode
     // funds ministral-8b at 188 req/min; Groq is 200k tokens a day, and one
@@ -4850,7 +4881,8 @@ router.post("/ai-summary", async (req, res) => {
           fromBulk = (await withTimeout(T_BULK, (signal) =>
             callMistral(prompt, maxTokens, { task: "article-summary", jsonMode: true, signal, background: !!background }))) || "";
           if (fromBulk && !usable(fromBulk)) {
-            req.log.warn({ sample: fromBulk.slice(0, 200) }, "ai-summary: bulk tier returned unusable content, falling back to Groq");
+            req.log.warn({ sample: fromBulk.slice(0, 200) }, "ai-summary: bulk tier output rejected (bad shape or ungrounded figures), falling back to Groq");
+            bulkRejections++;
             fromBulk = "";
           }
         } catch (bulkErr) {
@@ -4858,6 +4890,7 @@ router.post("/ai-summary", async (req, res) => {
           fromBulk = "";
         }
       }
+      if (fromBulk) bulkAccepted++;
       raw = fromBulk || await groqScoutThenFast();
     } catch (groqErr) {
       const g = groqErr instanceof Error ? groqErr.message : String(groqErr);
@@ -5271,14 +5304,13 @@ Respond with JSON only. REMINDER: length mode is "${depth.toUpperCase()}" — ea
     } catch (firstErr) {
       req.log.warn({ err: firstErr instanceof Error ? firstErr.message : String(firstErr) }, "deepdive: Groq failed, trying bulk then rescue then 20b");
       try {
-        if (hasBulkProvider()) {
-          raw = await withTimeout(D_GROQ, (signal) =>
-            callMistral(prompt, 6000, { signal, temperature: 0.45, task: "deepdive" }));
-        } else {
-          if (!fastRescueAvailable()) throw firstErr;
-          raw = await withTimeout(D_FAST, (signal) =>
-            callSambaNova(prompt, 6000, { signal, temperature: 0.45, task: "deepdive" }));
-        }
+        // Deliberately NOT the bulk tier: Deep Dive is long-form factual prose
+        // and ministral-8b invents figures (see numbersGrounded). The grounding
+        // guard protects summaries, but Deep Dive's output is far longer and
+        // more claim-dense than a check like that can police.
+        if (!fastRescueAvailable()) throw firstErr;
+        raw = await withTimeout(D_FAST, (signal) =>
+          callSambaNova(prompt, 6000, { signal, temperature: 0.45, task: "deepdive" }));
       } catch {
         // Last resort: gpt-oss-20b has an 8k tokens-per-MINUTE free-tier
         // window — the full 20k-char prompt + 6000-token budget exceeded it

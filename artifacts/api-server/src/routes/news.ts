@@ -35,6 +35,7 @@ let mistralNextSlot = 0;
 let mistralPausedUntil = 0;
 let mistralLastErrorBody = "";
 let mistralLastRawSample = "";
+let mistralLastEmpty = "";
 let bulkRejections = 0;
 let bulkAccepted = 0;
 let ungroundedServed = 0;
@@ -392,16 +393,26 @@ async function callMistral(
     }
     if (r.ok) {
       const data = (await r.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
-        usage?: { total_tokens?: number };
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+        usage?: { total_tokens?: number; completion_tokens?: number };
       };
       const content = data.choices?.[0]?.message?.content ?? "";
       if (!content.trim()) {
         recordAiUsage(model, task, data.usage?.total_tokens ?? 0, false);
-        throw new Error("Mistral empty content");
+        // Keep the whole choice, not just "it was empty": finish_reason tells
+        // us whether max_tokens ran out mid-thought or the model simply
+        // returned nothing, and those need opposite fixes.
+        mistralLastEmpty = JSON.stringify({
+          task, maxTokens,
+          finish_reason: data.choices?.[0]?.finish_reason ?? null,
+          completion_tokens: data.usage?.completion_tokens ?? null,
+          total_tokens: data.usage?.total_tokens ?? null,
+          choice: data.choices?.[0],
+        }).slice(0, 700);
+        throw new Error(`Mistral empty content (finish_reason=${data.choices?.[0]?.finish_reason ?? "?"})`);
       }
       recordAiUsage(model, task, data.usage?.total_tokens ?? 0, true, Date.now() - startedAt);
-      if (task === "article-summary") mistralLastRawSample = content.slice(0, 500);
+      mistralLastRawSample = `[${task}] ${content.slice(0, 400)}`;
       return content;
     }
     // Not every model accepts response_format — same forgiving retry as Groq.
@@ -3677,6 +3688,7 @@ router.get("/ai-diag", async (req, res) => {
     pausedForMs: Math.max(0, mistralPausedUntil - Date.now()),
     lastError: mistralLastErrorBody || null,
     lastRawSample: mistralLastRawSample || null,
+    lastEmpty: mistralLastEmpty || null,
     accepted: bulkAccepted,
     rejected: bulkRejections,
     role: "classification only (clustering, theme-assign) — not reader-facing prose",

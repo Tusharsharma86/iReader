@@ -1872,7 +1872,7 @@ Rules:
 - CRITICAL: The same type of event happening in DIFFERENT countries = DIFFERENT stories. E.g. "Australia bans social media for kids" and "Canada proposes social media ban for kids" are TWO separate stories — do NOT group them together just because the topic is similar.
 - Return JSON ONLY, no prose:
 {"groups":[{"indices":[0,3]},{"indices":[1]},{"indices":[2,5,7]}]}`;
-    const text = await callBulk(prompt, 700, { model: GROQ_MODEL_FAST, task: "clustering" });
+    const text = await callBulk(prompt, 700, { model: GROQ_MODEL_FAST, task: "cluster-indices" });
     const parsed = JSON.parse(text.replace(/```json|```/g, "").trim()) as { groups?: { indices?: number[] }[] };
     if (!Array.isArray(parsed?.groups) || parsed.groups.length === 0) throw new Error("empty AI groups");
     const idToCluster = new Map<string, number>();
@@ -2851,7 +2851,13 @@ Return JSON only:
     aiCallsToday++;
     console.log(`AI call #${aiCallsToday} today for ${topic}`);
 
-    const text = await callBulk(prompt, 900, { model: GROQ_MODEL_FAST, task: "clustering" });
+    // Groq, not the bulk tier: this call does not just group stories, it WRITES
+    // each cluster's headline ("Delhi hotel fire kills three, CM honours rescue
+    // workers") and that headline is shown to readers as fact. ministral-8b
+    // fabricates specifics, so it only gets the sibling call above, which
+    // returns bare indices, and theme-assign, which returns 1-3 word category
+    // names. Generating a factual headline is not classification.
+    const text = await callGroq(prompt, 900, { model: GROQ_MODEL_FAST, task: "clustering" });
     const clean = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -3781,7 +3787,7 @@ router.get("/ai-usage", (_req, res) => {
     "cluster-summary": "Cluster summaries (old)", "cluster-labels": "Cluster labels (For You)",
     "article-summary": "Article summary (5Ws/ELI5)", qna: "Follow-up Q&A",
     questions: "Suggested questions", qa: "Article Q&A",
-    clustering: "AI clustering", other: "Other",
+    clustering: "Cluster headlines", "cluster-indices": "Cluster grouping", other: "Other",
   };
   const MODEL_ROLE: Record<string, string> = {
     "openai/gpt-oss-120b": "Summaries + Deep Dive + Q&A (Groq)",

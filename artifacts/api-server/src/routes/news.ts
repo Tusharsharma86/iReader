@@ -608,6 +608,23 @@ const SELF_PING_URL = process.env["RENDER_EXTERNAL_URL"]
   : "https://ireader.onrender.com/api/news/ai-usage";
 if (process.env["NODE_ENV"] === "production") {
   setInterval(() => { fetch(SELF_PING_URL).catch(() => {}); }, 10 * 60 * 1000).unref();
+  // The briefing is a slowly-changing artifact, not a per-request computation,
+  // so keep it topped up out of band. Every tick fills a couple of batches of
+  // whatever is still blank: because carry-over is monotonic, a tick can only
+  // improve the briefing, and the gaps close on their own long before anyone
+  // opens the tab. This is also the retry mechanism — a batch lost to a 429
+  // simply gets picked up ten minutes later, with no reader waiting on it.
+  const tickLog = { warn: () => {} };
+  setInterval(() => {
+    void (async () => {
+      try {
+        const snap = await ensureBriefing(24, tickLog, false);
+        if (snap.items.some((i) => !i.aiSummary)) {
+          await fillBriefingSummaries(snap, tickLog, 2);
+        }
+      } catch { /* next tick */ }
+    })();
+  }, 10 * 60 * 1000).unref();
 }
 
 const FEED_DISK_CACHE_PATH = "/tmp/particle-news-feed-cache.json";
@@ -4055,7 +4072,33 @@ type BriefItem = {
 };
 type BriefingSnapshot = { builtAt: number; windowHours: number; items: BriefItem[]; poolSize: number };
 const briefingCache = new Map<string, BriefingSnapshot>();
+const briefingFilling = new Set<string>();
 let briefingLastBatch = "";
+
+// In-memory only meant every restart discarded thirty finished summaries and
+// forced a cold rebuild — which, because a cold build also triggers the feed
+// enrichment storm, is precisely when summaries fail. The feed cache already
+// persists this way; the briefing is far more expensive to rebuild than the
+// feed, so it had the weaker guarantee exactly backwards.
+const BRIEFING_DISK_PATH = "/tmp/particle-briefing-cache.json";
+function persistBriefings(): void {
+  const out: Record<string, BriefingSnapshot> = {};
+  for (const [k, v] of briefingCache.entries()) out[k] = v;
+  safeWriteJson(BRIEFING_DISK_PATH, out);
+}
+function loadBriefingsFromDisk(): void {
+  const snapshot = safeReadJson<Record<string, BriefingSnapshot>>(BRIEFING_DISK_PATH);
+  if (!snapshot) return;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const [k, v] of Object.entries(snapshot)) {
+    // Yesterday's briefing is not worth restoring; the key is day-scoped.
+    if (k.startsWith(today) && Array.isArray(v?.items) && v.items.length > 0) briefingCache.set(k, v);
+  }
+}
+// Must run AFTER briefingCache is initialised — calling it up with
+// loadFeedCacheFromDisk() would hit the const's temporal dead zone and crash
+// the process on boot.
+loadBriefingsFromDisk();
 const briefingInflight = new Map<string, Promise<BriefingSnapshot>>();
 
 function briefScore(card: StoryCard, outlets: number, windowHours: number) {
@@ -4196,7 +4239,10 @@ async function briefingWaitForModel(preferFast: boolean, maxWaitMs: number): Pro
   }
 }
 
-async function buildBriefing(
+// PHASE 1 of the build: ranking. Costs no AI at all — it reads cached feeds
+// and sorts. This is why it is separated: the old code made a reader wait ~80s
+// for AI summaries before showing them a list that was ready in two seconds.
+async function buildBriefingRanking(
   windowHours: number, log: { warn: (o: unknown, m: string) => void },
   previous?: BriefingSnapshot,
 ): Promise<BriefingSnapshot> {
@@ -4277,82 +4323,92 @@ async function buildBriefing(
     if (carried > 0) log.warn({ carried, total: items.length }, "briefing: reused summaries from the previous build");
   }
 
-  // Batches round-robin across models so each lands in a different TPM bucket
-  // and they actually run in parallel. 20b does this exact task in ~910ms
-  // against 120b's ~4.8s, so it leads.
-  const needSummary = items.filter((it) => !it.aiSummary);
+  return { builtAt: Date.now(), windowHours, items, poolSize: pool.length };
+}
+
+/** PHASE 2 of the build: the AI summaries. Runs in the BACKGROUND, after the
+ *  ranked list has already gone out, so nothing is waiting on it. That changes
+ *  what good behaviour looks like: a slow, patient, gate-respecting call is
+ *  now correct, where in a request path it was the failure.
+ *
+ *  `budget` bounds how many batches one invocation will attempt, so the
+ *  scheduled tick can nibble at the gaps instead of monopolising the provider.
+ *  Returns how many summaries it filled. */
+async function fillBriefingSummaries(
+  snap: BriefingSnapshot, log: { warn: (o: unknown, m: string) => void },
+  budget = Number.POSITIVE_INFINITY,
+): Promise<number> {
+  const before = snap.items.filter((i) => i.aiSummary).length;
+  const needSummary = snap.items.filter((it) => !it.aiSummary);
+  if (needSummary.length === 0) return 0;
+
   const batches: BriefItem[][] = [];
   for (let i = 0; i < needSummary.length; i += BRIEFING_BATCH_SIZE) {
     batches.push(needSummary.slice(i, i + BRIEFING_BATCH_SIZE));
   }
-  // Every batch goes to gpt-oss-120b, NOT the faster 20b, because the briefing
-  // starves itself otherwise. buildBriefing fetches six topic feeds, and a cold
-  // feed build fires ~25 enrichment calls (cluster-enrich, article-summary-feed,
-  // clustering, theme-assign) — all of which queue on model8bGate at 2.2s
-  // spacing. Six feeds push that queue minutes out, so the briefing's own
-  // batches were then refused by the very gate its own feed fetches had filled:
-  // "rate-gate-busy", and a half-filled briefing. 120b is not slot-gated at
-  // all, so it cannot be blocked by enrichment traffic. It is ~4.8s per call
-  // against 20b's ~910ms, but a call that completes beats a call that is
-  // refused, and three at a time recovers most of the wall-clock difference.
-  //
-  // This is also why COLD builds came back ~12/30 while rebuilds hit 30/30:
-  // on a rebuild the feeds are already cached, so there is no storm.
-  // Split across BOTH buckets rather than piling onto either. Sending every
-  // batch to 120b fixed the gate starvation but then 429'd 120b outright —
-  // and a 429 there pauses it for 65s for the whole app, which is a worse
-  // blast radius than the problem it solved. Alternating halves the pressure
-  // on each, and the 20b calls are patient (see gateCap) so enrichment traffic
-  // makes them WAIT for a slot instead of refusing them.
-  const BRIEFING_PARALLEL = 2;
-  for (let i = 0; i < batches.length; i += BRIEFING_PARALLEL) {
-    const wave = batches.slice(i, i + BRIEFING_PARALLEL);
-    await Promise.all(wave.map(async (b, j) => {
-      const model = briefingPickModel((i + j) % 2 === 1) ?? GROQ_MODEL;
+  const todo = batches.slice(0, Math.max(1, Math.min(batches.length, budget)));
+
+  // Two in flight, alternating buckets. The briefing's own cost is tiny (~5
+  // calls, ~15k tokens, under 4% of the daily budget) — what used to break it
+  // was sharing a queue with the ~150 enrichment calls a cold feed build
+  // fires. Running after the response means we can simply be patient instead
+  // of competing.
+  for (let i = 0; i < todo.length; i += 2) {
+    await Promise.all(todo.slice(i, i + 2).map(async (b, j) => {
+      const model = await briefingWaitForModel((i + j) % 2 === 0, 70_000);
+      if (!model) return;
       try { await briefingBatchSummaries(b, model, log); }
       catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        briefingLastBatch = JSON.stringify({ threw: true, model, size: b.length, err: msg.slice(0, 400) });
-        log.warn({ err: msg, model }, "briefing: batch failed");
+        briefingLastBatch = JSON.stringify({ model, size: b.length, err: msg.slice(0, 300) });
       }
     }));
-    if (i + BRIEFING_PARALLEL < batches.length) await sleep(1200);
+    if (i + 2 < todo.length) await sleep(1200);
   }
 
-  // Second pass for stragglers: a batch that blurred or truncated usually
-  // succeeds when the article gets its own call. Capped at 3 at a time for the
-  // same reason as above, and skipped entirely if most of the run failed —
-  // that is a provider problem, not something 25 retries will fix.
-  // Retry stragglers in BATCHES, not one by one. Retrying 12 singles turned 5
-  // calls into 17 and the extra traffic is what tripped model8bGate's own
-  // 2.2s-spacing queue — "rate-gate-busy" was self-inflicted, not the provider
-  // refusing us. Two further rounds, re-batched, keeps the whole build in
-  // single-digit calls.
-  for (let round = 0; round < 2; round++) {
-    const missing = items.filter((it) => !it.aiSummary);
-    if (missing.length === 0) break;
-    const retryBatches: BriefItem[][] = [];
-    for (let i = 0; i < missing.length; i += BRIEFING_BATCH_SIZE) {
-      retryBatches.push(missing.slice(i, i + BRIEFING_BATCH_SIZE));
-    }
-    // A pause before retrying: if the first pass failed on a 429 the model is
-    // paused for 65s, and hammering it immediately just burns the round.
-    if (round > 0) await sleep(5000);
-    for (let i = 0; i < retryBatches.length; i += 2) {
-      await Promise.all(retryBatches.slice(i, i + 2).map(async (b, j) => {
-        const model = await briefingWaitForModel((i + j) % 2 === 0, 70_000);
-        if (!model) return; // still paused after a full pause window
-        try { await briefingBatchSummaries(b, model, log); }
-        catch (e) {
-          briefingLastBatch = JSON.stringify({ retry: round, model, size: b.length, err: (e instanceof Error ? e.message : String(e)).slice(0, 300) });
-        }
-      }));
-      if (i + 2 < retryBatches.length) await sleep(1500);
-    }
-  }
-  for (const it of items) if (!it.aiSummary) it.summaryFailed = true;
+  for (const it of snap.items) it.summaryFailed = !it.aiSummary;
+  const filled = snap.items.filter((i) => i.aiSummary).length - before;
+  if (filled > 0) persistBriefings();
+  return filled;
+}
 
-  return { builtAt: Date.now(), windowHours, items, poolSize: pool.length };
+/** Fill in the background, at most one worker per window. */
+function kickBriefingFill(key: string, snap: BriefingSnapshot, log: { warn: (o: unknown, m: string) => void }): void {
+  if (briefingFilling.has(key)) return;
+  briefingFilling.add(key);
+  void fillBriefingSummaries(snap, log)
+    .catch(() => { /* a gap is not an error; the next tick retries it */ })
+    .finally(() => { briefingFilling.delete(key); });
+}
+
+/** Ranked list now, summaries behind it. Returns the snapshot plus how
+ *  complete it is, so the client knows whether to look again. */
+async function ensureBriefing(
+  windowHours: number, log: { warn: (o: unknown, m: string) => void }, refresh: boolean,
+): Promise<BriefingSnapshot> {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${day}:${windowHours}`;
+  const hit = briefingCache.get(key);
+  if (!refresh && hit && Date.now() - hit.builtAt < BRIEFING_TTL_MS) return hit;
+
+  let p = briefingInflight.get(key);
+  if (!p) {
+    p = buildBriefingRanking(windowHours, log, hit)
+      .then((snap) => {
+        // Never let a thinner build replace a richer one.
+        const prevFilled = hit ? hit.items.filter((i) => i.aiSummary).length : -1;
+        const nextFilled = snap.items.filter((i) => i.aiSummary).length;
+        const keep = hit && nextFilled < prevFilled ? hit : snap;
+        briefingCache.set(key, keep);
+        persistBriefings();
+        return keep;
+      })
+      .finally(() => { briefingInflight.delete(key); });
+    briefingInflight.set(key, p);
+  }
+  const snap = await p;
+  kickBriefingFill(key, snap, log);
+  return snap;
 }
 
 router.get("/briefing", async (req, res) => {
@@ -4362,34 +4418,25 @@ router.get("/briefing", async (req, res) => {
   const day = new Date().toISOString().slice(0, 10);
   const key = `${day}:${windowHours}`;
 
-  const hit = briefingCache.get(key);
-  if (!refresh && hit && Date.now() - hit.builtAt < BRIEFING_TTL_MS) {
-    res.json({ ...hit, cached: true });
-    return;
-  }
-  // Coalesce: the first caller builds, everyone else shares that build rather
-  // than each spending the AI budget on identical output.
-  let p = briefingInflight.get(key);
-  if (!p) {
-    p = buildBriefing(windowHours, req.log, hit)
-      .then((snap) => {
-        // Never let a worse build replace a better one: if the rebuild came
-        // back with fewer summaries than the copy we already had, keep the
-        // richer one. Refreshing should not cost the reader content.
-        const prevFilled = hit ? hit.items.filter((i) => i.aiSummary).length : -1;
-        const nextFilled = snap.items.filter((i) => i.aiSummary).length;
-        const keep = hit && nextFilled < prevFilled ? hit : snap;
-        briefingCache.set(key, keep);
-        return keep;
-      })
-      .finally(() => { briefingInflight.delete(key); });
-    briefingInflight.set(key, p);
-  }
   try {
-    const snap = await p;
-    res.json({ ...snap, cached: false });
+    const snap = await ensureBriefing(windowHours, req.log, refresh);
+    const filled = snap.items.filter((i) => i.aiSummary).length;
+    res.json({
+      ...snap,
+      cached: !refresh && Date.now() - snap.builtAt > 2000,
+      // The client re-reads while this is false; summaries are still landing.
+      complete: filled === snap.items.length,
+      filled,
+      total: snap.items.length,
+      filling: briefingFilling.has(key),
+    });
   } catch (err) {
-    if (hit) { res.json({ ...hit, cached: true, stale: true }); return; }
+    const hit = briefingCache.get(key);
+    if (hit) {
+      const filled = hit.items.filter((i) => i.aiSummary).length;
+      res.json({ ...hit, cached: true, stale: true, complete: filled === hit.items.length, filled, total: hit.items.length, filling: false });
+      return;
+    }
     res.status(502).json({ error: `Briefing unavailable (${err instanceof Error ? err.message : String(err)})` });
   }
 });

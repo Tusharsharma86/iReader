@@ -3981,7 +3981,10 @@ const BRIEFING_AREAS: Array<{ key: string; topic: string }> = [
 const BRIEFING_CLAIM_ORDER = ["india", "world", "markets", "tech", "business", "breaking"];
 const BRIEFING_TARGET = 30;
 const BRIEFING_PER_AREA_CAP = 7;
-const BRIEFING_BATCH_SIZE = 10;
+// Six, not ten. A ten-article call is a ~5k-token spike and two of three such
+// batches threw outright; six keeps each call near 3k so a wave of two stays
+// inside gpt-oss-20b's 8k tokens-per-minute ceiling.
+const BRIEFING_BATCH_SIZE = 6;
 const BRIEFING_TTL_MS = 6 * 60 * 60 * 1000;
 const BRIEFING_WINDOWS = [6, 12, 24, 48, 72];
 // Weights sum to 100. Corroboration leads: how many distinct outlets
@@ -4229,22 +4232,30 @@ async function buildBriefing(
     await Promise.all(wave.map(async (b, j) => {
       const model = j === 0 ? GROQ_MODEL_FAST : GROQ_MODEL;
       try { await briefingBatchSummaries(b, model, log); }
-      catch (e) { log.warn({ err: e instanceof Error ? e.message : String(e), model }, "briefing: batch failed"); }
+      catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        briefingLastBatch = JSON.stringify({ threw: true, model, size: b.length, err: msg.slice(0, 400) });
+        log.warn({ err: msg, model }, "briefing: batch failed");
+      }
     }));
+    // Let the per-minute token windows breathe between waves.
+    if (i + 2 < batches.length) await sleep(1500);
   }
 
   // Second pass for stragglers: a batch that blurred or truncated usually
   // succeeds when the article gets its own call. Capped at 3 at a time for the
   // same reason as above, and skipped entirely if most of the run failed —
   // that is a provider problem, not something 25 retries will fix.
+  // The old <=12 gate skipped this pass precisely when most batches had failed,
+  // which is when it matters. Retry everything still blank, three at a time,
+  // alternating models so neither bucket is hammered. 20b leads: it writes this
+  // summary in ~910ms against 120b's ~4.8s.
   const missing = items.filter((it) => !it.aiSummary);
-  if (missing.length > 0 && missing.length <= 12) {
-    for (let i = 0; i < missing.length; i += 3) {
-      await Promise.all(missing.slice(i, i + 3).map(async (it) => {
-        try { await briefingBatchSummaries([it], GROQ_MODEL, log); }
-        catch { /* leave it blank; the client shows the source text */ }
-      }));
-    }
+  for (let i = 0; i < missing.length; i += 3) {
+    await Promise.all(missing.slice(i, i + 3).map(async (it, j) => {
+      try { await briefingBatchSummaries([it], j === 1 ? GROQ_MODEL : GROQ_MODEL_FAST, log); }
+      catch { /* leave it blank; the client falls back to the source text */ }
+    }));
   }
   for (const it of items) if (!it.aiSummary) it.summaryFailed = true;
 

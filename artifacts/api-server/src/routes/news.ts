@@ -4246,23 +4246,31 @@ async function buildBriefing(
   for (let i = 0; i < needSummary.length; i += BRIEFING_BATCH_SIZE) {
     batches.push(needSummary.slice(i, i + BRIEFING_BATCH_SIZE));
   }
-  // One batch is roughly 2k input + 2.8k output tokens. gpt-oss-20b's ceiling
-  // is 8k tokens per MINUTE, so two 20b batches at once would breach it — the
-  // exact failure the Deep Dive comments record. Run in waves of two and put
-  // the pair on different models, so concurrent calls never share a bucket.
-  for (let i = 0; i < batches.length; i += 2) {
-    const wave = batches.slice(i, i + 2);
-    await Promise.all(wave.map(async (b, j) => {
-      const model = j === 0 ? GROQ_MODEL_FAST : GROQ_MODEL;
-      try { await briefingBatchSummaries(b, model, log); }
+  // Every batch goes to gpt-oss-120b, NOT the faster 20b, because the briefing
+  // starves itself otherwise. buildBriefing fetches six topic feeds, and a cold
+  // feed build fires ~25 enrichment calls (cluster-enrich, article-summary-feed,
+  // clustering, theme-assign) — all of which queue on model8bGate at 2.2s
+  // spacing. Six feeds push that queue minutes out, so the briefing's own
+  // batches were then refused by the very gate its own feed fetches had filled:
+  // "rate-gate-busy", and a half-filled briefing. 120b is not slot-gated at
+  // all, so it cannot be blocked by enrichment traffic. It is ~4.8s per call
+  // against 20b's ~910ms, but a call that completes beats a call that is
+  // refused, and three at a time recovers most of the wall-clock difference.
+  //
+  // This is also why COLD builds came back ~12/30 while rebuilds hit 30/30:
+  // on a rebuild the feeds are already cached, so there is no storm.
+  const BRIEFING_PARALLEL = 3;
+  for (let i = 0; i < batches.length; i += BRIEFING_PARALLEL) {
+    const wave = batches.slice(i, i + BRIEFING_PARALLEL);
+    await Promise.all(wave.map(async (b) => {
+      try { await briefingBatchSummaries(b, GROQ_MODEL, log); }
       catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        briefingLastBatch = JSON.stringify({ threw: true, model, size: b.length, err: msg.slice(0, 400) });
-        log.warn({ err: msg, model }, "briefing: batch failed");
+        briefingLastBatch = JSON.stringify({ threw: true, model: GROQ_MODEL, size: b.length, err: msg.slice(0, 400) });
+        log.warn({ err: msg }, "briefing: batch failed");
       }
     }));
-    // Let the per-minute token windows breathe between waves.
-    if (i + 2 < batches.length) await sleep(1500);
+    if (i + BRIEFING_PARALLEL < batches.length) await sleep(1200);
   }
 
   // Second pass for stragglers: a batch that blurred or truncated usually
@@ -4281,11 +4289,12 @@ async function buildBriefing(
     for (let i = 0; i < missing.length; i += BRIEFING_BATCH_SIZE) {
       retryBatches.push(missing.slice(i, i + BRIEFING_BATCH_SIZE));
     }
+    // A pause before retrying: if the first pass failed on a 429 the model is
+    // paused for 65s, and hammering it immediately just burns the round.
+    if (round > 0) await sleep(5000);
     for (let i = 0; i < retryBatches.length; i += 2) {
-      await Promise.all(retryBatches.slice(i, i + 2).map(async (b, j) => {
-        // Favour 120b on retries: it is slower per call (~4.8s vs ~910ms) but
-        // it is NOT slot-gated, so it cannot come back rate-gate-busy.
-        try { await briefingBatchSummaries(b, j === 0 ? GROQ_MODEL : GROQ_MODEL_FAST, log); }
+      await Promise.all(retryBatches.slice(i, i + 2).map(async (b) => {
+        try { await briefingBatchSummaries(b, GROQ_MODEL, log); }
         catch (e) {
           briefingLastBatch = JSON.stringify({ retry: round, size: b.length, err: (e instanceof Error ? e.message : String(e)).slice(0, 300) });
         }

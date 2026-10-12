@@ -158,6 +158,26 @@ function model8bGate(background?: boolean, signal?: AbortSignal, patient?: boole
   model8bNextSlot = at + MODEL_8B_GATE_MS;
   return gateWait(wait, signal);
 }
+// A per-minute 429 and a per-DAY 429 need opposite responses: the first wants
+// a 65s pause, the second means the model is finished until UTC midnight and
+// every further call is wasted. They were handled identically, so the briefing
+// kept retrying a model Groq had already told us was out of tokens:
+//   "Rate limit reached ... on tokens per day (TPD): Limit 200000, Used 199773"
+// Tracked separately from aiUsageByModel because that counter resets on
+// restart, while the provider's daily budget does not.
+const modelTpdExhaustedUntil: Record<string, number> = {};
+function nextUtcMidnight(): number {
+  const d = new Date();
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1, 0, 0, 0, 0);
+}
+function noteTpdExhausted(model: string): void {
+  modelTpdExhaustedUntil[model] = nextUtcMidnight();
+}
+function modelHasDailyBudget(model: string): boolean {
+  const until = modelTpdExhaustedUntil[model];
+  return !until || Date.now() >= until;
+}
+
 function pause8bModel(background?: boolean) {
   if (background) model8bBgPausedUntil = Date.now() + 65_000;
   else model8bPausedUntil = Date.now() + 65_000;
@@ -527,8 +547,10 @@ async function callGroq(
       if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) pause8bModel(!!opts.background);
       else if (model === GROQ_MODEL) pauseScoutModel(!!opts.background);
     }
-    // Groq's error body names the exact limit hit (TPM/RPM/TPD) — surface it.
+    // Groq's error body names the exact limit hit (TPM/RPM/TPD) — surface it,
+    // and act on the distinction: a daily exhaustion is not worth retrying.
     const errDetail = await r.text().then(t => t.replace(/\s+/g, ' ').slice(0, 220)).catch(() => "");
+    if (r.status === 429 && /tokens per day|TPD/i.test(errDetail)) noteTpdExhausted(model);
     throw new Error(`Groq ${r.status}: ${errDetail}`);
   }
 }
@@ -3724,6 +3746,10 @@ router.get("/ai-diag", async (req, res) => {
   };
   out["grounding"] = { served: groundedServed, ungrounded: ungroundedServed };
   out["briefingLastBatch"] = briefingLastBatch || null;
+  out["dailyBudget"] = {
+    [GROQ_MODEL]: modelHasDailyBudget(GROQ_MODEL) ? "ok" : "exhausted until UTC midnight",
+    [GROQ_MODEL_FAST]: modelHasDailyBudget(GROQ_MODEL_FAST) ? "ok" : "exhausted until UTC midnight",
+  };
   if (full && hasBulkProvider()) {
     const bulkOut = out["bulk"] as Record<string, unknown>;
     const mKey = process.env["MISTRAL_API_KEY"] ?? "";
@@ -4219,8 +4245,8 @@ ${articles}`;
  *  on it and the same batch of six stayed blank — the last gap in a 24/30. */
 function briefingPickModel(preferFast: boolean): string | null {
   const now = Date.now();
-  const fastOk = now >= model8bPausedUntil;
-  const bigOk = now >= scoutPausedUntil;
+  const fastOk = now >= model8bPausedUntil && modelHasDailyBudget(GROQ_MODEL_FAST);
+  const bigOk = now >= scoutPausedUntil && modelHasDailyBudget(GROQ_MODEL);
   if (preferFast) {
     if (fastOk) return GROQ_MODEL_FAST;
     if (bigOk) return GROQ_MODEL;

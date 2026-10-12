@@ -4246,16 +4246,29 @@ async function buildBriefing(
   // succeeds when the article gets its own call. Capped at 3 at a time for the
   // same reason as above, and skipped entirely if most of the run failed —
   // that is a provider problem, not something 25 retries will fix.
-  // The old <=12 gate skipped this pass precisely when most batches had failed,
-  // which is when it matters. Retry everything still blank, three at a time,
-  // alternating models so neither bucket is hammered. 20b leads: it writes this
-  // summary in ~910ms against 120b's ~4.8s.
-  const missing = items.filter((it) => !it.aiSummary);
-  for (let i = 0; i < missing.length; i += 3) {
-    await Promise.all(missing.slice(i, i + 3).map(async (it, j) => {
-      try { await briefingBatchSummaries([it], j === 1 ? GROQ_MODEL : GROQ_MODEL_FAST, log); }
-      catch { /* leave it blank; the client falls back to the source text */ }
-    }));
+  // Retry stragglers in BATCHES, not one by one. Retrying 12 singles turned 5
+  // calls into 17 and the extra traffic is what tripped model8bGate's own
+  // 2.2s-spacing queue — "rate-gate-busy" was self-inflicted, not the provider
+  // refusing us. Two further rounds, re-batched, keeps the whole build in
+  // single-digit calls.
+  for (let round = 0; round < 2; round++) {
+    const missing = items.filter((it) => !it.aiSummary);
+    if (missing.length === 0) break;
+    const retryBatches: BriefItem[][] = [];
+    for (let i = 0; i < missing.length; i += BRIEFING_BATCH_SIZE) {
+      retryBatches.push(missing.slice(i, i + BRIEFING_BATCH_SIZE));
+    }
+    for (let i = 0; i < retryBatches.length; i += 2) {
+      await Promise.all(retryBatches.slice(i, i + 2).map(async (b, j) => {
+        // Favour 120b on retries: it is slower per call (~4.8s vs ~910ms) but
+        // it is NOT slot-gated, so it cannot come back rate-gate-busy.
+        try { await briefingBatchSummaries(b, j === 0 ? GROQ_MODEL : GROQ_MODEL_FAST, log); }
+        catch (e) {
+          briefingLastBatch = JSON.stringify({ retry: round, size: b.length, err: (e instanceof Error ? e.message : String(e)).slice(0, 300) });
+        }
+      }));
+      if (i + 2 < retryBatches.length) await sleep(1500);
+    }
   }
   for (const it of items) if (!it.aiSummary) it.summaryFailed = true;
 

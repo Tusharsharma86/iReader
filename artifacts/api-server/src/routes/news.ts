@@ -4159,6 +4159,7 @@ ${articles}`;
 
 async function buildBriefing(
   windowHours: number, log: { warn: (o: unknown, m: string) => void },
+  previous?: BriefingSnapshot,
 ): Promise<BriefingSnapshot> {
   const perArea = await Promise.all(
     BRIEFING_AREAS.map(async (a) => ({ area: a.key, items: await briefingFeedFor(a.topic) })),
@@ -4222,11 +4223,29 @@ async function buildBriefing(
     aiSummary: "", summaryFailed: false,
   }));
 
+  // Carry over summaries we already wrote for the same article. A rebuild was
+  // regenerating all thirty from scratch, so a run that rate-limited could
+  // REPLACE a 30/30 briefing with a 12/30 one — a refresh made things worse.
+  // Reusing by article id makes rebuilds monotonic and much cheaper: only the
+  // genuinely new or still-blank stories cost an AI call.
+  if (previous) {
+    const prevById = new Map(previous.items.filter((i) => i.aiSummary).map((i) => [i.id, i.aiSummary]));
+    let carried = 0;
+    for (const it of items) {
+      const prior = prevById.get(it.id);
+      if (prior) { it.aiSummary = prior; carried++; }
+    }
+    if (carried > 0) log.warn({ carried, total: items.length }, "briefing: reused summaries from the previous build");
+  }
+
   // Batches round-robin across models so each lands in a different TPM bucket
   // and they actually run in parallel. 20b does this exact task in ~910ms
   // against 120b's ~4.8s, so it leads.
+  const needSummary = items.filter((it) => !it.aiSummary);
   const batches: BriefItem[][] = [];
-  for (let i = 0; i < items.length; i += BRIEFING_BATCH_SIZE) batches.push(items.slice(i, i + BRIEFING_BATCH_SIZE));
+  for (let i = 0; i < needSummary.length; i += BRIEFING_BATCH_SIZE) {
+    batches.push(needSummary.slice(i, i + BRIEFING_BATCH_SIZE));
+  }
   // One batch is roughly 2k input + 2.8k output tokens. gpt-oss-20b's ceiling
   // is 8k tokens per MINUTE, so two 20b batches at once would breach it — the
   // exact failure the Deep Dive comments record. Run in waves of two and put
@@ -4295,8 +4314,17 @@ router.get("/briefing", async (req, res) => {
   // than each spending the AI budget on identical output.
   let p = briefingInflight.get(key);
   if (!p) {
-    p = buildBriefing(windowHours, req.log)
-      .then((snap) => { briefingCache.set(key, snap); return snap; })
+    p = buildBriefing(windowHours, req.log, hit)
+      .then((snap) => {
+        // Never let a worse build replace a better one: if the rebuild came
+        // back with fewer summaries than the copy we already had, keep the
+        // richer one. Refreshing should not cost the reader content.
+        const prevFilled = hit ? hit.items.filter((i) => i.aiSummary).length : -1;
+        const nextFilled = snap.items.filter((i) => i.aiSummary).length;
+        const keep = hit && nextFilled < prevFilled ? hit : snap;
+        briefingCache.set(key, keep);
+        return keep;
+      })
       .finally(() => { briefingInflight.delete(key); });
     briefingInflight.set(key, p);
   }

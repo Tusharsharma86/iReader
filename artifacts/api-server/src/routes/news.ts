@@ -4164,6 +4164,23 @@ ${articles}`;
   }
 }
 
+/** Pick a Groq model that is not currently 429-paused. Alternating blindly
+ *  sent retries straight back at a model paused for 65s, so both rounds burned
+ *  on it and the same batch of six stayed blank — the last gap in a 24/30. */
+function briefingPickModel(preferFast: boolean): string | null {
+  const now = Date.now();
+  const fastOk = now >= model8bPausedUntil;
+  const bigOk = now >= scoutPausedUntil;
+  if (preferFast) {
+    if (fastOk) return GROQ_MODEL_FAST;
+    if (bigOk) return GROQ_MODEL;
+  } else {
+    if (bigOk) return GROQ_MODEL;
+    if (fastOk) return GROQ_MODEL_FAST;
+  }
+  return null; // both paused — a retry now is guaranteed to fail
+}
+
 async function buildBriefing(
   windowHours: number, log: { warn: (o: unknown, m: string) => void },
   previous?: BriefingSnapshot,
@@ -4276,7 +4293,7 @@ async function buildBriefing(
   for (let i = 0; i < batches.length; i += BRIEFING_PARALLEL) {
     const wave = batches.slice(i, i + BRIEFING_PARALLEL);
     await Promise.all(wave.map(async (b, j) => {
-      const model = (i + j) % 2 === 0 ? GROQ_MODEL : GROQ_MODEL_FAST;
+      const model = briefingPickModel((i + j) % 2 === 1) ?? GROQ_MODEL;
       try { await briefingBatchSummaries(b, model, log); }
       catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -4308,9 +4325,11 @@ async function buildBriefing(
     if (round > 0) await sleep(5000);
     for (let i = 0; i < retryBatches.length; i += 2) {
       await Promise.all(retryBatches.slice(i, i + 2).map(async (b, j) => {
-        try { await briefingBatchSummaries(b, (i + j) % 2 === 0 ? GROQ_MODEL_FAST : GROQ_MODEL, log); }
+        const model = briefingPickModel((i + j) % 2 === 0);
+        if (!model) return; // both paused; the next round or next build gets it
+        try { await briefingBatchSummaries(b, model, log); }
         catch (e) {
-          briefingLastBatch = JSON.stringify({ retry: round, size: b.length, err: (e instanceof Error ? e.message : String(e)).slice(0, 300) });
+          briefingLastBatch = JSON.stringify({ retry: round, model, size: b.length, err: (e instanceof Error ? e.message : String(e)).slice(0, 300) });
         }
       }));
       if (i + 2 < retryBatches.length) await sleep(1500);

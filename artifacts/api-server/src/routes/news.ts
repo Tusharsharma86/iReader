@@ -4178,7 +4178,22 @@ function briefingPickModel(preferFast: boolean): string | null {
     if (bigOk) return GROQ_MODEL;
     if (fastOk) return GROQ_MODEL_FAST;
   }
-  return null; // both paused — a retry now is guaranteed to fail
+  return null; // both paused
+}
+
+/** Wait, bounded, for either model to come off its 429 pause. Skipping instead
+ *  of waiting was strictly worse: a Groq pause is 65s and both retry rounds
+ *  finish well inside it, so "skip" meant those cards stayed blank for the
+ *  whole build. The briefing is a prebuild — nobody is watching an individual
+ *  call — so spending a minute to fill six cards is the right trade. */
+async function briefingWaitForModel(preferFast: boolean, maxWaitMs: number): Promise<string | null> {
+  const deadline = Date.now() + maxWaitMs;
+  for (;;) {
+    const m = briefingPickModel(preferFast);
+    if (m) return m;
+    if (Date.now() >= deadline) return null;
+    await sleep(3000);
+  }
 }
 
 async function buildBriefing(
@@ -4325,8 +4340,8 @@ async function buildBriefing(
     if (round > 0) await sleep(5000);
     for (let i = 0; i < retryBatches.length; i += 2) {
       await Promise.all(retryBatches.slice(i, i + 2).map(async (b, j) => {
-        const model = briefingPickModel((i + j) % 2 === 0);
-        if (!model) return; // both paused; the next round or next build gets it
+        const model = await briefingWaitForModel((i + j) % 2 === 0, 70_000);
+        if (!model) return; // still paused after a full pause window
         try { await briefingBatchSummaries(b, model, log); }
         catch (e) {
           briefingLastBatch = JSON.stringify({ retry: round, model, size: b.length, err: (e instanceof Error ? e.message : String(e)).slice(0, 300) });

@@ -4014,6 +4014,9 @@ const BRIEFING_WINDOWS = [6, 12, 24, 48, 72];
 // five areas than late with six, and the build that is still running populates
 // the cache for next time regardless.
 const BRIEFING_FEED_TIMEOUT_MS = 12_000;
+// Only used when the fast pass produced nothing at all, i.e. the very first
+// build on a fresh container. Better a slow briefing than an empty one.
+const BRIEFING_FEED_COLD_TIMEOUT_MS = 45_000;
 // Weights sum to 100. Corroboration leads: how many distinct outlets
 // independently ran a story is the best available proxy for "this mattered",
 // and it is the one signal a reader cannot see from a single card.
@@ -4250,21 +4253,30 @@ async function buildBriefingRanking(
   windowHours: number, log: { warn: (o: unknown, m: string) => void },
   previous?: BriefingSnapshot,
 ): Promise<BriefingSnapshot> {
-  // Cap each feed: on a brand-new container all six topics are cold and the
-  // slowest one was holding the ranked list — which needs no AI and should be
-  // near-instant — for 36s. Take whatever is ready; a topic that misses the
-  // cut is picked up by the next build once its feed has warmed.
-  const perArea = await Promise.all(
-    BRIEFING_AREAS.map(async (a) => {
+  // Cap each feed so one slow topic cannot hold the ranked list — which needs
+  // no AI and should be near-instant — for 36s. But the cap must not be able
+  // to produce an EMPTY briefing: on a brand-new container every topic is cold,
+  // all six missed a 12s cap at once, and the result was 0 items cached as a
+  // complete briefing. So race the same promises twice: take what is ready
+  // quickly, and if that leaves nothing at all, wait properly rather than
+  // publishing an empty day.
+  const feedPromises = BRIEFING_AREAS.map((a) => ({ area: a.key, p: briefingFeedFor(a.topic) }));
+  const settleWithin = (ms: number) => Promise.all(
+    feedPromises.map(async ({ area, p }) => {
       try {
         const items = await Promise.race([
-          briefingFeedFor(a.topic),
-          new Promise<FeedItem[]>((resolve) => setTimeout(() => resolve([]), BRIEFING_FEED_TIMEOUT_MS)),
+          p,
+          new Promise<FeedItem[]>((resolve) => setTimeout(() => resolve([]), ms)),
         ]);
-        return { area: a.key, items };
-      } catch { return { area: a.key, items: [] as FeedItem[] }; }
+        return { area, items };
+      } catch { return { area, items: [] as FeedItem[] }; }
     }),
   );
+  let perArea = await settleWithin(BRIEFING_FEED_TIMEOUT_MS);
+  if (perArea.every((x) => x.items.length === 0)) {
+    log.warn({}, "briefing: every feed was cold, waiting for the first build");
+    perArea = await settleWithin(BRIEFING_FEED_COLD_TIMEOUT_MS);
+  }
   const byClaim = perArea.slice().sort(
     (a, b) => BRIEFING_CLAIM_ORDER.indexOf(a.area) - BRIEFING_CLAIM_ORDER.indexOf(b.area));
 
@@ -4424,6 +4436,12 @@ async function ensureBriefing(
   if (!p) {
     p = buildBriefingRanking(windowHours, log, hit)
       .then((snap) => {
+        // An empty build is a failure, not a result. Caching one meant 0/0
+        // read as "complete" and the briefing never recovered.
+        if (snap.items.length === 0) {
+          if (hit) return hit;
+          throw new Error("no stories available yet");
+        }
         // Never let a thinner build replace a richer one.
         const prevFilled = hit ? hit.items.filter((i) => i.aiSummary).length : -1;
         const nextFilled = snap.items.filter((i) => i.aiSummary).length;
@@ -4454,7 +4472,7 @@ router.get("/briefing", async (req, res) => {
       ...snap,
       cached: !refresh && Date.now() - snap.builtAt > 2000,
       // The client re-reads while this is false; summaries are still landing.
-      complete: filled === snap.items.length,
+      complete: snap.items.length > 0 && filled === snap.items.length,
       filled,
       total: snap.items.length,
       filling: briefingFilling.has(key),

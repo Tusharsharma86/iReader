@@ -3952,6 +3952,304 @@ Answer:`;
   }
 });
 
+// ── Briefing for the day ────────────────────────────────────────────────────
+// Was built entirely on the client: 6 feed fetches + 30 separate /ai-summary
+// calls, per device. Opening it on a phone and a laptop spent the whole AI
+// budget twice for byte-identical output, and a cold build took 60-120s.
+//
+// Server-side it costs one shared build per window:
+//   - ranking reads the in-memory feed cache, so the 6 HTTP hops disappear
+//   - summaries go out in batches of 10, which cuts requests 10x AND tokens
+//     ~2.4x (the ~500-token prompt preamble is sent once per batch instead of
+//     once per article — and gpt-oss-20b's ceiling is tokens-PER-MINUTE, so
+//     only a token reduction actually buys headroom)
+//   - batches round-robin across models, because each model has its own TPM
+//     bucket and therefore they genuinely run in parallel
+//   - the finished briefing is cached for every device, not per browser
+const BRIEFING_AREAS: Array<{ key: string; topic: string }> = [
+  { key: "breaking", topic: "breaking" },
+  { key: "india", topic: "india-politics" },
+  { key: "world", topic: "geopolitics" },
+  { key: "markets", topic: "markets" },
+  { key: "tech", topic: "technology" },
+  { key: "business", topic: "business" },
+];
+// "Breaking" is an urgency flag, not a subject: its feed repeats what the
+// others carry, and claiming in display order tagged 23 of 30 cards Breaking.
+// Specific subjects claim first; Breaking keeps only what nothing else ran.
+const BRIEFING_CLAIM_ORDER = ["india", "world", "markets", "tech", "business", "breaking"];
+const BRIEFING_TARGET = 30;
+const BRIEFING_PER_AREA_CAP = 7;
+const BRIEFING_BATCH_SIZE = 10;
+const BRIEFING_TTL_MS = 6 * 60 * 60 * 1000;
+const BRIEFING_WINDOWS = [6, 12, 24, 48, 72];
+// Weights sum to 100. Corroboration leads: how many distinct outlets
+// independently ran a story is the best available proxy for "this mattered",
+// and it is the one signal a reader cannot see from a single card.
+const BW_CORROBORATION = 45, BW_SOURCE = 22, BW_FRESHNESS = 18, BW_SIGNAL = 15;
+
+const BRIEF_TIER_1 = new Set(["Reuters", "AP", "Associated Press", "BBC", "BBC World", "AFP", "Bloomberg",
+  "The New York Times", "NYT World", "The Washington Post", "Financial Times", "The Wall Street Journal", "The Guardian"]);
+const BRIEF_TIER_2 = new Set(["TechCrunch", "The Verge", "Ars Technica", "Wired", "CNBC", "CNBC TV18", "CNN",
+  "Al Jazeera", "NPR", "NPR World", "Forbes", "Time", "NDTV", "Hindustan Times", "The Hindu", "Indian Express",
+  "Economic Times", "Livemint", "Mint", "The Print", "Scroll.in", "India Today"]);
+function briefSourceWeight(name?: string): number {
+  if (!name) return 0.3;
+  if (BRIEF_TIER_1.has(name)) return 1.0;
+  if (BRIEF_TIER_2.has(name)) return 0.7;
+  return 0.3;
+}
+function briefTierLabel(w: number): string {
+  return w >= 1 ? "wire/major outlet" : w >= 0.7 ? "established outlet" : "smaller outlet";
+}
+function briefAgeHours(iso?: string): number {
+  if (!iso) return Number.POSITIVE_INFINITY;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, (Date.now() - t) / 3_600_000);
+}
+function briefAgoLabel(h: number): string {
+  if (!Number.isFinite(h)) return "undated";
+  if (h < 1) return `${Math.max(1, Math.round(h * 60))}m ago`;
+  if (h < 24) return `${Math.round(h)}h ago`;
+  return `${Math.round(h / 24)}d ago`;
+}
+
+type BriefFactor = { key: string; label: string; detail: string; points: number; max: number };
+type BriefItem = {
+  id: string; rank: number; area: string; score: number;
+  factors: BriefFactor[]; why: string;
+  outlets: number; hoursOld: number;
+  headline: string; summary: string; imageUrl: string | null;
+  publishedAt: string; sourceName: string; url: string;
+  aiSummary: string; summaryFailed: boolean;
+};
+type BriefingSnapshot = { builtAt: number; windowHours: number; items: BriefItem[]; poolSize: number };
+const briefingCache = new Map<string, BriefingSnapshot>();
+const briefingInflight = new Map<string, Promise<BriefingSnapshot>>();
+
+function briefScore(card: StoryCard, outlets: number, windowHours: number) {
+  const hours = briefAgeHours(card.publishedAt);
+  const corrob = Math.min(1, Math.log(outlets + 1) / Math.log(11));
+  const quality = briefSourceWeight(card.sources?.[0]?.name);
+  const fresh = Number.isFinite(hours) ? Math.exp(-hours * Math.LN2 / Math.max(1, windowHours / 2)) : 0;
+  const signal = card.isBreaking ? 1 : card.isDeveloping ? 0.6 : card.isTrending ? 0.4 : 0;
+  const factors: BriefFactor[] = [
+    { key: "corroboration", label: "Corroboration", detail: outlets === 1 ? "single outlet so far" : `${outlets} outlets running it`, points: corrob * BW_CORROBORATION, max: BW_CORROBORATION },
+    { key: "source", label: "Source weight", detail: `${card.sources?.[0]?.name ?? "unknown source"} — ${briefTierLabel(quality)}`, points: quality * BW_SOURCE, max: BW_SOURCE },
+    { key: "freshness", label: "Freshness", detail: `${briefAgoLabel(hours)}, in a ${windowHours}h window`, points: fresh * BW_FRESHNESS, max: BW_FRESHNESS },
+    { key: "signal", label: "Editorial signal", detail: card.isBreaking ? "flagged breaking" : card.isDeveloping ? "flagged developing" : card.isTrending ? "trending" : "no special flag", points: signal * BW_SIGNAL, max: BW_SIGNAL },
+  ];
+  return { score: factors.reduce((a, f) => a + f.points, 0), factors, outlets, hoursOld: hours };
+}
+
+function briefWhy(factors: BriefFactor[], card: StoryCard, outlets: number, hours: number): string {
+  const ordered = factors.slice().sort((a, b) => b.points - a.points);
+  const strong = (f: BriefFactor): string => {
+    if (f.key === "corroboration") return outlets === 1 ? "just one outlet has it so far" : `${outlets} outlets are running it independently`;
+    if (f.key === "source") return `${card.sources?.[0]?.name ?? "the source"} is a ${briefTierLabel(briefSourceWeight(card.sources?.[0]?.name))}`;
+    if (f.key === "freshness") return `it broke ${briefAgoLabel(hours)}`;
+    return card.isBreaking ? "it is flagged breaking" : card.isDeveloping ? "it is still developing" : card.isTrending ? "it is trending" : "it carries no urgency flag";
+  };
+  const weak = (f: BriefFactor): string => {
+    if (f.key === "corroboration") return "no second outlet has picked it up yet";
+    if (f.key === "source") return `${card.sources?.[0]?.name ?? "the source"} is a ${briefTierLabel(briefSourceWeight(card.sources?.[0]?.name))}`;
+    if (f.key === "freshness") return `it is already ${briefAgoLabel(hours)}`;
+    return "it carries no urgency flag";
+  };
+  const lead = ordered[0]!, second = ordered[1]!, weakest = ordered[ordered.length - 1]!;
+  const limiter = weakest.points < weakest.max * 0.2 && weakest.key !== lead.key && weakest.key !== second.key
+    ? ` Not higher because ${weak(weakest)}.` : "";
+  return `${strong(lead)}, and ${strong(second)}.${limiter}`;
+}
+
+/** Cached feed for one topic, built on demand — no HTTP hop. */
+async function briefingFeedFor(topic: string): Promise<FeedItem[]> {
+  const cached = cache.get(topic);
+  if (cached && Date.now() - cached.at < ttlFor(topic)) return cached.data;
+  if (cached) return cached.data; // stale is fine for a 6h briefing
+  let p = inflightFeed.get(topic);
+  if (!p) {
+    p = buildFreshFeed(topic)
+      .then((feed) => { cache.set(topic, { at: Date.now(), data: feed }); return feed; })
+      .finally(() => { inflightFeed.delete(topic); });
+    inflightFeed.set(topic, p);
+  }
+  try { return await p; } catch { return []; }
+}
+
+/** One AI call writes summaries for up to BRIEFING_BATCH_SIZE articles. */
+async function briefingBatchSummaries(
+  batch: BriefItem[], model: string, log: { warn: (o: unknown, m: string) => void },
+): Promise<void> {
+  const articles = batch
+    .map((it, i) => `[${i}] HEADLINE: ${it.headline}\nTEXT: ${(it.summary || "").slice(0, 700)}`)
+    .join("\n\n");
+  const prompt = `You are a news editor. Write a summary for EACH of the ${batch.length} articles below.
+
+Return ONLY valid JSON, no markdown fences, no prose:
+{"summaries":{"0":"<summary for article 0>","1":"<summary for article 1>"}}
+
+Rules:
+- One entry per article index, EXACTLY ${batch.length} entries, keys "0" to "${batch.length - 1}".
+- Each summary is 60-100 words of plain journalistic prose. No bullets, no headers, no markdown.
+- Lead with the most important fact, then why it matters or what happens next.
+- Summarise ONLY the article at that index. Never mix facts between articles.
+- NEVER introduce a number, date, percentage, price or statistic that does not appear in that article's text. If it gives no figure, write the claim without one.
+- Use only the titles and statuses the article itself gives each person.
+
+${articles}`;
+  // Generous ceiling: ~100 words x N plus JSON overhead, and 120b spends part
+  // of max_tokens on reasoning before any visible output.
+  const maxTokens = Math.min(6000, 220 * batch.length + 600);
+  const raw = await withTimeout(60_000, (signal) =>
+    callGroq(prompt, maxTokens, { model, task: "briefing-batch", jsonMode: true, signal, temperature: 0.4 }));
+  const parsed = parseSummaryJson(raw) as unknown as { summaries?: Record<string, string> };
+  const map = parsed?.summaries ?? {};
+  let filled = 0;
+  for (let i = 0; i < batch.length; i++) {
+    const text = typeof map[String(i)] === "string" ? map[String(i)]!.trim() : "";
+    // Reject anything that smuggled in a figure the article never contained —
+    // batching makes cross-contamination between articles more likely, not less.
+    if (text.length > 40 && numbersGrounded(text, `${batch[i]!.headline} ${batch[i]!.summary} ${batch[i]!.publishedAt}`)) {
+      batch[i]!.aiSummary = text;
+      filled++;
+    }
+  }
+  if (filled < batch.length) {
+    log.warn({ model, asked: batch.length, filled }, "briefing: batch returned fewer usable summaries than requested");
+  }
+}
+
+async function buildBriefing(
+  windowHours: number, log: { warn: (o: unknown, m: string) => void },
+): Promise<BriefingSnapshot> {
+  const perArea = await Promise.all(
+    BRIEFING_AREAS.map(async (a) => ({ area: a.key, items: await briefingFeedFor(a.topic) })),
+  );
+  const byClaim = perArea.slice().sort(
+    (a, b) => BRIEFING_CLAIM_ORDER.indexOf(a.area) - BRIEFING_CLAIM_ORDER.indexOf(b.area));
+
+  const seen = new Set<string>();
+  const pool: Array<{ card: StoryCard; area: string; outlets: number }> = [];
+  for (const { area, items } of byClaim) {
+    for (const it of items) {
+      // A cluster IS the corroboration: one event, several outlets. Collapse to
+      // the best-sourced member but count distinct outlets across the cluster —
+      // reading sources.length off the representative returns 1 for almost
+      // everything, which flattens the top-weighted factor to a constant.
+      const members: StoryCard[] = it.type === "cluster" ? it.articles : [it as StoryCard];
+      if (members.length === 0) continue;
+      const rep = members.slice().sort((a, b) => (b.sources?.length ?? 0) - (a.sources?.length ?? 0))[0];
+      if (!rep) continue;
+      const names = new Set<string>();
+      for (const m of members) for (const src of m.sources ?? []) if (src.name) names.add(src.name);
+      const hours = briefAgeHours(rep.publishedAt);
+      if (!Number.isFinite(hours) || hours > windowHours) continue;
+      const id = rep.id || rep.sources?.[0]?.url || rep.headline;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      pool.push({ card: rep, area, outlets: Math.max(1, names.size) });
+    }
+  }
+
+  const scored = pool
+    .map((c) => ({ ...c, ...briefScore(c.card, c.outlets, windowHours) }))
+    .sort((a, b) => b.score - a.score);
+
+  const chosen: typeof scored = [];
+  const areaCount: Record<string, number> = {};
+  for (const c of scored) {
+    if (chosen.length >= BRIEFING_TARGET) break;
+    const n = areaCount[c.area] ?? 0;
+    if (n >= BRIEFING_PER_AREA_CAP) continue;
+    areaCount[c.area] = n + 1;
+    chosen.push(c);
+  }
+  if (chosen.length < BRIEFING_TARGET) {
+    for (const c of scored) {
+      if (chosen.length >= BRIEFING_TARGET) break;
+      if (!chosen.includes(c)) chosen.push(c);
+    }
+  }
+
+  const items: BriefItem[] = chosen.map((c, i) => ({
+    id: c.card.id || c.card.sources?.[0]?.url || c.card.headline,
+    rank: i + 1, area: c.area, score: c.score, factors: c.factors,
+    why: briefWhy(c.factors, c.card, c.outlets, c.hoursOld),
+    outlets: c.outlets, hoursOld: c.hoursOld,
+    headline: c.card.headline, summary: c.card.summary ?? "",
+    imageUrl: c.card.imageUrl ?? null, publishedAt: c.card.publishedAt,
+    sourceName: c.card.sources?.[0]?.name ?? "", url: c.card.sources?.[0]?.url ?? "",
+    aiSummary: "", summaryFailed: false,
+  }));
+
+  // Batches round-robin across models so each lands in a different TPM bucket
+  // and they actually run in parallel. 20b does this exact task in ~910ms
+  // against 120b's ~4.8s, so it leads.
+  const batches: BriefItem[][] = [];
+  for (let i = 0; i < items.length; i += BRIEFING_BATCH_SIZE) batches.push(items.slice(i, i + BRIEFING_BATCH_SIZE));
+  // One batch is roughly 2k input + 2.8k output tokens. gpt-oss-20b's ceiling
+  // is 8k tokens per MINUTE, so two 20b batches at once would breach it — the
+  // exact failure the Deep Dive comments record. Run in waves of two and put
+  // the pair on different models, so concurrent calls never share a bucket.
+  for (let i = 0; i < batches.length; i += 2) {
+    const wave = batches.slice(i, i + 2);
+    await Promise.all(wave.map(async (b, j) => {
+      const model = j === 0 ? GROQ_MODEL_FAST : GROQ_MODEL;
+      try { await briefingBatchSummaries(b, model, log); }
+      catch (e) { log.warn({ err: e instanceof Error ? e.message : String(e), model }, "briefing: batch failed"); }
+    }));
+  }
+
+  // Second pass for stragglers: a batch that blurred or truncated usually
+  // succeeds when the article gets its own call. Capped at 3 at a time for the
+  // same reason as above, and skipped entirely if most of the run failed —
+  // that is a provider problem, not something 25 retries will fix.
+  const missing = items.filter((it) => !it.aiSummary);
+  if (missing.length > 0 && missing.length <= 12) {
+    for (let i = 0; i < missing.length; i += 3) {
+      await Promise.all(missing.slice(i, i + 3).map(async (it) => {
+        try { await briefingBatchSummaries([it], GROQ_MODEL, log); }
+        catch { /* leave it blank; the client shows the source text */ }
+      }));
+    }
+  }
+  for (const it of items) if (!it.aiSummary) it.summaryFailed = true;
+
+  return { builtAt: Date.now(), windowHours, items, poolSize: pool.length };
+}
+
+router.get("/briefing", async (req, res) => {
+  const raw = Number(req.query["window"] ?? 24);
+  const windowHours = BRIEFING_WINDOWS.includes(raw) ? raw : 24;
+  const refresh = req.query["refresh"] === "1";
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${day}:${windowHours}`;
+
+  const hit = briefingCache.get(key);
+  if (!refresh && hit && Date.now() - hit.builtAt < BRIEFING_TTL_MS) {
+    res.json({ ...hit, cached: true });
+    return;
+  }
+  // Coalesce: the first caller builds, everyone else shares that build rather
+  // than each spending the AI budget on identical output.
+  let p = briefingInflight.get(key);
+  if (!p) {
+    p = buildBriefing(windowHours, req.log)
+      .then((snap) => { briefingCache.set(key, snap); return snap; })
+      .finally(() => { briefingInflight.delete(key); });
+    briefingInflight.set(key, p);
+  }
+  try {
+    const snap = await p;
+    res.json({ ...snap, cached: false });
+  } catch (err) {
+    if (hit) { res.json({ ...hit, cached: true, stale: true }); return; }
+    res.status(502).json({ error: `Briefing unavailable (${err instanceof Error ? err.message : String(err)})` });
+  }
+});
+
 router.get("/feed", async (req, res) => {
   const topic = String(req.query["topic"] ?? "top").toLowerCase();
   const refresh = req.query["refresh"] === "1";

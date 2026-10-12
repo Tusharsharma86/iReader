@@ -4010,6 +4010,10 @@ const BRIEFING_PER_AREA_CAP = 7;
 const BRIEFING_BATCH_SIZE = 6;
 const BRIEFING_TTL_MS = 6 * 60 * 60 * 1000;
 const BRIEFING_WINDOWS = [6, 12, 24, 48, 72];
+// A cold feed build can take 30s+. The ranked list is worth more on time with
+// five areas than late with six, and the build that is still running populates
+// the cache for next time regardless.
+const BRIEFING_FEED_TIMEOUT_MS = 12_000;
 // Weights sum to 100. Corroboration leads: how many distinct outlets
 // independently ran a story is the best available proxy for "this mattered",
 // and it is the one signal a reader cannot see from a single card.
@@ -4246,8 +4250,20 @@ async function buildBriefingRanking(
   windowHours: number, log: { warn: (o: unknown, m: string) => void },
   previous?: BriefingSnapshot,
 ): Promise<BriefingSnapshot> {
+  // Cap each feed: on a brand-new container all six topics are cold and the
+  // slowest one was holding the ranked list — which needs no AI and should be
+  // near-instant — for 36s. Take whatever is ready; a topic that misses the
+  // cut is picked up by the next build once its feed has warmed.
   const perArea = await Promise.all(
-    BRIEFING_AREAS.map(async (a) => ({ area: a.key, items: await briefingFeedFor(a.topic) })),
+    BRIEFING_AREAS.map(async (a) => {
+      try {
+        const items = await Promise.race([
+          briefingFeedFor(a.topic),
+          new Promise<FeedItem[]>((resolve) => setTimeout(() => resolve([]), BRIEFING_FEED_TIMEOUT_MS)),
+        ]);
+        return { area: a.key, items };
+      } catch { return { area: a.key, items: [] as FeedItem[] }; }
+    }),
   );
   const byClaim = perArea.slice().sort(
     (a, b) => BRIEFING_CLAIM_ORDER.indexOf(a.area) - BRIEFING_CLAIM_ORDER.indexOf(b.area));
@@ -4372,13 +4388,26 @@ async function fillBriefingSummaries(
   return filled;
 }
 
-/** Fill in the background, at most one worker per window. */
+/** Fill in the background, at most one worker per window, re-running itself
+ *  until the gaps close. A single pass left the briefing sitting at 12/30
+ *  until the ten-minute tick, and at two batches a tick that is half an hour
+ *  to finish. Nothing is waiting on this, so it can simply keep going — and
+ *  the backoff distinguishes the two failure modes: progress means try again
+ *  shortly, no progress means a model is 429-paused and the pause is 65s. */
+const BRIEFING_FILL_ROUNDS = 8;
 function kickBriefingFill(key: string, snap: BriefingSnapshot, log: { warn: (o: unknown, m: string) => void }): void {
   if (briefingFilling.has(key)) return;
   briefingFilling.add(key);
-  void fillBriefingSummaries(snap, log)
-    .catch(() => { /* a gap is not an error; the next tick retries it */ })
-    .finally(() => { briefingFilling.delete(key); });
+  void (async () => {
+    try {
+      for (let round = 0; round < BRIEFING_FILL_ROUNDS; round++) {
+        const filled = await fillBriefingSummaries(snap, log, 2);
+        if (!snap.items.some((i) => !i.aiSummary)) break;
+        await sleep(filled > 0 ? 20_000 : 70_000);
+      }
+    } catch { /* a gap is not an error; the next tick retries it */ }
+    finally { briefingFilling.delete(key); }
+  })();
 }
 
 /** Ranked list now, summaries behind it. Returns the snapshot plus how

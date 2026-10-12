@@ -4042,6 +4042,9 @@ type BriefItem = {
   outlets: number; hoursOld: number;
   headline: string; summary: string; imageUrl: string | null;
   publishedAt: string; sourceName: string; url: string;
+  // Full list, not just the first: the Article screen renders referenced
+  // sources, and sending only sourceName/url would quietly degrade it.
+  sources: Source[];
   aiSummary: string; summaryFailed: boolean;
 };
 type BriefingSnapshot = { builtAt: number; windowHours: number; items: BriefItem[]; poolSize: number };
@@ -4215,6 +4218,7 @@ async function buildBriefing(
     headline: c.card.headline, summary: c.card.summary ?? "",
     imageUrl: c.card.imageUrl ?? null, publishedAt: c.card.publishedAt,
     sourceName: c.card.sources?.[0]?.name ?? "", url: c.card.sources?.[0]?.url ?? "",
+    sources: c.card.sources ?? [],
     aiSummary: "", summaryFailed: false,
   }));
 

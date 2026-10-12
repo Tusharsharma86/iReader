@@ -113,7 +113,13 @@ function gateWait(wait: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
-function gateCap(background?: boolean): number {
+// A patient caller would rather queue than fail. The briefing is the case
+// that needs it: it is a prebuild, nobody is blocked on an individual call,
+// and being refused costs a whole card's summary. Readers keep the short cap,
+// because for them a slow answer IS the failure.
+const GATE_MAX_WAIT_PATIENT_MS = 60_000;
+function gateCap(background?: boolean, patient?: boolean): number {
+  if (patient) return GATE_MAX_WAIT_PATIENT_MS;
   return background ? GATE_MAX_WAIT_BG_MS : GATE_MAX_WAIT_FG_MS;
 }
 function deepDiveGate(background?: boolean, signal?: AbortSignal): Promise<void> {
@@ -141,14 +147,14 @@ let model8bNextSlot = 0;
 let model8bPausedUntil = 0;
 let model8bBgPausedUntil = 0;
 const MODEL_8B_GATE_MS = 2200;
-function model8bGate(background?: boolean, signal?: AbortSignal): Promise<void> {
+function model8bGate(background?: boolean, signal?: AbortSignal, patient?: boolean): Promise<void> {
   const now = Date.now();
   if (now < (background ? model8bBgPausedUntil : model8bPausedUntil)) {
     return Promise.reject(new Error("rate-gate-paused"));
   }
   const at = Math.max(now, model8bNextSlot);
   const wait = at - now;
-  if (wait > gateCap(background)) return Promise.reject(new Error("rate-gate-busy"));
+  if (wait > gateCap(background, patient)) return Promise.reject(new Error("rate-gate-busy"));
   model8bNextSlot = at + MODEL_8B_GATE_MS;
   return gateWait(wait, signal);
 }
@@ -454,14 +460,14 @@ async function callBulk(
 async function callGroq(
   prompt: string,
   maxTokens: number,
-  opts: { temperature?: number; signal?: AbortSignal; model?: string; task?: string; background?: boolean; jsonMode?: boolean } = {},
+  opts: { temperature?: number; signal?: AbortSignal; model?: string; task?: string; background?: boolean; jsonMode?: boolean; patient?: boolean } = {},
 ): Promise<string> {
   const key = process.env["GROQ_API_KEY"];
   if (!key) throw new Error("GROQ_API_KEY missing");
   const model = opts.model ?? GROQ_MODEL;
   const task = opts.task ?? "other";
   if (opts.background && bgBudgetExhausted(model)) throw new Error("bg-budget-reserved");
-  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate(opts.background, opts.signal);
+  if (model === GROQ_MODEL_FAST || model === GROQ_MODEL_ENRICH || model === GROQ_MODEL_QUALITY) await model8bGate(opts.background, opts.signal, opts.patient);
   else if (model === GROQ_MODEL && Date.now() < (opts.background ? scoutBgPausedUntil : scoutPausedUntil)) throw new Error("rate-gate-paused");
   else if (opts.background) await groqBgGate();
   let useJsonMode = opts.jsonMode ?? false;
@@ -4126,8 +4132,9 @@ ${articles}`;
   // Generous ceiling: ~100 words x N plus JSON overhead, and 120b spends part
   // of max_tokens on reasoning before any visible output.
   const maxTokens = Math.min(6000, 220 * batch.length + 600);
-  const raw = await withTimeout(60_000, (signal) =>
-    callGroq(prompt, maxTokens, { model, task: "briefing-batch", jsonMode: true, signal, temperature: 0.4 }));
+  // patient only matters for the 20b family (the gated one); 120b ignores it.
+  const raw = await withTimeout(90_000, (signal) =>
+    callGroq(prompt, maxTokens, { model, task: "briefing-batch", jsonMode: true, signal, temperature: 0.4, patient: true }));
   const parsedAny = parseSummaryJson(raw) as unknown as Record<string, unknown>;
   // Accept either {"summaries":{"0":...}} or a bare {"0":...} map — models
   // drop the wrapper often enough that insisting on it throws away good work.
@@ -4259,15 +4266,22 @@ async function buildBriefing(
   //
   // This is also why COLD builds came back ~12/30 while rebuilds hit 30/30:
   // on a rebuild the feeds are already cached, so there is no storm.
-  const BRIEFING_PARALLEL = 3;
+  // Split across BOTH buckets rather than piling onto either. Sending every
+  // batch to 120b fixed the gate starvation but then 429'd 120b outright —
+  // and a 429 there pauses it for 65s for the whole app, which is a worse
+  // blast radius than the problem it solved. Alternating halves the pressure
+  // on each, and the 20b calls are patient (see gateCap) so enrichment traffic
+  // makes them WAIT for a slot instead of refusing them.
+  const BRIEFING_PARALLEL = 2;
   for (let i = 0; i < batches.length; i += BRIEFING_PARALLEL) {
     const wave = batches.slice(i, i + BRIEFING_PARALLEL);
-    await Promise.all(wave.map(async (b) => {
-      try { await briefingBatchSummaries(b, GROQ_MODEL, log); }
+    await Promise.all(wave.map(async (b, j) => {
+      const model = (i + j) % 2 === 0 ? GROQ_MODEL : GROQ_MODEL_FAST;
+      try { await briefingBatchSummaries(b, model, log); }
       catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        briefingLastBatch = JSON.stringify({ threw: true, model: GROQ_MODEL, size: b.length, err: msg.slice(0, 400) });
-        log.warn({ err: msg }, "briefing: batch failed");
+        briefingLastBatch = JSON.stringify({ threw: true, model, size: b.length, err: msg.slice(0, 400) });
+        log.warn({ err: msg, model }, "briefing: batch failed");
       }
     }));
     if (i + BRIEFING_PARALLEL < batches.length) await sleep(1200);
@@ -4293,8 +4307,8 @@ async function buildBriefing(
     // paused for 65s, and hammering it immediately just burns the round.
     if (round > 0) await sleep(5000);
     for (let i = 0; i < retryBatches.length; i += 2) {
-      await Promise.all(retryBatches.slice(i, i + 2).map(async (b) => {
-        try { await briefingBatchSummaries(b, GROQ_MODEL, log); }
+      await Promise.all(retryBatches.slice(i, i + 2).map(async (b, j) => {
+        try { await briefingBatchSummaries(b, (i + j) % 2 === 0 ? GROQ_MODEL_FAST : GROQ_MODEL, log); }
         catch (e) {
           briefingLastBatch = JSON.stringify({ retry: round, size: b.length, err: (e instanceof Error ? e.message : String(e)).slice(0, 300) });
         }

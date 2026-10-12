@@ -3700,6 +3700,7 @@ router.get("/ai-diag", async (req, res) => {
     role: "classification only (clustering, theme-assign) — not reader-facing prose",
   };
   out["grounding"] = { served: groundedServed, ungrounded: ungroundedServed };
+  out["briefingLastBatch"] = briefingLastBatch || null;
   if (full && hasBulkProvider()) {
     const bulkOut = out["bulk"] as Record<string, unknown>;
     const mKey = process.env["MISTRAL_API_KEY"] ?? "";
@@ -3988,6 +3989,22 @@ const BRIEFING_WINDOWS = [6, 12, 24, 48, 72];
 // and it is the one signal a reader cannot see from a single card.
 const BW_CORROBORATION = 45, BW_SOURCE = 22, BW_FRESHNESS = 18, BW_SIGNAL = 15;
 
+// The client-side build filtered these out before ranking and the server copy
+// did not, so rank 1 came back as a Devanagari live-blog. Ported from the web
+// app's contentFilters so both paths agree on what is not a story.
+const BRIEF_DEVANAGARI_RE = /[\u0900-\u097F]/;
+const BRIEF_BLOCKED_RE = /\b(promo.?codes?|coupons?|discounts?|cashback|voucher|sale.?offer|deal.?alert|exclusive.?deal|special.?offer|affiliate|flat \d+%|flash sale|best deals?|top deals?|limited.{0,8}offer|get \d+% off|save \d+%|\d+%\s*off|price drops?|price cut|lowest price|best price|launched at|starts at rs|starts at \$|goes on sale|specs leak|hands.?on review|camera test|unboxing|vs comparison|budget phone|gadget deal|record low price|all.?time low|exchange offer|now cheaper|buying guide|we tested|best gadgets|best gifts)\b/i;
+const BRIEF_LIVE_BLOG_RE = /\blive (updates?|blog)\b|\bupdates? live\b/i;
+function briefIsJunk(headline: string): boolean {
+  if (!headline) return true;
+  if (BRIEF_DEVANAGARI_RE.test(headline)) return true;
+  if (BRIEF_BLOCKED_RE.test(headline)) return true;
+  // Live blogs are a rolling feed, not a story: they have no stable summary and
+  // read as nonsense a few hours later, which is the whole life of a briefing.
+  if (BRIEF_LIVE_BLOG_RE.test(headline)) return true;
+  return false;
+}
+
 const BRIEF_TIER_1 = new Set(["Reuters", "AP", "Associated Press", "BBC", "BBC World", "AFP", "Bloomberg",
   "The New York Times", "NYT World", "The Washington Post", "Financial Times", "The Wall Street Journal", "The Guardian"]);
 const BRIEF_TIER_2 = new Set(["TechCrunch", "The Verge", "Ars Technica", "Wired", "CNBC", "CNBC TV18", "CNN",
@@ -4026,6 +4043,7 @@ type BriefItem = {
 };
 type BriefingSnapshot = { builtAt: number; windowHours: number; items: BriefItem[]; poolSize: number };
 const briefingCache = new Map<string, BriefingSnapshot>();
+let briefingLastBatch = "";
 const briefingInflight = new Map<string, Promise<BriefingSnapshot>>();
 
 function briefScore(card: StoryCard, outlets: number, windowHours: number) {
@@ -4104,20 +4122,32 @@ ${articles}`;
   const maxTokens = Math.min(6000, 220 * batch.length + 600);
   const raw = await withTimeout(60_000, (signal) =>
     callGroq(prompt, maxTokens, { model, task: "briefing-batch", jsonMode: true, signal, temperature: 0.4 }));
-  const parsed = parseSummaryJson(raw) as unknown as { summaries?: Record<string, string> };
-  const map = parsed?.summaries ?? {};
-  let filled = 0;
+  const parsedAny = parseSummaryJson(raw) as unknown as Record<string, unknown>;
+  // Accept either {"summaries":{"0":...}} or a bare {"0":...} map — models
+  // drop the wrapper often enough that insisting on it throws away good work.
+  const map = (parsedAny?.["summaries"] && typeof parsedAny["summaries"] === "object"
+    ? parsedAny["summaries"]
+    : parsedAny) as Record<string, string>;
+  let filled = 0, rejectedUngrounded = 0;
   for (let i = 0; i < batch.length; i++) {
-    const text = typeof map[String(i)] === "string" ? map[String(i)]!.trim() : "";
+    const text = typeof map?.[String(i)] === "string" ? map[String(i)]!.trim() : "";
     // Reject anything that smuggled in a figure the article never contained —
     // batching makes cross-contamination between articles more likely, not less.
-    if (text.length > 40 && numbersGrounded(text, `${batch[i]!.headline} ${batch[i]!.summary} ${batch[i]!.publishedAt}`)) {
-      batch[i]!.aiSummary = text;
-      filled++;
+    if (text.length <= 40) continue;
+    if (!numbersGrounded(text, `${batch[i]!.headline} ${batch[i]!.summary} ${batch[i]!.publishedAt}`)) {
+      rejectedUngrounded++;
+      continue;
     }
+    batch[i]!.aiSummary = text;
+    filled++;
   }
   if (filled < batch.length) {
-    log.warn({ model, asked: batch.length, filled }, "briefing: batch returned fewer usable summaries than requested");
+    briefingLastBatch = JSON.stringify({
+      model, asked: batch.length, filled, rejectedUngrounded,
+      keys: Object.keys(map ?? {}).slice(0, 12),
+      raw: raw.slice(0, 500),
+    }).slice(0, 1200);
+    log.warn({ model, asked: batch.length, filled, rejectedUngrounded }, "briefing: batch returned fewer usable summaries than requested");
   }
 }
 
@@ -4144,6 +4174,7 @@ async function buildBriefing(
       if (!rep) continue;
       const names = new Set<string>();
       for (const m of members) for (const src of m.sources ?? []) if (src.name) names.add(src.name);
+      if (briefIsJunk(rep.headline)) continue;
       const hours = briefAgeHours(rep.publishedAt);
       if (!Number.isFinite(hours) || hours > windowHours) continue;
       const id = rep.id || rep.sources?.[0]?.url || rep.headline;

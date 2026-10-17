@@ -4484,6 +4484,116 @@ async function ensureBriefing(
   return snap;
 }
 
+// ── Briefing trends ─────────────────────────────────────────────────────────
+// The briefing answers "what are the thirty stories". This answers "what is
+// actually going on" — the through-line across them. Two scopes, because a
+// reader wants both: area=all reads across the whole briefing and names what
+// connects the day; area=tech reads only that category.
+//
+// On demand, never automatic: a trend costs an AI call and most readers will
+// not ask for one, so generating thirty-plus of them speculatively would spend
+// the budget the summaries need. Cached per day+window+area and shared, so the
+// second person to ask pays nothing.
+type TrendEntry = { at: number; area: string; windowHours: number; text: string; storyCount: number };
+const trendCache = new Map<string, TrendEntry>();
+const trendInflight = new Map<string, Promise<TrendEntry>>();
+const TREND_TTL_MS = 6 * 60 * 60 * 1000;
+const TREND_DISK_PATH = "/tmp/particle-briefing-trends.json";
+
+function persistTrends(): void {
+  const out: Record<string, TrendEntry> = {};
+  for (const [k, v] of trendCache.entries()) out[k] = v;
+  safeWriteJson(TREND_DISK_PATH, out);
+}
+function loadTrendsFromDisk(): void {
+  const snap = safeReadJson<Record<string, TrendEntry>>(TREND_DISK_PATH);
+  if (!snap) return;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const [k, v] of Object.entries(snap)) {
+    if (k.startsWith(today) && typeof v?.text === "string" && v.text.length > 0) trendCache.set(k, v);
+  }
+}
+
+async function buildTrend(
+  windowHours: number, area: string, log: { warn: (o: unknown, m: string) => void },
+): Promise<TrendEntry> {
+  const snap = await ensureBriefing(windowHours, log, false);
+  const scoped = area === "all" ? snap.items : snap.items.filter((i) => i.area === area);
+  if (scoped.length < 2) throw new Error("not enough stories in this category to read a trend");
+
+  const areaLabel = area === "all" ? "across every subject area" : `in ${area}`;
+  const lines = scoped
+    .slice(0, 20)
+    .map((it, i) => `${i + 1}. [${it.area}] ${it.headline}${it.summary ? ` — ${it.summary.slice(0, 220)}` : ""}`)
+    .join("\n");
+
+  const prompt = `You are a news editor writing the standfirst for today's briefing ${areaLabel}.
+
+Below are today's ranked stories. Identify what is ACTUALLY going on across them — the through-lines, not a list.
+
+Return ONLY valid JSON, no markdown fences:
+{"trend":"<2-4 sentences of plain prose>"}
+
+Rules:
+- Name the two or three threads that connect several stories. Say what links them and why it matters.
+${area === "all" ? "- Call out where a thread crosses subject areas, e.g. a geopolitical story driving a markets one. That is the most useful thing you can tell a reader here." : "- Stay within this category; do not pad with stories that are not listed."}
+- If the stories genuinely share no thread, say so plainly in one sentence rather than inventing one.
+- NEVER introduce a number, date, percentage or statistic that does not appear below. If no figure is given, write the claim without one.
+- No preamble, no "in today's news", no bullet points, no headings.
+
+Stories:
+${lines}`;
+
+  const model = briefingPickModel(false) ?? GROQ_MODEL;
+  const raw = await withTimeout(45_000, (signal) =>
+    callGroq(prompt, 700, { model, task: "briefing-trend", jsonMode: true, signal, temperature: 0.4, patient: true }));
+  const parsed = parseSummaryJson(raw) as unknown as { trend?: string };
+  const text = (parsed?.trend ?? "").trim();
+  if (text.length < 40) throw new Error("trend came back empty");
+
+  // Same grounding rule as the summaries: a figure that appears in no story is
+  // a fabrication, and a synthesis across twenty stories is exactly where one
+  // would slip in unnoticed.
+  const grounding = scoped.map((i) => `${i.headline} ${i.summary} ${i.aiSummary}`).join(" ");
+  if (!numbersGrounded(text, grounding)) {
+    log.warn({ area }, "briefing-trend: rejected, contains figures absent from the stories");
+    throw new Error("trend contained figures not present in the stories");
+  }
+  return { at: Date.now(), area, windowHours, text, storyCount: scoped.length };
+}
+
+router.get("/briefing/trend", async (req, res) => {
+  const rawW = Number(req.query["window"] ?? 24);
+  const windowHours = BRIEFING_WINDOWS.includes(rawW) ? rawW : 24;
+  const rawArea = String(req.query["area"] ?? "all").toLowerCase();
+  const area = rawArea === "all" || BRIEFING_AREAS.some((a) => a.key === rawArea) ? rawArea : "all";
+  const refresh = req.query["refresh"] === "1";
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `${day}:${windowHours}:${area}`;
+
+  const hit = trendCache.get(key);
+  if (!refresh && hit && Date.now() - hit.at < TREND_TTL_MS) {
+    res.json({ ...hit, cached: true });
+    return;
+  }
+  let p = trendInflight.get(key);
+  if (!p) {
+    p = buildTrend(windowHours, area, req.log)
+      .then((entry) => { trendCache.set(key, entry); persistTrends(); return entry; })
+      .finally(() => { trendInflight.delete(key); });
+    trendInflight.set(key, p);
+  }
+  try {
+    res.json({ ...(await p), cached: false });
+  } catch (err) {
+    if (hit) { res.json({ ...hit, cached: true, stale: true }); return; }
+    res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+// After trendCache is initialised, not up with the other disk loads — that
+// would be a temporal-dead-zone crash on boot.
+loadTrendsFromDisk();
+
 router.get("/briefing", async (req, res) => {
   const raw = Number(req.query["window"] ?? 24);
   const windowHours = BRIEFING_WINDOWS.includes(raw) ? raw : 24;

@@ -4452,6 +4452,10 @@ function kickBriefingFill(key: string, snap: BriefingSnapshot, log: { warn: (o: 
  *  complete it is, so the client knows whether to look again. */
 async function ensureBriefing(
   windowHours: number, log: { warn: (o: unknown, m: string) => void }, refresh: boolean,
+  // false = return the ranking and do NOT start writing summaries. A reader
+  // who does not want them should not spend the tokens: this is the only way
+  // the client toggle can actually save anything rather than just hiding text.
+  withSummaries = true,
 ): Promise<BriefingSnapshot> {
   const day = new Date().toISOString().slice(0, 10);
   const key = `${day}:${windowHours}`;
@@ -4480,7 +4484,7 @@ async function ensureBriefing(
     briefingInflight.set(key, p);
   }
   const snap = await p;
-  kickBriefingFill(key, snap, log);
+  if (withSummaries) kickBriefingFill(key, snap, log);
   return snap;
 }
 
@@ -4601,17 +4605,21 @@ router.get("/briefing", async (req, res) => {
   const day = new Date().toISOString().slice(0, 10);
   const key = `${day}:${windowHours}`;
 
+  // summaries=0 → ranking only. Any summaries already written are still
+  // returned, because withholding work already paid for would help nobody.
+  const withSummaries = req.query["summaries"] !== "0";
   try {
-    const snap = await ensureBriefing(windowHours, req.log, refresh);
+    const snap = await ensureBriefing(windowHours, req.log, refresh, withSummaries);
     const filled = snap.items.filter((i) => i.aiSummary).length;
     res.json({
       ...snap,
       cached: !refresh && Date.now() - snap.builtAt > 2000,
       // The client re-reads while this is false; summaries are still landing.
-      complete: snap.items.length > 0 && filled === snap.items.length,
+      complete: !withSummaries || (snap.items.length > 0 && filled === snap.items.length),
       filled,
       total: snap.items.length,
-      filling: briefingFilling.has(key),
+      filling: withSummaries && briefingFilling.has(key),
+      summariesRequested: withSummaries,
     });
   } catch (err) {
     const hit = briefingCache.get(key);

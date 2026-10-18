@@ -4029,6 +4029,11 @@ const BRIEFING_AREAS: Array<{ key: string; topic: string }> = [
 // Specific subjects claim first; Breaking keeps only what nothing else ran.
 const BRIEFING_CLAIM_ORDER = ["india", "world", "markets", "tech", "business", "breaking"];
 const BRIEFING_TARGET = 30;
+// Reader-selectable sizes. The ranking always runs over the full thirty —
+// that part costs no AI — but the SUMMARIES only get written for the slice
+// asked for, so picking 5 really does spend a sixth of the tokens rather
+// than quietly generating thirty and showing five.
+const BRIEFING_COUNTS = [5, 10, 15, 20, 25, 30];
 const BRIEFING_PER_AREA_CAP = 7;
 // Six, not ten. A ten-article call is a ~5k-token spike and two of three such
 // batches threw outright; six keeps each call near 3k so a wave of two stays
@@ -4435,9 +4440,11 @@ async function buildBriefingRanking(
 async function fillBriefingSummaries(
   snap: BriefingSnapshot, log: { warn: (o: unknown, m: string) => void },
   budget = Number.POSITIVE_INFINITY,
+  limit = Number.POSITIVE_INFINITY,
 ): Promise<number> {
-  const before = snap.items.filter((i) => i.aiSummary).length;
-  const needSummary = snap.items.filter((it) => !it.aiSummary);
+  const scope = Number.isFinite(limit) ? snap.items.slice(0, limit) : snap.items;
+  const before = scope.filter((i) => i.aiSummary).length;
+  const needSummary = scope.filter((it) => !it.aiSummary);
   if (needSummary.length === 0) return 0;
 
   const batches: BriefItem[][] = [];
@@ -4464,8 +4471,8 @@ async function fillBriefingSummaries(
     if (i + 2 < todo.length) await sleep(1200);
   }
 
-  for (const it of snap.items) it.summaryFailed = !it.aiSummary;
-  const filled = snap.items.filter((i) => i.aiSummary).length - before;
+  for (const it of scope) it.summaryFailed = !it.aiSummary;
+  const filled = scope.filter((i) => i.aiSummary).length - before;
   if (filled > 0) persistBriefings();
   return filled;
 }
@@ -4477,14 +4484,18 @@ async function fillBriefingSummaries(
  *  the backoff distinguishes the two failure modes: progress means try again
  *  shortly, no progress means a model is 429-paused and the pause is 65s. */
 const BRIEFING_FILL_ROUNDS = 8;
-function kickBriefingFill(key: string, snap: BriefingSnapshot, log: { warn: (o: unknown, m: string) => void }): void {
+function kickBriefingFill(
+  key: string, snap: BriefingSnapshot, log: { warn: (o: unknown, m: string) => void },
+  limit = Number.POSITIVE_INFINITY,
+): void {
   if (briefingFilling.has(key)) return;
   briefingFilling.add(key);
   void (async () => {
     try {
+      const scope = () => (Number.isFinite(limit) ? snap.items.slice(0, limit) : snap.items);
       for (let round = 0; round < BRIEFING_FILL_ROUNDS; round++) {
-        const filled = await fillBriefingSummaries(snap, log, 2);
-        if (!snap.items.some((i) => !i.aiSummary)) break;
+        const filled = await fillBriefingSummaries(snap, log, 2, limit);
+        if (!scope().some((i) => !i.aiSummary)) break;
         await sleep(filled > 0 ? 20_000 : 70_000);
       }
     } catch { /* a gap is not an error; the next tick retries it */ }
@@ -4501,6 +4512,7 @@ async function ensureBriefing(
   // the client toggle can actually save anything rather than just hiding text.
   withSummaries = true,
   area = "all",
+  count = BRIEFING_TARGET,
 ): Promise<BriefingSnapshot> {
   const day = new Date().toISOString().slice(0, 10);
   // Each area is its own briefing, cached separately and built only when
@@ -4531,7 +4543,7 @@ async function ensureBriefing(
     briefingInflight.set(key, p);
   }
   const snap = await p;
-  if (withSummaries) kickBriefingFill(key, snap, log);
+  if (withSummaries) kickBriefingFill(key, snap, log, count);
   return snap;
 }
 
@@ -4654,23 +4666,33 @@ router.get("/briefing", async (req, res) => {
   const refresh = req.query["refresh"] === "1";
   const rawArea = String(req.query["area"] ?? "all").toLowerCase();
   const area = rawArea === "all" || BRIEFING_AREAS.some((a) => a.key === rawArea) ? rawArea : "all";
+  const rawCount = Number(req.query["count"] ?? BRIEFING_TARGET);
+  const count = BRIEFING_COUNTS.includes(rawCount) ? rawCount : BRIEFING_TARGET;
   const day = new Date().toISOString().slice(0, 10);
+  // count is NOT part of the key: one ranked snapshot of thirty serves every
+  // size, so switching 30 -> 5 is instant and switching back costs nothing.
+  // Only the slice returned, and how far down summaries are written, change.
   const key = `${day}:${windowHours}:${area}`;
 
   // summaries=0 → ranking only. Any summaries already written are still
   // returned, because withholding work already paid for would help nobody.
   const withSummaries = req.query["summaries"] !== "0";
   try {
-    const snap = await ensureBriefing(windowHours, req.log, refresh, withSummaries, area);
-    const filled = snap.items.filter((i) => i.aiSummary).length;
+    const snap = await ensureBriefing(windowHours, req.log, refresh, withSummaries, area, count);
+    const items = snap.items.slice(0, count);
+    const filled = items.filter((i) => i.aiSummary).length;
     res.json({
       ...snap,
+      items,
       area,
+      count,
       cached: !refresh && Date.now() - snap.builtAt > 2000,
-      // The client re-reads while this is false; summaries are still landing.
-      complete: !withSummaries || (snap.items.length > 0 && filled === snap.items.length),
+      // Completeness is about what was ASKED for: with count=5, five written
+      // summaries is done, even though twenty-five ranked stories behind them
+      // have none and never will unless someone asks for a longer list.
+      complete: !withSummaries || (items.length > 0 && filled === items.length),
       filled,
-      total: snap.items.length,
+      total: items.length,
       filling: withSummaries && briefingFilling.has(key),
       summariesRequested: withSummaries,
     });

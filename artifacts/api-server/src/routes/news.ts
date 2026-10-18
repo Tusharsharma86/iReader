@@ -4305,8 +4305,16 @@ async function buildBriefingRanking(
     }),
   );
   let perArea = await settleWithin(BRIEFING_FEED_TIMEOUT_MS);
-  if (perArea.every((x) => x.items.length === 0)) {
-    log.warn({}, "briefing: every feed was cold, waiting for the first build");
+  // The old guard only caught the all-empty case, so a mixed briefing could be
+  // built from whichever single feed happened to be warm: observed area=all
+  // returning thirty TECH stories because tech was cached and the other five
+  // were cold and missed the 12s cap. A lopsided "across six areas" briefing
+  // is barely better than an empty one, so wait properly unless at least half
+  // the areas answered.
+  const ready = perArea.filter((x) => x.items.length > 0).length;
+  const needed = area === "all" ? Math.ceil(sourceAreas.length / 2) : 1;
+  if (ready < needed) {
+    log.warn({ ready, needed, area }, "briefing: too few feeds were warm, waiting for the cold ones");
     perArea = await settleWithin(BRIEFING_FEED_COLD_TIMEOUT_MS);
   }
   const byClaim = perArea.slice().sort(

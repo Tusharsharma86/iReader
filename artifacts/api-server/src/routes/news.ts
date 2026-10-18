@@ -4054,6 +4054,26 @@ const BW_CORROBORATION = 45, BW_SOURCE = 22, BW_FRESHNESS = 18, BW_SIGNAL = 15;
 const BRIEF_DEVANAGARI_RE = /[\u0900-\u097F]/;
 const BRIEF_BLOCKED_RE = /\b(promo.?codes?|coupons?|discounts?|cashback|voucher|sale.?offer|deal.?alert|exclusive.?deal|special.?offer|affiliate|flat \d+%|flash sale|best deals?|top deals?|limited.{0,8}offer|get \d+% off|save \d+%|\d+%\s*off|price drops?|price cut|lowest price|best price|launched at|starts at rs|starts at \$|goes on sale|specs leak|hands.?on review|camera test|unboxing|vs comparison|budget phone|gadget deal|record low price|all.?time low|exchange offer|now cheaper|buying guide|we tested|best gadgets|best gifts)\b/i;
 const BRIEF_LIVE_BLOG_RE = /\blive (updates?|blog)\b|\bupdates? live\b/i;
+// The deals blocklist above catches commerce, but the tech briefing was still
+// topped by things that are not news at all. Observed on a real build:
+//   #1  "The Best AirPods Cases We've Used In Our Day-to-Day Lives (2026)"
+//   #10 "Ember's new mug makes my nightly tea ritual even better"
+//   #12 "Matthew Prince on why Cloudflare offers a free version (2016)"
+// Three distinct kinds of non-news, so three tests rather than one big regex:
+// shopping roundups, first-person product reviews, and reposted archive
+// pieces. A thin area like tech has few real stories, so anything that slips
+// through does not land at #20 — it lands at #1.
+// "Best Buy reports a drop in revenue" is a real story, so a bare leading
+// "Best" cannot be the test. A roundup announces itself: the definite article
+// ("The Best AirPods Cases"), a count ("Best 10 Phones", "The 5 Best Laptops")
+// or a year ("Best Headphones of 2026").
+const BRIEF_ROUNDUP_RE = /^the\s+(best|top|worst)\b|^(best|top|worst)\s+\d|^the\s+\d+\s+(best|top|worst)\b|\b(best|top)\b.{0,30}\bof\s+20\d{2}\b/i;
+const BRIEF_ROUNDUP_ANY_RE = /\b(best .{0,24}(we|you|i)['’]?(ve|d)? (used|tried|tested|found)|our favou?rites?|we tried|roundup|gift guide|buyer['’]?s guide|everything you need to know|here['’]?s everything)\b/i;
+// First person about a product is a review column, not reporting.
+const BRIEF_REVIEW_RE = /\b(my (nightly|morning|daily|favou?rite)|makes my \w+|i (tried|tested|switched|spent)|hands.?on|review:)\b/i;
+// "(2016)" — Hacker News and similar resurface old essays; publishedAt is the
+// repost date, so the window filter cannot see how old the piece really is.
+const BRIEF_ARCHIVE_RE = /\((19|20)\d{2}\)\s*$/;
 function briefIsJunk(headline: string): boolean {
   if (!headline) return true;
   if (BRIEF_DEVANAGARI_RE.test(headline)) return true;
@@ -4061,6 +4081,12 @@ function briefIsJunk(headline: string): boolean {
   // Live blogs are a rolling feed, not a story: they have no stable summary and
   // read as nonsense a few hours later, which is the whole life of a briefing.
   if (BRIEF_LIVE_BLOG_RE.test(headline)) return true;
+  if (BRIEF_ROUNDUP_RE.test(headline) || BRIEF_ROUNDUP_ANY_RE.test(headline)) return true;
+  if (BRIEF_REVIEW_RE.test(headline)) return true;
+  if (BRIEF_ARCHIVE_RE.test(headline)) {
+    const year = Number(headline.match(/\((19|20)(\d{2})\)\s*$/)?.slice(1).join("") ?? 0);
+    if (year && year < new Date().getFullYear()) return true;
+  }
   return false;
 }
 

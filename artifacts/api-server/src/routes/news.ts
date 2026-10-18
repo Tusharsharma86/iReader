@@ -4103,7 +4103,7 @@ type BriefItem = {
   sources: Source[];
   aiSummary: string; summaryFailed: boolean;
 };
-type BriefingSnapshot = { builtAt: number; windowHours: number; items: BriefItem[]; poolSize: number };
+type BriefingSnapshot = { builtAt: number; windowHours: number; items: BriefItem[]; poolSize: number; area?: string };
 const briefingCache = new Map<string, BriefingSnapshot>();
 const briefingFilling = new Set<string>();
 let briefingLastBatch = "";
@@ -4377,7 +4377,7 @@ async function buildBriefingRanking(
     if (carried > 0) log.warn({ carried, total: items.length }, "briefing: reused summaries from the previous build");
   }
 
-  return { builtAt: Date.now(), windowHours, items, poolSize: pool.length };
+  return { builtAt: Date.now(), windowHours, items, poolSize: pool.length, area };
 }
 
 /** PHASE 2 of the build: the AI summaries. Runs in the BACKGROUND, after the
@@ -4521,8 +4521,11 @@ function loadTrendsFromDisk(): void {
 async function buildTrend(
   windowHours: number, area: string, log: { warn: (o: unknown, m: string) => void },
 ): Promise<TrendEntry> {
-  const snap = await ensureBriefing(windowHours, log, false);
-  const scoped = area === "all" ? snap.items : snap.items.filter((i) => i.area === area);
+  // Read the area's own briefing, not a slice of the mixed one — otherwise
+  // the Tech trend would be drawn from the three tech stories that survived
+  // the mixed ranking rather than the thirty in the Tech briefing.
+  const snap = await ensureBriefing(windowHours, log, false, true, area);
+  const scoped = snap.items;
   if (scoped.length < 2) throw new Error("not enough stories in this category to read a trend");
 
   const areaLabel = area === "all" ? "across every subject area" : `in ${area}`;
@@ -4602,17 +4605,20 @@ router.get("/briefing", async (req, res) => {
   const raw = Number(req.query["window"] ?? 24);
   const windowHours = BRIEFING_WINDOWS.includes(raw) ? raw : 24;
   const refresh = req.query["refresh"] === "1";
+  const rawArea = String(req.query["area"] ?? "all").toLowerCase();
+  const area = rawArea === "all" || BRIEFING_AREAS.some((a) => a.key === rawArea) ? rawArea : "all";
   const day = new Date().toISOString().slice(0, 10);
-  const key = `${day}:${windowHours}`;
+  const key = `${day}:${windowHours}:${area}`;
 
   // summaries=0 → ranking only. Any summaries already written are still
   // returned, because withholding work already paid for would help nobody.
   const withSummaries = req.query["summaries"] !== "0";
   try {
-    const snap = await ensureBriefing(windowHours, req.log, refresh, withSummaries);
+    const snap = await ensureBriefing(windowHours, req.log, refresh, withSummaries, area);
     const filled = snap.items.filter((i) => i.aiSummary).length;
     res.json({
       ...snap,
+      area,
       cached: !refresh && Date.now() - snap.builtAt > 2000,
       // The client re-reads while this is false; summaries are still landing.
       complete: !withSummaries || (snap.items.length > 0 && filled === snap.items.length),

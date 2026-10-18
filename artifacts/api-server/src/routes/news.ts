@@ -4070,7 +4070,11 @@ const BRIEF_LIVE_BLOG_RE = /\blive (updates?|blog)\b|\bupdates? live\b/i;
 const BRIEF_ROUNDUP_RE = /^the\s+(best|top|worst)\b|^(best|top|worst)\s+\d|^the\s+\d+\s+(best|top|worst)\b|\b(best|top)\b.{0,30}\bof\s+20\d{2}\b/i;
 const BRIEF_ROUNDUP_ANY_RE = /\b(best .{0,24}(we|you|i)['’]?(ve|d)? (used|tried|tested|found)|our favou?rites?|we tried|roundup|gift guide|buyer['’]?s guide|everything you need to know|here['’]?s everything)\b/i;
 // First person about a product is a review column, not reporting.
-const BRIEF_REVIEW_RE = /\b(my (nightly|morning|daily|favou?rite)|makes my \w+|i (tried|tested|switched|spent)|hands.?on|review:)\b/i;
+// "review:" needs its own branch WITHOUT a trailing \b — a word boundary after
+// a colon can only match before a word character, and a headline colon is
+// always followed by a space, so "G2 review: Privacy-first smart glasses" and
+// "Projector Review: Looks Great" both slipped straight through.
+const BRIEF_REVIEW_RE = /\breview\s*:|\b(my (nightly|morning|daily|favou?rite)|makes my \w+|i (tried|tested|switched|spent)|hands.?on)\b/i;
 // "(2016)" — Hacker News and similar resurface old essays; publishedAt is the
 // repost date, so the window filter cannot see how old the piece really is.
 const BRIEF_ARCHIVE_RE = /\((19|20)\d{2}\)\s*$/;

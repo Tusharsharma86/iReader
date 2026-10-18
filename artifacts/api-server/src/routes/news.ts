@@ -4278,6 +4278,11 @@ async function briefingWaitForModel(preferFast: boolean, maxWaitMs: number): Pro
 async function buildBriefingRanking(
   windowHours: number, log: { warn: (o: unknown, m: string) => void },
   previous?: BriefingSnapshot,
+  // "all" ranks thirty stories across the six areas, capped at seven each so
+  // none dominates. A specific area instead ranks thirty stories FROM THAT
+  // AREA — a Tech briefing, not the tech slice of a mixed one. The cap is
+  // meaningless then and would truncate the list to seven.
+  area = "all",
 ): Promise<BriefingSnapshot> {
   // Cap each feed so one slow topic cannot hold the ranked list — which needs
   // no AI and should be near-instant — for 36s. But the cap must not be able
@@ -4286,7 +4291,8 @@ async function buildBriefingRanking(
   // complete briefing. So race the same promises twice: take what is ready
   // quickly, and if that leaves nothing at all, wait properly rather than
   // publishing an empty day.
-  const feedPromises = BRIEFING_AREAS.map((a) => ({ area: a.key, p: briefingFeedFor(a.topic) }));
+  const sourceAreas = area === "all" ? BRIEFING_AREAS : BRIEFING_AREAS.filter((a) => a.key === area);
+  const feedPromises = sourceAreas.map((a) => ({ area: a.key, p: briefingFeedFor(a.topic) }));
   const settleWithin = (ms: number) => Promise.all(
     feedPromises.map(async ({ area, p }) => {
       try {
@@ -4339,7 +4345,7 @@ async function buildBriefingRanking(
   for (const c of scored) {
     if (chosen.length >= BRIEFING_TARGET) break;
     const n = areaCount[c.area] ?? 0;
-    if (n >= BRIEFING_PER_AREA_CAP) continue;
+    if (area === "all" && n >= BRIEFING_PER_AREA_CAP) continue;
     areaCount[c.area] = n + 1;
     chosen.push(c);
   }
@@ -4456,15 +4462,18 @@ async function ensureBriefing(
   // who does not want them should not spend the tokens: this is the only way
   // the client toggle can actually save anything rather than just hiding text.
   withSummaries = true,
+  area = "all",
 ): Promise<BriefingSnapshot> {
   const day = new Date().toISOString().slice(0, 10);
-  const key = `${day}:${windowHours}`;
+  // Each area is its own briefing, cached separately and built only when
+  // asked for — six pre-built categories would be 180 summaries a window.
+  const key = `${day}:${windowHours}:${area}`;
   const hit = briefingCache.get(key);
   if (!refresh && hit && Date.now() - hit.builtAt < BRIEFING_TTL_MS) return hit;
 
   let p = briefingInflight.get(key);
   if (!p) {
-    p = buildBriefingRanking(windowHours, log, hit)
+    p = buildBriefingRanking(windowHours, log, hit, area)
       .then((snap) => {
         // An empty build is a failure, not a result. Caching one meant 0/0
         // read as "complete" and the briefing never recovered.

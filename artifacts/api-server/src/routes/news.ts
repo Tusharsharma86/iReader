@@ -2960,12 +2960,16 @@ Return JSON only:
   }
 }
 
-async function buildFreshFeed(topic: string): Promise<FeedItem[]> {
+async function buildFreshFeed(topic: string, skipRawCache = false): Promise<FeedItem[]> {
   if (topic === "breaking") return buildBreakingFeed();
 
   // Reuse cluster assignments when only scores need updating (saves RSS round-trip).
+  // skipRawCache is for Regenerate: this 10-minute layer sits UNDER the feed
+  // cache, so clearing only the outer one made a rebuild finish in 2s and
+  // return byte-identical articles. A reader pressing Regenerate is asking to
+  // go back to the sources, which means bypassing both.
   const rawEntry = rawFeedCache.get(topic);
-  if (rawEntry && Date.now() - rawEntry.at < RAW_FEED_TTL_MS) {
+  if (!skipRawCache && rawEntry && Date.now() - rawEntry.at < RAW_FEED_TTL_MS) {
     return buildMixedFeed(rawEntry.articles, rawEntry.groups, topic);
   }
 
@@ -4251,7 +4255,7 @@ async function briefingFeedFor(topic: string, fresh = false): Promise<FeedItem[]
   }
   let p = inflightFeed.get(topic);
   if (!p) {
-    p = buildFreshFeed(topic)
+    p = buildFreshFeed(topic, fresh)
       .then((feed) => { cache.set(topic, { at: Date.now(), data: feed }); return feed; })
       .finally(() => { inflightFeed.delete(topic); });
     inflightFeed.set(topic, p);

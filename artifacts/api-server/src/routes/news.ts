@@ -3194,13 +3194,33 @@ function recordSuperCriticalSent(): void {
   try { writeFileSync(SUPER_CRITICAL_RATE_PATH, JSON.stringify(superCriticalSentAt)); } catch {}
 }
 
+/** When the story actually broke: the EARLIEST timestamp across its sources.
+ *  The freshness gate used to read the cluster representative's publishedAt,
+ *  and feedToRepCards picks articles[0] — so a story that broke three days ago
+ *  and gained one new article today looked ten minutes old and notified. Age
+ *  belongs to the story, not to whichever article happens to lead the cluster. */
+function clusterBrokeAt(cluster: StoryCard): number {
+  const ts = [
+    (cluster as { publishedAt?: string }).publishedAt,
+    ...(cluster.sources ?? []).map((x) => x.publishedAt),
+  ]
+    .map((t) => (t ? Date.parse(t) : NaN))
+    .filter((t) => Number.isFinite(t));
+  return ts.length > 0 ? Math.min(...ts) : NaN;
+}
+
 function isSuperCriticalCluster(cluster: StoryCard): boolean {
   const timestamps = (cluster.sources ?? [])
     .map((s) => (s.publishedAt ? Date.parse(s.publishedAt) : NaN))
     .filter((t) => Number.isFinite(t));
   if (timestamps.length < SUPER_CRITICAL_MIN_SOURCES) return false;
   const span = Math.max(...timestamps) - Math.min(...timestamps);
-  return span <= SUPER_CRITICAL_WINDOW_MS;
+  if (span > SUPER_CRITICAL_WINDOW_MS) return false;
+  // The burst must be happening NOW. Without this, six outlets that piled onto
+  // a story last week still counted as super-critical the moment anything
+  // nudged the cluster back into the feed — which is exactly the "old alerts"
+  // complaint. Super-critical means "this is breaking", not "this once broke".
+  return Date.now() - Math.max(...timestamps) <= SUPER_CRITICAL_WINDOW_MS * 2;
 }
 
 function sensitivitySatisfied(
@@ -3294,8 +3314,9 @@ async function notifyOnNewClusters(
     const headline = s.headline ?? "";
     const summary = (s as { summary?: string }).summary ?? "";
     if (DEVANAGARI.test(headline) || DEVANAGARI.test(summary)) return false;
-    const ts = Date.parse((s as { publishedAt?: string }).publishedAt ?? "");
-    return Number.isFinite(ts) && Date.now() - ts < FRESH_MS;
+    // Age from when the story BROKE, not from its newest article.
+    const brokeAt = clusterBrokeAt(s);
+    return Number.isFinite(brokeAt) && Date.now() - brokeAt < FRESH_MS;
   });
 
   // No volume caps anywhere (per user request). Dedup + freshness still apply.

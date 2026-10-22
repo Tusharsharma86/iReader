@@ -4083,6 +4083,17 @@ const BRIEF_REVIEW_RE = /\breview\s*:|\b(my (nightly|morning|daily|favou?rite)|m
 // "(2016)" — Hacker News and similar resurface old essays; publishedAt is the
 // repost date, so the window filter cannot see how old the piece really is.
 const BRIEF_ARCHIVE_RE = /\((19|20)\d{2}\)\s*$/;
+// Wired-style product pieces put the year mid-headline: "Best Microsoft
+// Surface Laptop (2026): Which Models to Buy and Avoid", "Greenlight Family
+// Hub (2026): Finally, a Digital Wall Calendar". A "(year):" followed by a
+// subtitle is a review or buying guide, never a news report.
+const BRIEF_PRODUCT_GUIDE_RE = /\((19|20)\d{2}\)\s*:|\b(which|what)\b.{0,24}\b(to buy|should you buy)\b|\bbuy and avoid\b|\bmodels? to buy\b/i;
+// Spec-sheet launch posts announce themselves in numbers: "launched with
+// 185Hz display, RGB water cooling and 8,400mAh battery: check prices and top
+// features". Keyed on the spec tokens rather than the word "launch", so
+// "Meta launches an ad product" and "Tesla plans to sell Cybercabs" — real
+// business stories — are untouched.
+const BRIEF_SPEC_SHEET_RE = /\b\d[\d,.]*\s?(mah|nits|hz\b|mp camera|megapixel)|\b\d+\s?(gb|tb)\s?(ram|storage)\b|\bcheck (the )?prices?\b|\btop features\b|\bspecs?\b.{0,16}\b(leak|revealed|confirmed)\b|\b(price|pricing)\b.{0,20}\b(india|launch)\b/i;
 function briefIsJunk(headline: string): boolean {
   if (!headline) return true;
   if (BRIEF_DEVANAGARI_RE.test(headline)) return true;
@@ -4092,6 +4103,8 @@ function briefIsJunk(headline: string): boolean {
   if (BRIEF_LIVE_BLOG_RE.test(headline)) return true;
   if (BRIEF_ROUNDUP_RE.test(headline) || BRIEF_ROUNDUP_ANY_RE.test(headline)) return true;
   if (BRIEF_REVIEW_RE.test(headline)) return true;
+  if (BRIEF_PRODUCT_GUIDE_RE.test(headline)) return true;
+  if (BRIEF_SPEC_SHEET_RE.test(headline)) return true;
   if (BRIEF_ARCHIVE_RE.test(headline)) {
     const year = Number(headline.match(/\((19|20)(\d{2})\)\s*$/)?.slice(1).join("") ?? 0);
     if (year && year < new Date().getFullYear()) return true;
@@ -4205,10 +4218,16 @@ function briefWhy(factors: BriefFactor[], card: StoryCard, outlets: number, hour
 }
 
 /** Cached feed for one topic, built on demand — no HTTP hop. */
-async function briefingFeedFor(topic: string): Promise<FeedItem[]> {
+async function briefingFeedFor(topic: string, fresh = false): Promise<FeedItem[]> {
   const cached = cache.get(topic);
-  if (cached && Date.now() - cached.at < ttlFor(topic)) return cached.data;
-  if (cached) return cached.data; // stale is fine for a 6h briefing
+  // Regenerate used to re-rank the SAME cached articles, so it returned an
+  // identical list and looked like it had done nothing. With fresh=true the
+  // topic feed is rebuilt first, which is the only way a rebuild can pick up
+  // stories published since the last one.
+  if (!fresh) {
+    if (cached && Date.now() - cached.at < ttlFor(topic)) return cached.data;
+    if (cached) return cached.data; // stale is fine for a 6h briefing
+  }
   let p = inflightFeed.get(topic);
   if (!p) {
     p = buildFreshFeed(topic)
@@ -4216,7 +4235,10 @@ async function briefingFeedFor(topic: string): Promise<FeedItem[]> {
       .finally(() => { inflightFeed.delete(topic); });
     inflightFeed.set(topic, p);
   }
-  try { return await p; } catch { return []; }
+  // On a forced rebuild, an empty or failed fetch must fall back to whatever
+  // was cached — a refresh should never leave the reader with less.
+  try { const f = await p; return f.length > 0 ? f : (cached?.data ?? []); }
+  catch { return cached?.data ?? []; }
 }
 
 /** One AI call writes summaries for up to BRIEFING_BATCH_SIZE articles. */
@@ -4313,6 +4335,7 @@ async function briefingWaitForModel(preferFast: boolean, maxWaitMs: number): Pro
 async function buildBriefingRanking(
   windowHours: number, log: { warn: (o: unknown, m: string) => void },
   previous?: BriefingSnapshot,
+  fresh = false,
   // "all" ranks thirty stories across the six areas, capped at seven each so
   // none dominates. A specific area instead ranks thirty stories FROM THAT
   // AREA — a Tech briefing, not the tech slice of a mixed one. The cap is
@@ -4327,7 +4350,7 @@ async function buildBriefingRanking(
   // quickly, and if that leaves nothing at all, wait properly rather than
   // publishing an empty day.
   const sourceAreas = area === "all" ? BRIEFING_AREAS : BRIEFING_AREAS.filter((a) => a.key === area);
-  const feedPromises = sourceAreas.map((a) => ({ area: a.key, p: briefingFeedFor(a.topic) }));
+  const feedPromises = sourceAreas.map((a) => ({ area: a.key, p: briefingFeedFor(a.topic, fresh) }));
   const settleWithin = (ms: number) => Promise.all(
     feedPromises.map(async ({ area, p }) => {
       try {
@@ -4416,7 +4439,10 @@ async function buildBriefingRanking(
   // REPLACE a 30/30 briefing with a 12/30 one — a refresh made things worse.
   // Reusing by article id makes rebuilds monotonic and much cheaper: only the
   // genuinely new or still-blank stories cost an AI call.
-  if (previous) {
+  // On a forced rebuild, carry-over is skipped: the point of Regenerate is a
+  // fresh read, and reusing yesterday's sentence for a story whose facts have
+  // moved on is worse than spending the tokens again.
+  if (previous && !fresh) {
     const prevById = new Map(previous.items.filter((i) => i.aiSummary).map((i) => [i.id, i.aiSummary]));
     let carried = 0;
     for (const it of items) {
@@ -4523,7 +4549,7 @@ async function ensureBriefing(
 
   let p = briefingInflight.get(key);
   if (!p) {
-    p = buildBriefingRanking(windowHours, log, hit, area)
+    p = buildBriefingRanking(windowHours, log, hit, refresh, area)
       .then((snap) => {
         // An empty build is a failure, not a result. Caching one meant 0/0
         // read as "complete" and the briefing never recovered.

@@ -4093,7 +4093,7 @@ const BRIEF_PRODUCT_GUIDE_RE = /\((19|20)\d{2}\)\s*:|\b(which|what)\b.{0,24}\b(t
 // features". Keyed on the spec tokens rather than the word "launch", so
 // "Meta launches an ad product" and "Tesla plans to sell Cybercabs" — real
 // business stories — are untouched.
-const BRIEF_SPEC_SHEET_RE = /\b\d[\d,.]*\s?(mah|nits|hz\b|mp camera|megapixel)|\b\d+\s?(gb|tb)\s?(ram|storage)\b|\bcheck (the )?prices?\b|\btop features\b|\bspecs?\b.{0,16}\b(leak|revealed|confirmed)\b|\b(price|pricing)\b.{0,20}\b(india|launch)\b/i;
+const BRIEF_SPEC_SHEET_RE = /\b\d[\d,.]*\s?(mah|nits|hz\b|mp camera|megapixel)|\b\d+\s?(gb|tb)\s?(ram|storage)\b|\bcheck (the )?prices?\b|\btop features\b|\bspecs?\b.{0,16}\b(leak\w*|reveal\w*|confirm\w*)\b|\b(price|pricing)\b.{0,20}\b(india|launch)\b/i;
 function briefIsJunk(headline: string): boolean {
   if (!headline) return true;
   if (BRIEF_DEVANAGARI_RE.test(headline)) return true;
